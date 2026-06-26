@@ -1,0 +1,32 @@
+---
+description: Code style standards for this project
+alwaysApply: true
+---
+
+# Code Style
+
+## Always use braces for control flow
+
+Use braces for every `if`, `else`, `for`, `while`, and `do` block, even when the body is a single statement. Always keep the closing brace in its own line.
+
+```typescript
+// ✅ GOOD
+if (condition) {
+  doSomething()
+}
+
+for (const item of items) {
+  process(item)
+}
+
+while (running) {
+  tick()
+}
+
+// ❌ BAD
+if (condition)
+  doSomething()
+
+for (const item of items)
+  process(item)
+```

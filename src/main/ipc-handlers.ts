@@ -1,0 +1,1423 @@
+import { ipcMain, dialog, BrowserWindow, safeStorage, app } from 'electron'
+import { randomUUID } from 'crypto'
+import { join } from 'path'
+import { readFileSync, writeFileSync, existsSync } from 'fs'
+import * as db from './database'
+import * as sf from './salesforce'
+import * as recent from './recentDbs'
+import * as scriptRunner from './script-runner'
+import { scheduler } from './job-scheduler'
+import {
+  sendMessage,
+  listModels,
+  buildSystemPrompt,
+  DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+  getActiveModel,
+  EXECUTE_SQL_TOOL,
+  EXECUTE_DDL_TOOL,
+  DEFAULT_SETTINGS,
+  type LlmSettings,
+  type ChatMessage
+} from './llm'
+import type {
+  ExtractJobInput,
+  WritebackJobInput,
+  FieldMapping,
+  PasswordCreds,
+  JobProgress,
+  JobResult,
+  FieldDescriptor,
+  SavedScriptInput,
+  ScriptLog,
+  ScriptComplete,
+  ScriptProgress,
+  TableInfo
+} from '../shared/types'
+
+function buildDdlSchema(tables: TableInfo[]): string {
+  return tables
+    .map(t => {
+      const pkCols = t.columns.filter(c => c.primaryKey)
+      const colLines = t.columns.map(c => {
+        let def = `  "${c.name}" ${c.type || 'TEXT'}`
+        if (c.notNull) {
+          def += ' NOT NULL'
+        }
+        if (c.defaultValue !== null) {
+          def += ` DEFAULT ${c.defaultValue}`
+        }
+        if (pkCols.length === 1 && c.primaryKey) {
+          def += ' PRIMARY KEY'
+        }
+        return def
+      })
+
+      if (pkCols.length > 1) {
+        colLines.push(`  PRIMARY KEY (${pkCols.map(c => `"${c.name}"`).join(', ')})`)
+      }
+
+      const keyword = t.type === 'view' ? 'VIEW' : 'TABLE'
+      let ddl = `CREATE ${keyword} "${t.name}" (\n${colLines.join(',\n')}\n);`
+
+      if (t.type === 'table') {
+        ddl += `\n-- ${t.rowCount.toLocaleString()} rows`
+      }
+
+      for (const idx of t.indexes) {
+        const unique = idx.unique ? 'UNIQUE INDEX' : 'INDEX'
+        ddl += `\n-- ${unique} "${idx.name}" ON (${idx.columns.map(c => `"${c}"`).join(', ')})`
+      }
+
+      return ddl
+    })
+    .join('\n\n')
+}
+
+const activeJobs = new Map<string, AbortController>()
+
+// Resolvers for in-flight DDL/DML confirmation requests, keyed by conversationId.
+// Only one confirmation can be pending per conversation at a time.
+const pendingConfirms = new Map<string, (approved: boolean) => void>()
+
+// ── Per-run writeback state ──────────────────────────────────────────────────
+// Stores failed-row data so the renderer can browse results and retry without
+// ever holding millions of rows in the renderer process.
+interface WbFailedEntry { message: string; row: unknown[] }
+interface WbRunState {
+  sql: string
+  columns: string[]
+  totalRows: number
+  failedRows: Map<number, WbFailedEntry>  // key = absolute row index
+  rowIds: Map<number, string>             // key = absolute row index, value = SF record Id (inserts only)
+  // For REST insert jobs: one value→sfId map per unique/externalId SF field that was inserted.
+  // Populated during the job so no re-query is needed when writing IDs back.
+  uniqueKeyMaps: Map<string, Map<unknown, string>>  // sfFieldName → (fieldValue → sfId)
+  uniqueKeyFields: Array<{ sfField: string; sqlCol: string; label: string }>  // ordered list of tracked fields
+}
+const wbRunStates = new Map<string, WbRunState>()
+const WB_RUN_STATE_CAP = 5
+
+function addWbRunState(runId: string, state: WbRunState): void {
+  wbRunStates.set(runId, state)
+  if (wbRunStates.size > WB_RUN_STATE_CAP) {
+    // Map preserves insertion order — first key is always the oldest
+    const evictedId = wbRunStates.keys().next().value as string
+    wbRunStates.delete(evictedId)
+    send('writeback:run-evicted', evictedId)
+  }
+}
+
+function mapRowToRecord(
+  row: unknown[],
+  columns: string[],
+  activeMappings: FieldMapping[]
+): Record<string, unknown> {
+  const rec: Record<string, unknown> = {}
+  for (const m of activeMappings) {
+    const colIdx = columns.indexOf(m.sqlCol)
+    if (colIdx >= 0) rec[m.sfField] = row[colIdx] ?? null
+  }
+  return rec
+}
+
+// Tracks an in-flight sf:list-cli-orgs call so tryAutoConnectSF can wait for it.
+// listCliOrgs runs `sf org list` which may refresh tokens; auto-connect must not
+// race against it or it may pick up a stale/expired token.
+let pendingListOrgs: Promise<unknown> | null = null
+
+function getMainWindow(): BrowserWindow | null {
+  return BrowserWindow.getAllWindows()[0] ?? null
+}
+
+const ALLOWED_CSV_EXTENSIONS = new Set(['.csv', '.tsv', '.txt', '.dat'])
+
+function assertCsvPath(filePath: string): void {
+  const ext = filePath.slice(filePath.lastIndexOf('.')).toLowerCase()
+  if (!ALLOWED_CSV_EXTENSIONS.has(ext)) {
+    throw new Error(`File type not allowed: only .csv, .tsv, and .txt files may be imported.`)
+  }
+}
+
+function send(channel: string, data: unknown): void {
+  getMainWindow()?.webContents.send(channel, data)
+}
+
+// Fire-and-forget: attempts to connect to the stored SF CLI org after a DB is
+// opened.  Progress is communicated entirely via IPC events so the renderer is
+// never blocked.
+function autoConnectAfterDbOpen(): void {
+  if (sf.isConnected()) return
+
+  const username = db.getSetting('sf_cli_username')
+  if (!username) return   // No stored org — nothing to auto-connect, no spinner
+
+  // Tell the renderer to show the connecting spinner.
+  send('sf:auto-connect-start', null)
+
+  ;(async () => {
+    try {
+      // Wait for any in-flight sf org list to finish before touching credentials.
+      // If no detection is running yet, kick one off now so tokens are fresh.
+      if (!pendingListOrgs) {
+        pendingListOrgs = sf.listCliOrgs().finally(() => { pendingListOrgs = null })
+      }
+      await pendingListOrgs
+      const org = await sf.connectCliOrg(username)
+      send('sf:auto-connected', org)
+    } catch (err) {
+      send('sf:auto-connect-failed', {
+        username,
+        message: err instanceof Error ? err.message : String(err)
+      })
+    }
+  })()
+}
+
+// ── Script-callable job result types ─────────────────────────────────────────
+
+export interface WritebackScriptResult {
+  _runId: string
+  status: 'success' | 'partial' | 'error'
+  rowsSucceeded: number
+  rowsFailed: number
+}
+
+export interface WritebackFailedRowsResult {
+  failedRows: Array<{ index: number; message: string; row: Record<string, unknown> }>
+  keyFields: Array<{ sfField: string; sqlCol: string; label: string }>
+}
+
+// ── Awaitable job-run helpers ─────────────────────────────────────────────────
+// Both functions are called by the IPC handlers (fire-and-forget) and by the
+// script executor path (awaited for full result).  They register the run with
+// the scheduler so the MAX_PARALLEL limit is respected globally.
+
+async function startExtractRun(jobId: number, runId: string): Promise<JobResult> {
+  const job = db.listExtractJobs().find((j) => j.id === jobId)
+  if (!job) throw new Error(`Extract job ${jobId} not found`)
+
+  const abortCtrl = new AbortController()
+  activeJobs.set(runId, abortCtrl)
+  scheduler.registerRun('extract', jobId, runId)
+  const resultPromise = scheduler.awaitCompletion(runId)
+
+  const runHistId = db.startRunHistory(jobId)
+  const startTime = Date.now()
+  let lastFetched = 0
+
+  if (job.soqlQuery) {
+    // ── Raw SOQL mode with staging table ──────────────────────────────────
+    const stagingName = `_sf_bridge_soql_stage_${Date.now()}`
+    const columnTypes = new Map<string, string>()
+    const pendingCols = new Set<string>()
+    let stagingCreated = false
+
+    function inferSqliteType(v: unknown): string {
+      if (typeof v === 'boolean') return 'INTEGER'
+      if (typeof v === 'number') return 'REAL'
+      return 'TEXT'
+    }
+
+    function updateColumnTypes(records: Record<string, unknown>[]): void {
+      let allResolved = false
+      for (const record of records) {
+        if (allResolved) break
+        for (const col of Object.keys(record)) {
+          if (!columnTypes.has(col) && !pendingCols.has(col)) {
+            pendingCols.add(col)
+          }
+        }
+        const resolved: string[] = []
+        for (const col of pendingCols) {
+          const val = record[col]
+          if (val === null || val === undefined) continue
+          columnTypes.set(col, inferSqliteType(val))
+          resolved.push(col)
+        }
+        for (const col of resolved) pendingCols.delete(col)
+        allResolved = pendingCols.size === 0 && columnTypes.size > 0
+      }
+    }
+
+    ;(async () => {
+      try {
+        const total = await sf.extractSoql(
+          job.soqlQuery!,
+          (fetched, total) => {
+            const elapsed = (Date.now() - startTime) / 1000
+            const rps = elapsed > 0 ? Math.round(fetched / elapsed) : 0
+            lastFetched = fetched
+            send('job:progress', {
+              runId, type: 'extract', fetched, total: total ?? undefined, rps
+            } as JobProgress)
+          },
+          (records) => {
+            if (records.length === 0) return
+            updateColumnTypes(records)
+            if (!stagingCreated) {
+              db.createStagingTable(stagingName, Object.keys(records[0]))
+              stagingCreated = true
+            }
+            db.insertRows(stagingName, Object.keys(records[0]), records)
+          },
+          abortCtrl.signal
+        )
+
+        if (stagingCreated) {
+          for (const col of pendingCols) columnTypes.set(col, 'TEXT')
+          db.promoteSoqlStagingTable(stagingName, job.destTable, columnTypes, job.writeMode)
+          if (job.additionalIndexes?.length) {
+            try { db.ensureColumnIndexes(job.destTable, job.additionalIndexes) } catch { /* ignore */ }
+          }
+        } else if (job.writeMode === 'replace') {
+          db.dropTableIfExists(job.destTable)
+        }
+
+        db.finishRunHistory(runHistId, 'success', total, Date.now() - startTime)
+        const result: JobResult = { runId, type: 'extract', status: 'success', rowsLoaded: total }
+        send('job:complete', result)
+        scheduler.notifyComplete(result)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (stagingCreated) db.dropTableIfExists(stagingName)
+        db.finishRunHistory(runHistId, 'error', lastFetched, Date.now() - startTime, msg)
+        const result: JobResult = { runId, type: 'extract', status: 'error', errorMsg: msg }
+        send('job:complete', result)
+        scheduler.notifyComplete(result)
+      } finally {
+        activeJobs.delete(runId)
+      }
+    })()
+  } else {
+    // ── Structured mode ────────────────────────────────────────────────────
+    const fields = await sf.describeObject(job.sfObject)
+    const selectedFieldMeta = fields.filter((f) => job.fields.includes(f.name))
+
+    db.createTableFromFields(job.destTable, selectedFieldMeta as FieldDescriptor[], job.writeMode)
+
+    const indexCols = [
+      ...selectedFieldMeta.filter((f) => f.unique || f.externalId).map((f) => f.name),
+      ...(selectedFieldMeta.some((f) => f.name === 'Id') ? ['Id'] : []),
+      ...(job.additionalIndexes ?? [])
+    ]
+    if (indexCols.length > 0) {
+      db.ensureColumnIndexes(job.destTable, indexCols)
+    }
+
+    ;(async () => {
+      try {
+        const total = await sf.extractRecords(
+          {
+            sfObject: job.sfObject,
+            fields: [...job.fields, ...(job.customExpressions ?? [])],
+            whereClause: job.whereClause,
+            rowLimit: job.rowLimit
+          },
+          (fetched, total) => {
+            const elapsed = (Date.now() - startTime) / 1000
+            const rps = elapsed > 0 ? Math.round(fetched / elapsed) : 0
+            lastFetched = fetched
+            const progress: JobProgress = { runId, type: 'extract', fetched, total: total ?? undefined, rps }
+            send('job:progress', progress)
+          },
+          (records) => {
+            db.insertRows(job.destTable, Object.keys(records[0] || {}), records)
+          },
+          abortCtrl.signal
+        )
+        db.finishRunHistory(runHistId, 'success', total, Date.now() - startTime)
+        const result: JobResult = { runId, type: 'extract', status: 'success', rowsLoaded: total }
+        send('job:complete', result)
+        scheduler.notifyComplete(result)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        db.finishRunHistory(runHistId, 'error', lastFetched, Date.now() - startTime, msg)
+        const result: JobResult = { runId, type: 'extract', status: 'error', errorMsg: msg }
+        send('job:complete', result)
+        scheduler.notifyComplete(result)
+      } finally {
+        activeJobs.delete(runId)
+      }
+    })()
+  }
+
+  return resultPromise
+}
+
+async function startWritebackRun(jobId: number, runId: string): Promise<WritebackScriptResult> {
+  const job = db.listWritebackJobs().find((j) => j.id === jobId)
+  if (!job) throw new Error(`Writeback job ${jobId} not found`)
+
+  const sql = job.sqlQuery.replace(/LIMIT\s+\d+/i, '')
+  const { columns } = db.queryPage(sql, 0, 0)
+
+  const abortCtrl = new AbortController()
+  activeJobs.set(runId, abortCtrl)
+
+  const state: WbRunState = {
+    sql, columns, totalRows: 0,
+    failedRows: new Map(),
+    rowIds: new Map(),
+    uniqueKeyMaps: new Map(),
+    uniqueKeyFields: []
+  }
+  addWbRunState(runId, state)
+  scheduler.registerRun('writeback', jobId, runId)
+  const completionPromise = scheduler.awaitCompletion(runId)
+
+  const runHistId = db.startWritebackRunHistory(jobId, job.useBulkApi ?? false)
+  const activeMappings = job.operation === 'delete'
+    ? job.fieldMap.filter((m) => !m.excluded && m.sfField === 'Id')
+    : job.fieldMap.filter((m) => !m.excluded)
+  let parsedHeaders: Record<string, string> | undefined
+  if (job.customHeaders) {
+    try { parsedHeaders = JSON.parse(job.customHeaders) } catch { parsedHeaders = undefined }
+  }
+  const distributionSfFields = job.distributionKey?.length
+    ? job.distributionKey
+        .map((sqlCol) => activeMappings.find((m) => m.sqlCol === sqlCol)?.sfField)
+        .filter((f): f is string => Boolean(f))
+    : null
+
+  const sfOpts = {
+    sfObject: job.sfObject,
+    operation: job.operation,
+    externalIdField: job.externalIdField,
+    batchSize: job.batchSize ?? 200,
+    threads: job.threads ?? 1,
+    distributionKey: distributionSfFields?.length ? distributionSfFields : null,
+    customHeaders: parsedHeaders,
+    useBulkApi: job.useBulkApi
+  }
+
+  const CHUNK = 10_000
+
+  if (job.useBulkApi) {
+    // ── Bulk API 2.0 path ──────────────────────────────────────────────────
+    async function* makeChunks(): AsyncGenerator<Record<string, unknown>[]> {
+      let offset = 0
+      while (!abortCtrl.signal.aborted) {
+        const { rows } = db.queryPage(sql, offset, CHUNK)
+        if (rows.length === 0) break
+        yield rows.map((row) => mapRowToRecord(row as unknown[], columns, activeMappings))
+        offset += rows.length
+        if (rows.length < CHUNK) break
+      }
+    }
+
+    ;(async () => {
+      const startTime = Date.now()
+      try {
+        const result = await sf.writebackBulk2(
+          sfOpts,
+          makeChunks(),
+          (progress) => {
+            const elapsed = (Date.now() - startTime) / 1000
+            send('job:progress', {
+              runId,
+              type: 'writeback',
+              phase: progress.phase,
+              bulkUploaded: progress.uploaded,
+              succeeded: progress.phase === 'processing'
+                ? (progress.processed ?? 0) - (progress.failed ?? 0)
+                : undefined,
+              failed: progress.failed,
+              total: progress.phase === 'uploading' ? progress.uploaded : progress.processed,
+              jobState: progress.jobState,
+              elapsed
+            } as JobProgress)
+          },
+          abortCtrl.signal
+        )
+
+        state.columns = result.sfColumns
+        state.totalRows = result.succeeded + result.failed
+        for (const e of result.failedEntries) {
+          state.failedRows.set(e.index, { message: e.message, row: e.row })
+        }
+        for (const e of result.insertedIds) {
+          state.rowIds.set(e.index, e.id)
+        }
+
+        const histStatus = result.failed === 0 ? 'success'
+          : result.succeeded === 0 ? 'error' : 'partial'
+        db.finishWritebackRunHistory(runHistId, histStatus, state.totalRows, result.succeeded, result.failed, Date.now() - startTime)
+        const jobResult: JobResult = {
+          runId, type: 'writeback', status: histStatus,
+          rowsSucceeded: result.succeeded, rowsFailed: result.failed,
+          columns: result.sfColumns
+        }
+        send('job:complete', jobResult)
+        scheduler.notifyComplete(jobResult)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        db.finishWritebackRunHistory(runHistId, 'error', 0, 0, 0, Date.now() - startTime, msg)
+        const jobResult: JobResult = { runId, type: 'writeback', status: 'error', errorMsg: msg }
+        send('job:complete', jobResult)
+        scheduler.notifyComplete(jobResult)
+      } finally {
+        activeJobs.delete(runId)
+      }
+    })()
+  } else {
+    // ── REST Collections API path ──────────────────────────────────────────
+    if (job.operation === 'insert') {
+      sf.describeObject(job.sfObject).then((fields) => {
+        const tracked = activeMappings
+          .map((m) => {
+            const fd = fields.find((f) => f.name === m.sfField)
+            return fd && (fd.unique || fd.externalId) ? { sfField: m.sfField, sqlCol: m.sqlCol, label: fd.label } : null
+          })
+          .filter((x): x is { sfField: string; sqlCol: string; label: string } => x !== null)
+        for (const t of tracked) {
+          state.uniqueKeyMaps.set(t.sfField, new Map())
+        }
+        state.uniqueKeyFields = tracked
+      }).catch(() => { /* non-fatal */ })
+    }
+
+    ;(async () => {
+      let succeeded = 0
+      let failed = 0
+      let processedRows = 0
+      let inFlight = 0
+      const startTime = Date.now()
+      try {
+        let chunkOffset = 0
+        let { rows } = db.queryPage(sql, chunkOffset, CHUNK)
+
+        while (rows.length > 0 && !abortCtrl.signal.aborted) {
+          const currentRows = rows
+          const currentChunkOffset = chunkOffset
+          const records = currentRows.map((row) => mapRowToRecord(row as unknown[], columns, activeMappings))
+          chunkOffset += currentRows.length
+
+          const sendPromise = sf.writebackBatch(
+            sfOpts,
+            records,
+            (batchSize) => {
+              inFlight += batchSize
+              const elapsed = (Date.now() - startTime) / 1000
+              const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
+              send('job:progress', {
+                runId, type: 'writeback', succeeded, failed,
+                total: succeeded + failed, rps, inFlight
+              } as JobProgress)
+            },
+            (batchResults) => {
+              inFlight -= batchResults.length
+              for (const r of batchResults) {
+                const absIdx = currentChunkOffset + r.index
+                if (r.success) {
+                  succeeded++
+                  if (r.id) {
+                    state.rowIds.set(absIdx, r.id)
+                    for (const [sfField, valueMap] of state.uniqueKeyMaps) {
+                      const val = records[r.index][sfField]
+                      if (val != null) valueMap.set(val, r.id)
+                    }
+                  }
+                } else {
+                  failed++
+                  state.failedRows.set(absIdx, {
+                    message: r.errors[0] ?? '',
+                    row: currentRows[r.index] as unknown[]
+                  })
+                }
+              }
+              const elapsed = (Date.now() - startTime) / 1000
+              const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
+              send('job:progress', {
+                runId,
+                type: 'writeback',
+                succeeded,
+                failed,
+                total: succeeded + failed,
+                rps,
+                inFlight,
+                rowStatuses: batchResults.map((r) => ({
+                  index: currentChunkOffset + r.index,
+                  status: r.success ? 'success' : 'error',
+                  message: r.errors[0],
+                  id: r.id
+                }))
+              } as JobProgress)
+            },
+            abortCtrl.signal
+          )
+
+          const nextFetch = currentRows.length < CHUNK
+            ? { rows: [] as unknown[][] }
+            : db.queryPage(sql, chunkOffset, CHUNK)
+
+          await sendPromise
+
+          processedRows = chunkOffset
+          rows = nextFetch.rows
+          if (currentRows.length < CHUNK) break
+        }
+
+        const status = failed === 0 ? 'success' : succeeded === 0 ? 'error' : 'partial'
+        db.finishWritebackRunHistory(runHistId, status, processedRows, succeeded, failed, Date.now() - startTime)
+        const jobResult: JobResult = { runId, type: 'writeback', status, rowsSucceeded: succeeded, rowsFailed: failed }
+        send('job:complete', jobResult)
+        scheduler.notifyComplete(jobResult)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        db.finishWritebackRunHistory(runHistId, 'error', 0, 0, 0, Date.now() - startTime, msg)
+        const jobResult: JobResult = { runId, type: 'writeback', status: 'error', errorMsg: msg }
+        send('job:complete', jobResult)
+        scheduler.notifyComplete(jobResult)
+      } finally {
+        activeJobs.delete(runId)
+      }
+    })()
+  }
+
+  // Await the basic completion signal from the scheduler; row-level data stays
+  // in wbRunStates and is fetched lazily via getFailedRowsByRunId if needed.
+  const basicResult = await completionPromise
+  return {
+    _runId: runId,
+    status: basicResult.status as 'success' | 'partial' | 'error',
+    rowsSucceeded: basicResult.rowsSucceeded ?? 0,
+    rowsFailed: basicResult.rowsFailed ?? 0
+  }
+}
+
+// ── Module-level job executors (used by both IPC handlers and script runner) ──
+
+function runExtractByName(name: string): Promise<JobResult> {
+  const job = db.listExtractJobs().find((j) => j.name === name)
+  if (!job) throw new Error(`Download job "${name}" not found`)
+  // Pre-generate runId so the same value is used in startFn and in the
+  // external event emitted to the renderer for UI badge synchronisation.
+  const runId = randomUUID()
+  return scheduler.schedule('extract', job.id, name, runId, () => startExtractRun(job.id, runId))
+}
+
+function runWritebackByName(name: string): Promise<WritebackScriptResult> {
+  const job = db.listWritebackJobs().find((j) => j.name === name)
+  if (!job) throw new Error(`Writeback job "${name}" not found`)
+  const runId = randomUUID()
+  return scheduler.schedule('writeback', job.id, name, runId, () => startWritebackRun(job.id, runId))
+}
+
+function runUpdateTableWithIds(
+  runId: string,
+  sfKeyField: string,
+  targetTable: string,
+  tableKeyCol: string,
+  idColumnName: string
+): { updated: number; idColCreated: boolean; indexCreated: boolean } {
+  const state = wbRunStates.get(runId)
+  if (!state) throw new Error('Run state not found — the run data may have been cleared.')
+  const valueMap = state.uniqueKeyMaps.get(sfKeyField)
+  if (!valueMap || valueMap.size === 0) throw new Error('No key values stored for that field.')
+  const pairs = [...valueMap.entries()].map(([key, id]) => ({ key, id }))
+  return db.updateTableWithIds(targetTable, tableKeyCol, idColumnName, pairs)
+}
+
+function getFailedRowsByRunId(runId: string): WritebackFailedRowsResult {
+  const state = wbRunStates.get(runId)
+  if (!state) throw new Error('Run state not found — the run data may have been cleared.')
+  return {
+    failedRows: [...state.failedRows.entries()].map(([index, data]) => ({
+      index,
+      message: data.message,
+      row: Object.fromEntries(state.columns.map((c, i) => [c, (data.row as unknown[])[i]]))
+    })),
+    keyFields: state.uniqueKeyFields ?? []
+  }
+}
+
+export function registerIpcHandlers(): void {
+  // ── Database ────────────────────────────────────────────────────────────────
+
+  ipcMain.handle('db:open', async (_e, filePath?: string) => {
+    if (filePath) {
+      // A path is only supplied when reopening a recent database.  Validate it
+      // against the stored list so the renderer cannot open arbitrary paths.
+      const isKnownRecent = recent.listRecentDatabases().some((r) => r.path === filePath)
+      if (!isKnownRecent) {
+        filePath = undefined  // fall through to the file-picker below
+      }
+    }
+    if (!filePath) {
+      const result = await dialog.showOpenDialog({
+        title: 'Open SQLite Database',
+        filters: [{ name: 'SQLite', extensions: ['sqlite', 'db', 'sqlite3'] }],
+        properties: ['openFile', 'createDirectory']
+      })
+      if (result.canceled || result.filePaths.length === 0) return null
+      filePath = result.filePaths[0]
+    }
+    const opened = db.openDatabase(filePath)
+    recent.addRecentDatabase(filePath)
+    // Return the opened DB immediately so the UI is not blocked by SF CLI detection.
+    // Auto-connect runs in the background; result arrives via the sf:auto-connected event.
+    autoConnectAfterDbOpen()
+    return opened
+  })
+
+  ipcMain.handle('db:open-new', async () => {
+    const result = await dialog.showSaveDialog({
+      title: 'Create SQLite Database',
+      filters: [{ name: 'SQLite', extensions: ['sqlite', 'db'] }]
+    })
+    if (result.canceled || !result.filePath) return null
+    const opened = db.openDatabase(result.filePath)
+    recent.addRecentDatabase(result.filePath)
+    autoConnectAfterDbOpen()
+    return opened
+  })
+
+  ipcMain.handle('db:recent-list', () => recent.listRecentDatabases())
+  ipcMain.handle('db:recent-remove', (_e, filePath: string) => recent.removeRecentDatabase(filePath))
+
+  ipcMain.handle('db:info', () => db.getDatabaseInfo())
+
+  ipcMain.handle('db:query', (_e, sql: string) => db.executeQuery(sql))
+
+  ipcMain.handle('db:export-csv', async (_e, csvContent: string) => {
+    const result = await dialog.showSaveDialog({
+      title: 'Export to CSV',
+      filters: [{ name: 'CSV', extensions: ['csv'] }],
+      defaultPath: 'export.csv'
+    })
+    if (result.canceled || !result.filePath) return null
+    writeFileSync(result.filePath, csvContent, 'utf-8')
+    return result.filePath
+  })
+
+  ipcMain.handle('db:rename-table', (_e, oldName: string, newName: string) =>
+    db.renameTable(oldName, newName)
+  )
+
+  ipcMain.handle('db:rename-column', (_e, table: string, oldName: string, newName: string) =>
+    db.renameColumn(table, oldName, newName)
+  )
+
+  ipcMain.handle('db:drop-table', (_e, name: string) => db.dropTable(name))
+
+  ipcMain.handle('csv:pick-and-preview', async () => {
+    const result = await dialog.showOpenDialog({
+      title: 'Select CSV file',
+      filters: [{ name: 'CSV', extensions: ['csv', 'tsv', 'txt'] }],
+      properties: ['openFile']
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return db.previewCsvFile(result.filePaths[0])
+  })
+
+  ipcMain.handle('csv:preview-path', (_e, filePath: string) => {
+    assertCsvPath(filePath)
+    return db.previewCsvFile(filePath)
+  })
+
+  ipcMain.handle('csv:import', (_e, filePath: string, tableName: string, ifExists: 'replace' | 'append') => {
+    assertCsvPath(filePath)
+    return db.importCsvFile(filePath, tableName, ifExists)
+  })
+
+  ipcMain.handle('csv:import-text', (_e, csvContent: string, tableName: string, ifExists: 'replace' | 'append') =>
+    db.importCsvText(csvContent, tableName, ifExists)
+  )
+
+  // ── Saved Queries ────────────────────────────────────────────────────────────
+
+  ipcMain.handle('query:list', () => db.listSavedQueries())
+  ipcMain.handle('query:save', (_e, q) => db.saveQuery(q))
+  ipcMain.handle('query:delete', (_e, id: number) => db.deleteQuery(id))
+  ipcMain.handle('query:reorder', (_e, ids: number[]) => db.reorderQueries(ids))
+
+  // ── Salesforce ───────────────────────────────────────────────────────────────
+
+  ipcMain.handle('sf:connect-password', (_e, creds: PasswordCreds) =>
+    sf.connectPassword(creds)
+  )
+  ipcMain.handle('sf:connect-oauth', (_e, clientId: string) =>
+    sf.connectOAuth(clientId)
+  )
+  ipcMain.handle('sf:disconnect', () => sf.disconnectSalesforce())
+
+  ipcMain.handle('app:get-connection-status', () => ({
+    sfOrg: sf.getOrgInfo(),
+    dbPath: db.getPath()
+  }))
+  ipcMain.handle('sf:list-cli-orgs', () => {
+    pendingListOrgs = sf.listCliOrgs().finally(() => { pendingListOrgs = null })
+    return pendingListOrgs
+  })
+  ipcMain.handle('sf:connect-cli-org', async (_e, username: string) => {
+    const org = await sf.connectCliOrg(username)
+    if (db.isOpen()) db.setSetting('sf_cli_username', username)
+    return org
+  })
+  ipcMain.handle('sf:list-objects', () => sf.listObjects())
+  ipcMain.handle('sf:describe', (_e, name: string) => sf.describeObject(name))
+  ipcMain.handle('sf:soql', (_e, soql: string) => sf.runSoqlQuery(soql))
+
+  // ── Extract Jobs ─────────────────────────────────────────────────────────────
+
+  ipcMain.handle('extract:list', () => db.listExtractJobs())
+  ipcMain.handle('extract:save', (_e, job: ExtractJobInput) => db.saveExtractJob(job))
+  ipcMain.handle('extract:delete', (_e, jobId: number) => db.deleteExtractJob(jobId))
+  ipcMain.handle('extract:duplicate', (_e, jobId: number) => db.duplicateExtractJob(jobId))
+  ipcMain.handle('extract:history', (_e, jobId: number) => db.getRunHistory(jobId))
+
+  ipcMain.handle('extract:start', async (_e, jobId: number): Promise<string> => {
+    const runId = randomUUID()
+    startExtractRun(jobId, runId)  // fire-and-forget; scheduler.registerRun called inside
+    return runId
+  })
+
+  // ── Write-back Jobs ──────────────────────────────────────────────────────────
+
+  ipcMain.handle('writeback:list', () => db.listWritebackJobs())
+  ipcMain.handle('writeback:save', (_e, job: WritebackJobInput) => db.saveWritebackJob(job))
+  ipcMain.handle('writeback:delete', (_e, jobId: number) => db.deleteWritebackJob(jobId))
+  ipcMain.handle('writeback:duplicate', (_e, jobId: number) => db.duplicateWritebackJob(jobId))
+  ipcMain.handle('writeback:history', (_e, jobId: number) => db.getWritebackRunHistory(jobId))
+  ipcMain.handle('writeback:preview', (_e, sql: string) => db.previewWritebackQuery(sql))
+
+  // ── Row-level access for the renderer (avoids shipping millions of rows upfront) ──
+  ipcMain.handle('writeback:row-count', (_e, sql: string) => db.queryRowCount(sql))
+  ipcMain.handle('writeback:page', (_e, sql: string, offset: number, limit: number) =>
+    db.queryPage(sql, offset, limit)
+  )
+  ipcMain.handle('writeback:failed-rows', (_e, runId: string) => {
+    const state = wbRunStates.get(runId)
+    if (!state) return []
+    return [...state.failedRows.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([index, data]) => ({ index, message: data.message, row: data.row }))
+  })
+
+  // Returns a { [absoluteRowIndex]: sfId } map for one page — insert operations only.
+  ipcMain.handle('writeback:page-ids', (_e, runId: string, offset: number, limit: number) => {
+    const state = wbRunStates.get(runId)
+    if (!state) return {}
+    const result: Record<number, string> = {}
+    for (let i = offset; i < offset + limit; i++) {
+      const id = state.rowIds.get(i)
+      if (id) result[i] = id
+    }
+    return result
+  })
+
+  // Returns the unique/externalId key fields and their stored value counts for the modal.
+  ipcMain.handle('writeback:get-id-update-info', (_e, runId: string) => {
+    const state = wbRunStates.get(runId)
+    if (!state) return null
+    return {
+      rowIdCount: state.rowIds.size,
+      keyFields: state.uniqueKeyFields.map((f) => ({
+        sfField: f.sfField,
+        sqlCol: f.sqlCol,
+        label: f.label,
+        valueCount: state.uniqueKeyMaps.get(f.sfField)?.size ?? 0
+      }))
+    }
+  })
+
+  // Looks up (key value → sfId) from the in-memory uniqueKeyMaps — no re-query needed.
+  ipcMain.handle(
+    'writeback:update-table-ids',
+    (
+      _e,
+      runId: string,
+      sfKeyField: string,
+      targetTable: string,
+      tableKeyCol: string,
+      idColumnName: string
+    ) => {
+      const state = wbRunStates.get(runId)
+      if (!state) throw new Error('Run state not found — the run data may have been cleared.')
+      const valueMap = state.uniqueKeyMaps.get(sfKeyField)
+      if (!valueMap || valueMap.size === 0) throw new Error('No key values stored for that field.')
+      const pairs = [...valueMap.entries()].map(([key, id]) => ({ key, id }))
+      return db.updateTableWithIds(targetTable, tableKeyCol, idColumnName, pairs)
+    }
+  )
+
+  ipcMain.handle('db:user-tables', () => db.getUserTableNames())
+  ipcMain.handle('db:table-columns', (_e, tableName: string) => db.getTableColumnNames(tableName))
+  ipcMain.handle('db:column-has-index', (_e, tableName: string, columnName: string) =>
+    db.columnHasIndex(tableName, columnName)
+  )
+
+  ipcMain.handle('db:create-index', (_e, tableName: string, columnName: string) =>
+    db.ensureColumnIndexes(tableName, [columnName])
+  )
+
+  ipcMain.handle('db:drop-index', (_e, indexName: string) =>
+    db.dropIndex(indexName)
+  )
+
+  ipcMain.handle('writeback:start', async (_e, jobId: number): Promise<string> => {
+    const runId = randomUUID()
+    startWritebackRun(jobId, runId)  // fire-and-forget; scheduler.registerRun called inside
+    return runId
+  })
+
+  ipcMain.handle('writeback:retry', async (_e, prevRunId: string, jobId: number): Promise<string> => {
+    const job = db.listWritebackJobs().find((j) => j.id === jobId)
+    if (!job) throw new Error(`Writeback job ${jobId} not found`)
+
+    const prevState = wbRunStates.get(prevRunId)
+    if (!prevState || prevState.failedRows.size === 0) {
+      throw new Error('No failed rows found for this run')
+    }
+
+    // Sort by original absolute index so retried-row indices stay deterministic.
+    const failedEntries = [...prevState.failedRows.entries()].sort((a, b) => a[0] - b[0])
+    const { columns } = prevState
+    const activeMappings = job.operation === 'delete'
+      ? job.fieldMap.filter((m) => !m.excluded && m.sfField === 'Id')
+      : job.fieldMap.filter((m) => !m.excluded)
+    const records = failedEntries.map(([, data]) => mapRowToRecord(data.row, columns, activeMappings))
+
+    const newRunId = randomUUID()
+    const abortCtrl = new AbortController()
+    activeJobs.set(newRunId, abortCtrl)
+    scheduler.registerRun('writeback', jobId, newRunId)
+
+    const newState: WbRunState = {
+      sql: prevState.sql,
+      columns,
+      totalRows: failedEntries.length,
+      failedRows: new Map(),
+      rowIds: new Map(),
+      uniqueKeyMaps: new Map(),
+      uniqueKeyFields: []
+    }
+    addWbRunState(newRunId, newState)
+
+    const runHistId = db.startWritebackRunHistory(jobId, false) // retry always uses REST
+    let parsedHeadersRetry: Record<string, string> | undefined
+    if (job.customHeaders) {
+      try { parsedHeadersRetry = JSON.parse(job.customHeaders) } catch { parsedHeadersRetry = undefined }
+    }
+    const retryDistributionSfFields = job.distributionKey?.length
+      ? job.distributionKey
+          .map((sqlCol) => activeMappings.find((m) => m.sqlCol === sqlCol)?.sfField)
+          .filter((f): f is string => Boolean(f))
+      : null
+
+    const sfOpts = {
+      sfObject: job.sfObject,
+      operation: job.operation,
+      externalIdField: job.externalIdField,
+      batchSize: job.batchSize ?? 200,
+      threads: job.threads ?? 1,
+      distributionKey: retryDistributionSfFields?.length ? retryDistributionSfFields : null,
+      customHeaders: parsedHeadersRetry
+    }
+    const totalRows = failedEntries.length
+
+    ;(async () => {
+      let succeeded = 0
+      let failed = 0
+      let inFlight = 0
+      const startTime = Date.now()
+      try {
+        await sf.writebackBatch(
+          sfOpts,
+          records,
+          (batchSize) => {
+            inFlight += batchSize
+            const elapsed = (Date.now() - startTime) / 1000
+            const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
+            send('job:progress', {
+              runId: newRunId, type: 'writeback', succeeded, failed,
+              total: totalRows, rps, inFlight
+            } as JobProgress)
+          },
+          (batchResults) => {
+            inFlight -= batchResults.length
+            for (const r of batchResults) {
+              const origAbsIdx = failedEntries[r.index][0]
+              if (r.success) {
+                succeeded++
+                if (r.id) newState.rowIds.set(origAbsIdx, r.id)
+              } else {
+                failed++
+                newState.failedRows.set(origAbsIdx, {
+                  message: r.errors[0] ?? '',
+                  row: failedEntries[r.index][1].row
+                })
+              }
+            }
+            const elapsed = (Date.now() - startTime) / 1000
+            const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
+            send('job:progress', {
+              runId: newRunId,
+              type: 'writeback',
+              succeeded,
+              failed,
+              total: totalRows,
+              rps,
+              inFlight,
+              rowStatuses: batchResults.map((r) => ({
+                index: failedEntries[r.index][0],
+                status: r.success ? 'success' : 'error',
+                message: r.errors[0],
+                id: r.id
+              }))
+            } as JobProgress)
+          },
+          abortCtrl.signal
+        )
+
+        const status = failed === 0 ? 'success' : succeeded === 0 ? 'error' : 'partial'
+        db.finishWritebackRunHistory(runHistId, status, totalRows, succeeded, failed, Date.now() - startTime)
+        const retryResult: JobResult = { runId: newRunId, type: 'writeback', status, rowsSucceeded: succeeded, rowsFailed: failed }
+        send('job:complete', retryResult)
+        scheduler.notifyComplete(retryResult)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        db.finishWritebackRunHistory(runHistId, 'error', 0, 0, 0, Date.now() - startTime, msg)
+        const retryResult: JobResult = { runId: newRunId, type: 'writeback', status: 'error', errorMsg: msg }
+        send('job:complete', retryResult)
+        scheduler.notifyComplete(retryResult)
+      } finally {
+        activeJobs.delete(newRunId)
+      }
+    })()
+
+    return newRunId
+  })
+
+  ipcMain.handle('job:cancel', (_e, runId: string) => {
+    activeJobs.get(runId)?.abort()
+    activeJobs.delete(runId)
+  })
+
+  // ── Job execution by name (used by renderer and script runner) ───────────────
+  ipcMain.handle('job:run-extract-by-name', async (_e, name: string): Promise<{ rowsLoaded: number }> => {
+    const result = await runExtractByName(name)
+    return { rowsLoaded: result.rowsLoaded ?? 0 }
+  })
+
+  ipcMain.handle('job:run-writeback-by-name', (_e, name: string): Promise<WritebackScriptResult> => {
+    return runWritebackByName(name)
+  })
+
+  ipcMain.handle('job:get-failed-rows', (_e, runId: string): WritebackFailedRowsResult => {
+    return getFailedRowsByRunId(runId)
+  })
+
+  // Forward scheduler events to the renderer so ExtractView / WritebackView can
+  // show running/queued badges for script-triggered jobs.
+  scheduler.onExternalEvent((e) => {
+    send(`job:external-${e.event}`, { type: e.type, jobId: e.jobId })
+  })
+
+  // Register executors so the script runner can dispatch jobs from worker threads.
+  scriptRunner.setJobExecutors(runExtractByName, runWritebackByName, runUpdateTableWithIds, getFailedRowsByRunId)
+
+  // ── Scripts ─────────────────────────────────────────────────────────────────
+  ipcMain.handle('script:list', () => db.listScripts())
+
+  ipcMain.handle('script:save', (_e, script: SavedScriptInput & { id?: number }) =>
+    db.saveScript(script)
+  )
+
+  ipcMain.handle('script:delete', (_e, id: number) => db.deleteScript(id))
+
+  // script:run returns the runId immediately. Logs and the final completion event
+  // are both delivered via webContents.send so they share a single ordered channel,
+  // eliminating the race condition where the ipcMain.handle reply could overtake
+  // in-flight script:log messages.
+  ipcMain.handle('script:run', (_e, { code, runId }: { code: string; runId: string }) => {
+    // Always use the main-process DB path — never trust the renderer-supplied one.
+    const openPath = db.getPath()
+    if (!openPath) throw new Error('No database is open')
+    const win = getMainWindow()
+    scriptRunner.runScript(
+      openPath,
+      code,
+      runId,
+      (log: ScriptLog) => {
+        win?.webContents.send('script:log', { runId, ...log })
+      },
+      (result: ScriptComplete) => {
+        win?.webContents.send('script:complete', result)
+      },
+      (p: ScriptProgress) => {
+        win?.webContents.send('script:progress', p)
+      }
+    )
+    return runId
+  })
+
+  ipcMain.handle('script:cancel', (_e, runId: string) => scriptRunner.cancelScript(runId))
+
+  // ── LLM Settings ─────────────────────────────────────────────────────────────
+
+  function getLlmSettingsFilePath(): string {
+    return join(app.getPath('userData'), 'llm-settings.json')
+  }
+
+  function readLlmSettingsRaw(): Record<string, unknown> {
+    const filePath = getLlmSettingsFilePath()
+    if (!existsSync(filePath)) {
+      return {}
+    }
+    try {
+      return JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>
+    } catch {
+      return {}
+    }
+  }
+
+  function decryptKey(value: unknown): string {
+    if (typeof value !== 'string' || value === '') {
+      return ''
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      return value as string
+    }
+    try {
+      const buf = Buffer.from(value as string, 'base64')
+      return safeStorage.decryptString(buf)
+    } catch {
+      return ''
+    }
+  }
+
+  function encryptKey(value: string): string {
+    if (value === '') {
+      return ''
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      return value
+    }
+    return safeStorage.encryptString(value).toString('base64')
+  }
+
+  /** Read the settings file and return a fully decrypted LlmSettings object. */
+  function loadDecryptedSettings(): LlmSettings {
+    const raw = readLlmSettingsRaw()
+    return {
+      provider: (raw.provider as LlmSettings['provider']) ?? DEFAULT_SETTINGS.provider,
+      openaiKey: decryptKey(raw.openaiKey),
+      openaiModel: (raw.openaiModel as string) ?? DEFAULT_SETTINGS.openaiModel,
+      openaiDeepReason: Boolean(raw.openaiDeepReason ?? DEFAULT_SETTINGS.openaiDeepReason),
+      anthropicKey: decryptKey(raw.anthropicKey),
+      anthropicModel: (raw.anthropicModel as string) ?? DEFAULT_SETTINGS.anthropicModel,
+      anthropicExtendedThinking: Boolean(raw.anthropicExtendedThinking ?? DEFAULT_SETTINGS.anthropicExtendedThinking),
+      mistralKey: decryptKey(raw.mistralKey),
+      mistralModel: (raw.mistralModel as string) ?? DEFAULT_SETTINGS.mistralModel,
+      ollamaBaseUrl: (raw.ollamaBaseUrl as string) ?? DEFAULT_SETTINGS.ollamaBaseUrl,
+      ollamaModel: (raw.ollamaModel as string) ?? DEFAULT_SETTINGS.ollamaModel,
+      litellmBaseUrl: (raw.litellmBaseUrl as string) ?? DEFAULT_SETTINGS.litellmBaseUrl,
+      litellmApiKey: decryptKey(raw.litellmApiKey),
+      litellmModel: (raw.litellmModel as string) ?? DEFAULT_SETTINGS.litellmModel,
+      systemPromptTemplate: (raw.systemPromptTemplate as string) ?? ''
+    }
+  }
+
+  ipcMain.handle('llm:get-settings', (): LlmSettings & { encryptionAvailable: boolean; openaiKeySet: boolean; anthropicKeySet: boolean; mistralKeySet: boolean; litellmKeySet: boolean; defaultSystemPromptTemplate: string } => {
+    const raw = readLlmSettingsRaw()
+    return {
+      ...loadDecryptedSettings(),
+      defaultSystemPromptTemplate: DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+      encryptionAvailable: safeStorage.isEncryptionAvailable(),
+      // True when an encrypted value exists in the file, regardless of whether
+      // decryption succeeded (e.g. macOS keychain permission denied on restart).
+      openaiKeySet: typeof raw.openaiKey === 'string' && raw.openaiKey !== '',
+      anthropicKeySet: typeof raw.anthropicKey === 'string' && raw.anthropicKey !== '',
+      mistralKeySet: typeof raw.mistralKey === 'string' && raw.mistralKey !== '',
+      litellmKeySet: typeof raw.litellmApiKey === 'string' && raw.litellmApiKey !== ''
+    }
+  })
+
+  ipcMain.handle('llm:save-settings', (_e, settings: LlmSettings): void => {
+    // Read the existing file so we can preserve already-encrypted keys when the
+    // caller sends an empty string (meaning "don't change this key").
+    const existing = readLlmSettingsRaw()
+    const toWrite = {
+      provider: settings.provider,
+      openaiKey: settings.openaiKey !== '' ? encryptKey(settings.openaiKey) : (existing.openaiKey ?? ''),
+      openaiModel: settings.openaiModel,
+      openaiDeepReason: settings.openaiDeepReason,
+      anthropicKey: settings.anthropicKey !== '' ? encryptKey(settings.anthropicKey) : (existing.anthropicKey ?? ''),
+      anthropicModel: settings.anthropicModel,
+      anthropicExtendedThinking: settings.anthropicExtendedThinking,
+      mistralKey: settings.mistralKey !== '' ? encryptKey(settings.mistralKey) : (existing.mistralKey ?? ''),
+      mistralModel: settings.mistralModel,
+      ollamaBaseUrl: settings.ollamaBaseUrl,
+      ollamaModel: settings.ollamaModel,
+      litellmBaseUrl: settings.litellmBaseUrl,
+      litellmApiKey: settings.litellmApiKey !== '' ? encryptKey(settings.litellmApiKey) : (existing.litellmApiKey ?? ''),
+      litellmModel: settings.litellmModel,
+      systemPromptTemplate: settings.systemPromptTemplate ?? ''
+    }
+    writeFileSync(getLlmSettingsFilePath(), JSON.stringify(toWrite, null, 2), 'utf-8')
+    getMainWindow()?.webContents.send('llm:settings-changed')
+  })
+
+  // ── LLM Test ─────────────────────────────────────────────────────────────────
+  // Accepts plaintext settings straight from the renderer so the test always
+  // uses exactly what the user sees on screen, with no file-system roundtrip.
+
+  ipcMain.handle('llm:test', async (_e, settings: LlmSettings): Promise<void> => {
+    const result = await sendMessage({
+      settings,
+      systemPrompt: 'You are a test assistant.',
+      messages: [{ role: 'user', content: 'Reply with exactly: {"explanation":"ok","warnings":[]}' }],
+      tools: [],
+      runTool: async () => '',
+      onChunk: () => {},
+      onToolCall: () => {},
+      onToolResult: () => {}
+    })
+    if (result.error) {
+      throw new Error(result.error)
+    }
+  })
+
+  // ── LLM List Models ───────────────────────────────────────────────────────────
+  // Accepts plaintext settings straight from the renderer (no file-system roundtrip).
+
+  ipcMain.handle('llm:list-models', async (_e, settings: LlmSettings): Promise<string[]> => {
+    return listModels(settings)
+  })
+
+  // ── LLM DDL confirmation response ─────────────────────────────────────────────
+
+  ipcMain.handle('llm:confirm-response', (_e, { conversationId, approved }: { conversationId: string; approved: boolean }): void => {
+    const resolve = pendingConfirms.get(conversationId)
+    if (resolve) {
+      pendingConfirms.delete(conversationId)
+      resolve(approved)
+    }
+  })
+
+  // ── LLM Chat ──────────────────────────────────────────────────────────────────
+
+  ipcMain.handle(
+    'llm:chat',
+    async (
+      _e,
+      { conversationId, messages }: { conversationId: string; messages: ChatMessage[] }
+    ): Promise<{ reply: string; contextTruncated: boolean }> => {
+      const win = getMainWindow()
+      const settings = loadDecryptedSettings()
+
+      const model = getActiveModel(settings)
+
+      // Build schema text for system prompt
+      let schemaText = ''
+      try {
+        schemaText = buildDdlSchema(db.getDatabaseInfo())
+      } catch {
+        schemaText = '(No database open)'
+      }
+
+      const systemPrompt = buildSystemPrompt(schemaText, settings.systemPromptTemplate)
+
+      // Save user messages to history
+      const lastUserMsg = messages[messages.length - 1]
+      if (lastUserMsg?.role === 'user' && db.isOpen()) {
+        db.saveAiChatMessage({
+          conversationId,
+          role: 'user',
+          content: lastUserMsg.content,
+          provider: settings.provider,
+          model
+        })
+      }
+
+      // Track repeated SQL errors so the LLM can be told to change strategy
+      // instead of retrying the same failing query indefinitely.
+      const sqlErrorCounts = new Map<string, number>()
+
+      const result = await sendMessage({
+        settings,
+        systemPrompt,
+        messages,
+        tools: [EXECUTE_SQL_TOOL, EXECUTE_DDL_TOOL],
+        runTool: async (name, args) => {
+          if (name === 'execute_sql') {
+            const ROW_CAP = 5000
+            const rawQuery = (args.query as string) ?? ''
+
+            // Strip trailing semicolons — better-sqlite3 treats a trailing ";"
+            // as a second (empty) statement and throws "more than one statement".
+            const query = rawQuery.trimEnd().replace(/;+$/, '').trimEnd()
+
+            // Reject multi-statement input (semicolon in the middle of the query).
+            // Strip string literals first to avoid false positives.
+            const queryNoStrings = query.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""')
+            if (queryNoStrings.includes(';')) {
+              return JSON.stringify({ error: 'Please send one SQL statement at a time — use a single SELECT query without semicolons.' })
+            }
+
+            // Safety: only SELECT (or WITH … SELECT CTE) statements allowed.
+            // Strip single-line (--) and block (/* */) comments before checking
+            // so that a leading comment cannot mask a write statement.
+            const stripped = query
+              .replace(/--[^\n]*/g, ' ')      // remove -- comments
+              .replace(/\/\*[\s\S]*?\*\//g, ' ') // remove /* */ comments
+              .trim()
+            const firstKeyword = stripped.match(/^(\w+)/)?.[1]?.toUpperCase()
+            if (firstKeyword !== 'SELECT' && firstKeyword !== 'WITH') {
+              return JSON.stringify({ error: 'Only SELECT queries are allowed.' })
+            }
+            // Even for WITH (CTE), reject if the query contains any write keywords
+            // at the top level (i.e. outside a sub-select).  A simple keyword scan
+            // is sufficient here because the LLM is told to issue SELECT-only queries.
+            if (/\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|REPLACE|ATTACH|DETACH|PRAGMA)\b/i.test(stripped)) {
+              return JSON.stringify({ error: 'Only SELECT queries are allowed.' })
+            }
+
+            // Enforce ROW_CAP:
+            //   • No LIMIT present  → append LIMIT 5000
+            //   • Existing LIMIT ≤ 5000 → keep it unchanged
+            //   • Existing LIMIT > 5000 → replace with 5000
+            const limitMatch = query.match(/\bLIMIT\s+(\d+)/i)
+            let safeQuery: string
+            if (!limitMatch) {
+              safeQuery = `${query} LIMIT ${ROW_CAP}`
+            } else {
+              const existing = parseInt(limitMatch[1], 10)
+              if (existing > ROW_CAP) {
+                safeQuery = query.replace(/\bLIMIT\s+\d+/i, `LIMIT ${ROW_CAP}`)
+              } else {
+                safeQuery = query
+              }
+            }
+
+            const qr = db.executeQuery(safeQuery)
+
+            if (qr.error) {
+              const count = (sqlErrorCounts.get(qr.error) ?? 0) + 1
+              sqlErrorCounts.set(qr.error, count)
+              if (count >= 3) {
+                return JSON.stringify({
+                  error: `${qr.error} — This SQL error has now occurred ${count} times. Stop retrying similar queries. Switch to a different approach or provide the user with SQL they can run manually.`
+                })
+              }
+              return JSON.stringify({ error: qr.error })
+            }
+
+            // Exactly ROW_CAP rows → the result is most likely truncated.
+            // Signal this so the assistant can fall back to providing the SQL
+            // for the user to run directly instead of attempting inline analysis.
+            if (qr.rows.length === ROW_CAP) {
+              return JSON.stringify({ error: `Too many rows: the query returned ${ROW_CAP} rows, which is the maximum allowed for inline analysis. Switch to Intent B and provide SQL queries the user can run themselves to obtain the full result.` })
+            }
+
+            const rows = qr.rows.map(row => {
+              const obj: Record<string, unknown> = {}
+              qr.columns.forEach((col, i) => { obj[col] = row[i] })
+              return obj
+            })
+            return JSON.stringify({ columns: qr.columns, rows })
+          }
+
+          if (name === 'execute_ddl') {
+            const statement = (args.statement as string ?? '').trim()
+            const reason = (args.reason as string ?? '')
+
+            // Ask the renderer to show the confirmation modal and wait for the response.
+            win?.webContents.send('llm:confirm-request', { conversationId, statement, reason })
+
+            const approved = await new Promise<boolean>(resolve => {
+              pendingConfirms.set(conversationId, resolve)
+            })
+
+            if (!approved) {
+              return JSON.stringify({ error: 'User declined to execute this statement.' })
+            }
+
+            try {
+              db.executeRaw(statement)
+              return JSON.stringify({ ok: true, message: 'Statement executed successfully.' })
+            } catch (err) {
+              return JSON.stringify({ error: String(err) })
+            }
+          }
+
+          return JSON.stringify({ error: `Unknown tool: ${name}` })
+        },
+        onChunk: (text) => {
+          win?.webContents.send('llm:chunk', text)
+        },
+        onToolCall: (name, args) => {
+          if (db.isOpen()) {
+            db.saveAiChatMessage({
+              conversationId,
+              role: 'tool_call',
+              content: JSON.stringify(args),
+              toolName: name,
+              provider: settings.provider,
+              model
+            })
+          }
+          win?.webContents.send('llm:tool-call', { name, args })
+        },
+        onToolResult: (name, result) => {
+          if (db.isOpen()) {
+            db.saveAiChatMessage({
+              conversationId,
+              role: 'tool_result',
+              content: result,
+              toolName: name,
+              provider: settings.provider,
+              model
+            })
+          }
+          win?.webContents.send('llm:tool-result', { name, result })
+        }
+      })
+
+      // Save assistant reply to history only when the call succeeded.
+      // Capture the new row ID so we can link the final HTTP log entry back.
+      let assistantMessageId: number | null = null
+      if (!result.error && db.isOpen()) {
+        assistantMessageId = db.saveAiChatMessage({
+          conversationId,
+          role: 'assistant',
+          content: result.reply,
+          provider: settings.provider,
+          model
+        })
+      }
+
+      // Persist HTTP-level call log for every API round-trip made this turn,
+      // including failed ones.  The last entry is the one that produced (or
+      // attempted to produce) the assistant reply, so we link its chat_message_id.
+      if (db.isOpen() && result.httpLog.length > 0) {
+        result.httpLog.forEach((entry, idx) => {
+          const isLast = idx === result.httpLog.length - 1
+          db.saveAiLlmHttpLog({
+            conversationId,
+            chatMessageId: isLast ? assistantMessageId : null,
+            provider: entry.provider,
+            model: entry.model,
+            iteration: entry.iteration,
+            requestSystemPrompt: entry.requestSystemPrompt ?? null,
+            requestMessagesJson: entry.requestMessagesJson,
+            requestToolsJson: entry.requestToolsJson ?? null,
+            responseContentJson: entry.responseContentJson ?? null,
+            responseToolCallsJson: entry.responseToolCallsJson ?? null,
+            durationMs: entry.durationMs,
+            httpStatus: entry.httpStatus ?? null,
+            error: entry.error ?? null
+          })
+        })
+      }
+
+      // Re-throw so the renderer still sees the error in the UI.
+      if (result.error) {
+        throw new Error(result.error)
+      }
+
+      return { reply: result.reply, contextTruncated: result.contextTruncated }
+    }
+  )
+}

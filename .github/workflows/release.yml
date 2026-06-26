@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Allow the workflow to create GitHub Releases and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  # ── macOS arm64 (Apple Silicon) ────────────────────────────────────────────
+  build-mac-arm64:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package (arm64)
+        run: npm run build && npx electron-builder --mac --arm64
+
+      - name: Upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+
+  # ── macOS x64 (Intel) ─────────────────────────────────────────────────────
+  build-mac-x64:
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package (x64)
+        run: npm run build && npx electron-builder --mac --x64
+
+      - name: Upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
+
+  # ── Windows x64 + arm64 ───────────────────────────────────────────────────
+  build-win:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package
+        run: npm run dist:win
+
+      - name: Upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+
+  # ── Linux x64 ─────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y fakeroot dpkg rpm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package
+        run: npm run dist:linux
+
+      - name: Upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.AppImage
+            dist/*.deb

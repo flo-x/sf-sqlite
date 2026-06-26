@@ -1,0 +1,43 @@
+{
+  "name": "sf-sqlite",
+  "version": "1.0.0",
+  "description": "Salesforce-SQLite integration workbench",
+  "main": "./out/main/index.js",
+  "author": "",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "postinstall": "electron-builder install-app-deps",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.2",
+    "@mistralai/mistralai": "^2.2.6",
+    "better-sqlite3": "^12.11.1",
+    "jsforce": "^3.10.16",
+    "ollama": "^0.6.3",
+    "openai": "^6.43.0",
+    "pinia": "^2.3.1",
+    "vue": "^3.5.38",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@electron-toolkit/preload": "^3.0.2",
+    "@electron-toolkit/utils": "^3.0.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.19.21",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "electron": "42.4.1",
+    "electron-builder": "^26.15.4",
+    "monaco-editor": "0.55.1",
+    "tiktoken": "^1.0.22",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21",
+    "vue-tsc": "^3.3.5"
+  }
+}
