@@ -46,7 +46,7 @@ mac:
         - arm64
 dmg:
   artifactName: ${name}-${version}-${arch}.${ext}
-  license: resources/license.rtf
+  license: resources/mac-license.rtf
 linux:
   target:
     - target: AppImage

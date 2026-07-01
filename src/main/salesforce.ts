@@ -14,6 +14,20 @@ import type { OrgInfo, CliOrg, CliDiagnosticStep, CliOrgsResult, SObjectSummary,
 
 const execFileAsync = promisify(execFile)
 
+// On Windows, .cmd batch files cannot be spawned directly by execFile — they
+// must be run through cmd.exe.  execFileAsync passes all arguments as an array
+// so there is no shell-injection risk even with spaces in the path or args.
+async function execCliAsync(
+  cmd: string,
+  args: string[],
+  opts: { timeout: number }
+): Promise<{ stdout: string; stderr: string }> {
+  if (process.platform === 'win32' && cmd.toLowerCase().endsWith('.cmd')) {
+    return execFileAsync('cmd.exe', ['/c', cmd, ...args], opts)
+  }
+  return execFileAsync(cmd, args, opts)
+}
+
 // Additional absolute paths to try if 'sf' / 'sfdx' are not on PATH.
 // These cover the SF CLI self-installer and common package managers.
 const SF_EXTRA_PATHS: string[] = [
@@ -52,11 +66,13 @@ async function execSfCommand(
 ): Promise<string> {
   for (const cmd of sfCandidates(base)) {
     try {
-      // Quick existence check for absolute paths (skip for bare names)
-      if (cmd.startsWith('/') || cmd.includes('/')) {
-        await access(cmd)
-      }
-      const { stdout } = await execFileAsync(cmd, args, opts)
+      // For absolute paths, resolve to the real on-disk binary first (handles
+      // Windows .cmd/.exe extensions and spaces) then spawn that exact path.
+      const resolved = isAbsolutePath(cmd)
+        ? (process.platform === 'win32' ? await resolveWindowsAbsPath(cmd) : (async () => { try { await access(cmd); return cmd } catch { return null } })())
+        : cmd
+      if (resolved === null) continue
+      const { stdout } = await execCliAsync(resolved, args, opts)
       return stdout
     } catch {
       // try next candidate
@@ -207,21 +223,50 @@ export function disconnectSalesforce(): void {
  * Resolve a bare command name to its full path via /usr/bin/which, or confirm
  * that an absolute path exists.  Returns the resolved path or null if not found.
  */
-async function resolveCommand(cmd: string): Promise<string | null> {
-  if (cmd.startsWith('/') || cmd.includes('/')) {
+// Returns true if cmd looks like an absolute path (cross-platform).
+function isAbsolutePath(cmd: string): boolean {
+  // Unix: starts with /
+  // Windows: starts with a drive letter (C:\ or C:/) or a UNC path (\\)
+  return cmd.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(cmd) || cmd.startsWith('\\\\')
+}
+
+// On Windows the real binary is sf.cmd or sf.exe; execFile requires the exact
+// filename.  Try the candidates in order and return the first one that exists.
+async function resolveWindowsAbsPath(base: string): Promise<string | null> {
+  const candidates = base.match(/\.[a-zA-Z]+$/)
+    ? [base]                                    // already has an extension
+    : [base, `${base}.cmd`, `${base}.exe`]      // try without, then common exts
+  for (const p of candidates) {
     try {
-      await access(cmd)
-      return cmd
+      await access(p)
+      return p
     } catch {
-      return null
+      // try next
     }
   }
-  // Bare name: use /usr/bin/which (always present on macOS) so we don't depend
-  // on the Electron process PATH to find 'which' itself.
+  return null
+}
+
+async function resolveCommand(cmd: string): Promise<string | null> {
+  if (isAbsolutePath(cmd)) {
+    return process.platform === 'win32'
+      ? resolveWindowsAbsPath(cmd)
+      : (async () => { try { await access(cmd); return cmd } catch { return null } })()
+  }
+
+  // Bare name — use the OS-appropriate path-lookup tool so we don't depend on
+  // the Electron process PATH to find the lookup binary itself.
   try {
-    const { stdout } = await execFileAsync('/usr/bin/which', [cmd], { timeout: 3000 })
-    const resolved = stdout.trim()
-    return resolved || null
+    if (process.platform === 'win32') {
+      // `where` is a built-in on Windows; may return multiple lines.
+      const { stdout } = await execFileAsync('where', [cmd], { timeout: 3000 })
+      const first = stdout.trim().split(/\r?\n/)[0].trim()
+      return first || null
+    } else {
+      // /usr/bin/which is always present on macOS and most Linux distros.
+      const { stdout } = await execFileAsync('/usr/bin/which', [cmd], { timeout: 3000 })
+      return stdout.trim() || null
+    }
   } catch {
     return null
   }
@@ -283,7 +328,7 @@ export async function listCliOrgs(): Promise<CliOrgsResult> {
     // Step 3: execute the org-list command
     const cmdLabel = `${base} ${args.join(' ')}`
     try {
-      const { stdout } = await execFileAsync(foundCmd, args, { timeout: 10_000 })
+      const { stdout } = await execCliAsync(foundCmd, args, { timeout: 10_000 })
       const parsed = JSON.parse(stdout) as Record<string, unknown>
       const orgs = [...parseCliOrgs(parsed, false), ...parseCliOrgs(parsed, true)]
 

@@ -117,9 +117,9 @@
                   </div>
                 </div>
 
-                <!-- Custom path input shown when sf/sfdx could not be found automatically -->
+                <!-- Custom path override — shown whenever any diagnostic fails or a path is already saved -->
                 <div v-if="sfNotFound" class="cli-path-override">
-                  <label class="cli-path-label">sf not found automatically — enter its full path:</label>
+                  <label class="cli-path-label">Custom sf path (leave empty to auto-detect):</label>
                   <div class="cli-path-row">
                     <input
                       v-model="sfCliPathInput"
@@ -130,11 +130,20 @@
                     />
                     <button
                       class="btn btn-primary btn-sm"
-                      :disabled="!sfCliPathInput.trim() || sfCliPathSaving"
+                      :disabled="sfCliPathSaving"
                       @click="saveSfCliPath"
                     >
                       <span v-if="sfCliPathSaving" class="spinner" style="width:12px;height:12px;border-width:2px" />
                       <span v-else>Save &amp; retry</span>
+                    </button>
+                    <button
+                      v-if="sfCliPathInput.trim()"
+                      class="btn btn-sm"
+                      style="color: var(--danger)"
+                      :disabled="sfCliPathSaving"
+                      @click="clearSfCliPath"
+                    >
+                      Clear
                     </button>
                   </div>
                 </div>
@@ -233,8 +242,10 @@ const selectedCliOrg = ref<string>('')
 // Custom sf path input
 const sfCliPathInput = ref('')
 const sfCliPathSaving = ref(false)
+// Show the path override whenever any diagnostic step failed OR a custom path is
+// already saved (so the user can always clear or correct it).
 const sfNotFound = computed(() =>
-  cliDiagnostics.value.some(s => s.label === 'sf command' && !s.ok)
+  cliDiagnostics.value.some(s => !s.ok) || sfCliPathInput.value.trim() !== ''
 )
 
 async function loadCliOrgs(): Promise<void> {
@@ -263,6 +274,11 @@ async function saveSfCliPath(): Promise<void> {
   } finally {
     sfCliPathSaving.value = false
   }
+}
+
+async function clearSfCliPath(): Promise<void> {
+  sfCliPathInput.value = ''
+  await saveSfCliPath()
 }
 
 function switchToCliTab(): void {

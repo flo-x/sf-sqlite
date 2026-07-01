@@ -3,7 +3,7 @@
   "version": "1.0.1",
   "description": "Salesforce-SQLite integration workbench",
   "main": "./out/main/index.js",
-  "author": "",
+  "author": "flo-x <7840512+flo-x@users.noreply.github.com>",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
