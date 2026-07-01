@@ -50,6 +50,18 @@ export interface CliOrg {
   connectedStatus?: string
 }
 
+export interface CliDiagnosticStep {
+  label: string
+  /** true = step succeeded or is informational; false = step failed */
+  ok: boolean
+  detail: string
+}
+
+export interface CliOrgsResult {
+  orgs: CliOrg[]
+  diagnostics: CliDiagnosticStep[]
+}
+
 export interface SObjectSummary {
   name: string
   label: string

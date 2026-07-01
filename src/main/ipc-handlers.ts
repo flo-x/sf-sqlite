@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow, safeStorage, app } from 'electron'
+import { ipcMain, dialog, BrowserWindow, safeStorage, app, net } from 'electron'
 import { randomUUID } from 'crypto'
 import { join } from 'path'
 import { readFileSync, writeFileSync, existsSync } from 'fs'
@@ -15,10 +15,12 @@ import {
   getActiveModel,
   EXECUTE_SQL_TOOL,
   EXECUTE_DDL_TOOL,
+  EXECUTE_JAVASCRIPT_TOOL,
   DEFAULT_SETTINGS,
   type LlmSettings,
   type ChatMessage
 } from './llm'
+import { applyExtraCaCert, clearExtraCaCert, disablePatch, enablePatch, isPatchDisabled, getShellCaCertPath, getActiveCaCertPath } from './tls-patch'
 import type {
   ExtractJobInput,
   WritebackJobInput,
@@ -585,6 +587,40 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
   }
 }
 
+// ── Network diagnostics helpers ───────────────────────────────────────────────
+
+/**
+ * Attempt a HEAD request to a URL within 5 s using Electron's net.fetch,
+ * which runs through Chromium's network stack and therefore respects the
+ * macOS Keychain (system CA certificates) and system proxy settings.
+ * Returns null on success, or an error message string on failure.
+ */
+async function checkUrl(url: string): Promise<string | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 5000)
+  try {
+    await net.fetch(url, { method: 'HEAD', signal: controller.signal, redirect: 'follow' })
+    return null
+  } catch (err) {
+    const isTimeout = controller.signal.aborted
+    return isTimeout
+      ? `Request timed out after 5 s`
+      : err instanceof Error ? err.message : String(err)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function getProviderBaseUrl(settings: LlmSettings): string {
+  switch (settings.provider) {
+    case 'openai':    return 'https://api.openai.com'
+    case 'anthropic': return 'https://api.anthropic.com'
+    case 'mistral':   return 'https://api.mistral.ai'
+    case 'ollama':    return settings.ollamaBaseUrl || 'http://localhost:11434'
+    case 'litellm':   return settings.litellmBaseUrl || 'http://localhost:4000'
+  }
+}
+
 // ── Module-level job executors (used by both IPC handlers and script runner) ──
 
 function runExtractByName(name: string): Promise<JobResult> {
@@ -631,7 +667,37 @@ function getFailedRowsByRunId(runId: string): WritebackFailedRowsResult {
   }
 }
 
+// ── SF CLI path settings ──────────────────────────────────────────────────────
+
+function getSfSettingsFilePath(): string {
+  return join(app.getPath('userData'), 'sf-settings.json')
+}
+
+interface SfSettings {
+  sfCliPath?: string
+  extraCaCertPath?: string
+  disableCaCertPatch?: boolean
+}
+
+function readSfSettings(): SfSettings {
+  try {
+    return JSON.parse(readFileSync(getSfSettingsFilePath(), 'utf-8')) as SfSettings
+  } catch {
+    return {}
+  }
+}
+
+function writeSfSettings(settings: SfSettings): void {
+  writeFileSync(getSfSettingsFilePath(), JSON.stringify(settings, null, 2), 'utf-8')
+}
+
 export function registerIpcHandlers(): void {
+  // Restore persisted sf CLI path so listCliOrgs uses it immediately.
+  const sfSettings = readSfSettings()
+  if (sfSettings.sfCliPath) {
+    sf.setCustomSfPath(sfSettings.sfCliPath)
+  }
+
   // ── Database ────────────────────────────────────────────────────────────────
 
   ipcMain.handle('db:open', async (_e, filePath?: string) => {
@@ -746,7 +812,11 @@ export function registerIpcHandlers(): void {
     dbPath: db.getPath()
   }))
   ipcMain.handle('sf:list-cli-orgs', () => {
-    pendingListOrgs = sf.listCliOrgs().finally(() => { pendingListOrgs = null })
+    // Re-use an in-flight call if one is already running (e.g. auto-connect started it).
+    // Both callers only need the resolved value, so sharing the promise is safe.
+    if (!pendingListOrgs) {
+      pendingListOrgs = sf.listCliOrgs().finally(() => { pendingListOrgs = null })
+    }
     return pendingListOrgs
   })
   ipcMain.handle('sf:connect-cli-org', async (_e, username: string) => {
@@ -754,6 +824,90 @@ export function registerIpcHandlers(): void {
     if (db.isOpen()) db.setSetting('sf_cli_username', username)
     return org
   })
+
+  ipcMain.handle('sf:get-custom-path', (): string | null => {
+    return sf.getCustomSfPath()
+  })
+
+  ipcMain.handle('sf:set-custom-path', (_e, path: string): void => {
+    const trimmed = path.trim()
+    sf.setCustomSfPath(trimmed || null)
+    const current = readSfSettings()
+    if (trimmed) {
+      current.sfCliPath = trimmed
+    } else {
+      delete current.sfCliPath
+    }
+    writeSfSettings(current)
+    // Invalidate any cached org-list so the next call uses the new path.
+    pendingListOrgs = null
+  })
+
+  // ── Network / CA certificate settings ─────────────────────────────────────
+
+  ipcMain.handle('sf:get-network-settings', (): {
+    shellCaCertPath: string | null
+    savedCaCertPath: string | null
+    shellPath: string | null
+    patchDisabled: boolean
+  } => {
+    const sfSettings = readSfSettings()
+    return {
+      shellCaCertPath: getShellCaCertPath(),
+      savedCaCertPath: sfSettings.extraCaCertPath ?? null,
+      shellPath: process.env.PATH ?? null,
+      patchDisabled: sfSettings.disableCaCertPatch ?? false
+    }
+  })
+
+  ipcMain.handle('sf:set-ca-cert-path', (_e, certPath: string | null, disabled: boolean): void => {
+    const trimmed = certPath?.trim() || null
+    const current = readSfSettings()
+
+    if (disabled) {
+      current.disableCaCertPatch = true
+      delete current.extraCaCertPath
+      disablePatch()
+    } else {
+      delete current.disableCaCertPatch
+      enablePatch()
+      if (trimmed) {
+        current.extraCaCertPath = trimmed
+        applyExtraCaCert(trimmed)
+      } else {
+        delete current.extraCaCertPath
+        // Restore the shell-env cert if there is one; otherwise clear entirely.
+        const shellPath = getShellCaCertPath()
+        if (shellPath) {
+          applyExtraCaCert(shellPath)
+        } else {
+          clearExtraCaCert()
+        }
+      }
+    }
+    writeSfSettings(current)
+  })
+
+  ipcMain.handle('sf:browse-ca-cert', async (): Promise<string | null> => {
+    const win = getMainWindow() ?? BrowserWindow.getFocusedWindow()
+    const result = await dialog.showOpenDialog(win!, {
+      title: 'Select CA Certificate File',
+      filters: [
+        { name: 'Certificates', extensions: ['pem', 'crt', 'cer', 'ca-bundle'] },
+        { name: 'All Files', extensions: ['*'] }
+      ],
+      properties: ['openFile']
+    })
+    if (result.canceled || !result.filePaths[0]) {
+      return null
+    }
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('sf:get-active-ca-cert-path', (): string | null => {
+    return getActiveCaCertPath()
+  })
+
   ipcMain.handle('sf:list-objects', () => sf.listObjects())
   ipcMain.handle('sf:describe', (_e, name: string) => sf.describeObject(name))
   ipcMain.handle('sf:soql', (_e, soql: string) => sf.runSoqlQuery(soql))
@@ -1035,14 +1189,38 @@ export function registerIpcHandlers(): void {
     const openPath = db.getPath()
     if (!openPath) throw new Error('No database is open')
     const win = getMainWindow()
+
+    // Batch log messages and flush at most every 50 ms so that tight console.log
+    // loops don't generate one IPC round-trip per line.
+    const logBuffer: Array<ScriptLog & { runId: string }> = []
+    let flushTimer: ReturnType<typeof setTimeout> | null = null
+
+    const flushLogs = (): void => {
+      flushTimer = null
+      if (logBuffer.length === 0) {
+        return
+      }
+      const batch = logBuffer.splice(0)
+      win?.webContents.send('script:log-batch', batch)
+    }
+
     scriptRunner.runScript(
       openPath,
       code,
       runId,
       (log: ScriptLog) => {
-        win?.webContents.send('script:log', { runId, ...log })
+        logBuffer.push({ runId, ...log })
+        if (!flushTimer) {
+          flushTimer = setTimeout(flushLogs, 50)
+        }
       },
       (result: ScriptComplete) => {
+        // Flush any buffered logs before sending completion so the renderer
+        // sees all output before the "done" banner appears.
+        if (flushTimer) {
+          clearTimeout(flushTimer)
+        }
+        flushLogs()
         win?.webContents.send('script:complete', result)
       },
       (p: ScriptProgress) => {
@@ -1164,6 +1342,27 @@ export function registerIpcHandlers(): void {
   // uses exactly what the user sees on screen, with no file-system roundtrip.
 
   ipcMain.handle('llm:test', async (_e, settings: LlmSettings): Promise<void> => {
+    // Step 1 — basic internet connectivity
+    const googleErr = await checkUrl('https://www.google.com')
+    if (googleErr) {
+      throw new Error(
+        `No internet connection detected: could not reach www.google.com.\n  ${googleErr}\n\n` +
+        'Please check your network settings and try again.'
+      )
+    }
+
+    // Step 2 — provider URL reachability
+    const providerUrl = getProviderBaseUrl(settings)
+    const providerErr = await checkUrl(providerUrl)
+    if (providerErr) {
+      throw new Error(
+        'Internet is working (www.google.com is reachable).\n\n' +
+        `However, the provider URL could not be reached:\n  ${providerUrl}\n  ${providerErr}\n\n` +
+        'Your network or firewall may be blocking access to this address.'
+      )
+    }
+
+    // Step 3 — actual LLM API call
     const result = await sendMessage({
       settings,
       systemPrompt: 'You are a test assistant.',
@@ -1175,7 +1374,12 @@ export function registerIpcHandlers(): void {
       onToolResult: () => {}
     })
     if (result.error) {
-      throw new Error(result.error)
+      throw new Error(
+        'Network diagnostics passed:\n' +
+        '  ✓ www.google.com is reachable\n' +
+        `  ✓ ${providerUrl} is reachable\n\n` +
+        `LLM API error:\n${result.error}`
+      )
     }
   })
 
@@ -1239,7 +1443,7 @@ export function registerIpcHandlers(): void {
         settings,
         systemPrompt,
         messages,
-        tools: [EXECUTE_SQL_TOOL, EXECUTE_DDL_TOOL],
+        tools: [EXECUTE_SQL_TOOL, EXECUTE_DDL_TOOL, EXECUTE_JAVASCRIPT_TOOL],
         runTool: async (name, args) => {
           if (name === 'execute_sql') {
             const ROW_CAP = 5000
@@ -1340,6 +1544,49 @@ export function registerIpcHandlers(): void {
             } catch (err) {
               return JSON.stringify({ error: String(err) })
             }
+          }
+
+          if (name === 'execute_javascript') {
+            const code = (args.code as string ?? '').trim()
+            const reason = (args.reason as string ?? '')
+
+            // Show the confirmation modal in the renderer and wait for the user.
+            win?.webContents.send('llm:confirm-request', { conversationId, statement: code, reason, type: 'javascript' })
+
+            const approved = await new Promise<boolean>(resolve => {
+              pendingConfirms.set(conversationId, resolve)
+            })
+
+            if (!approved) {
+              return JSON.stringify({ error: 'User declined to run the script.' })
+            }
+
+            const openPath = db.getPath()
+            if (!openPath) {
+              return JSON.stringify({ error: 'No database is open.' })
+            }
+
+            const logs: string[] = []
+            const runId = randomUUID()
+
+            const outcome = await new Promise<{ durationMs: number; error?: string }>((resolve) => {
+              scriptRunner.runLlmScript(
+                openPath,
+                code,
+                runId,
+                (log) => {
+                  logs.push(`[${log.level}] ${log.args.join(' ')}`)
+                },
+                (result) => {
+                  resolve({ durationMs: result.durationMs, error: result.error })
+                }
+              )
+            })
+
+            if (outcome.error) {
+              return JSON.stringify({ error: outcome.error, output: logs })
+            }
+            return JSON.stringify({ ok: true, output: logs, durationMs: outcome.durationMs })
           }
 
           return JSON.stringify({ error: `Unknown tool: ${name}` })

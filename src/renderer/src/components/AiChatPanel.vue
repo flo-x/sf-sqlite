@@ -32,7 +32,7 @@
       <ul class="ai-disclaimer-list">
         <li>Uses tokens from your provider — may incur costs.</li>
         <li>Receives your database schema and may query data.</li>
-        <li>Can run DDL/DML with your confirmation.</li>
+        <li>Can run DDL/DML and JavaScript with your confirmation.</li>
       </ul>
     </div>
 
@@ -80,12 +80,12 @@
               <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
               <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
             </svg>
-            <span>Database change requested</span>
+            <span>{{ msg.confirmType === 'javascript' ? 'Script execution requested' : 'Database change requested' }}</span>
           </div>
           <p class="confirm-reason">{{ msg.confirmReason }}</p>
           <pre class="confirm-sql">{{ msg.content }}</pre>
           <div v-if="msg.confirmPending" class="confirm-actions">
-            <p class="confirm-warning">This will permanently modify the database.</p>
+            <p class="confirm-warning">{{ msg.confirmType === 'javascript' ? 'This will run JavaScript code that can read and modify the database.' : 'This will permanently modify the database.' }}</p>
             <div class="confirm-btns">
               <button class="btn btn-secondary btn-sm" @click="rejectConfirm(idx)">Cancel</button>
               <button class="btn btn-danger btn-sm" @click="approveConfirm(idx)">Execute</button>
@@ -125,14 +125,24 @@
                 </div>
                 <pre class="ai-sql-code">{{ msg.parsed.sql }}</pre>
               </div>
-              <p v-if="msg.parsed.explanation" class="ai-explanation">{{ msg.parsed.explanation }}</p>
+              <div v-if="msg.parsed.javascript" class="ai-js-block">
+                <div class="ai-js-header">
+                  <span class="ai-js-label">JS</span>
+                  <div class="ai-js-actions">
+                    <button class="btn btn-secondary btn-sm" @click="copyJsCode(msg.parsed.javascript!)">{{ jsCopiedIdx === idx ? '✓ Copied' : 'Copy' }}</button>
+                    <button class="btn btn-primary btn-sm" @click="$emit('insert-js', msg.parsed.javascript!)">Open in Script Editor</button>
+                  </div>
+                </div>
+                <pre class="ai-js-code">{{ msg.parsed.javascript }}</pre>
+              </div>
+              <div v-if="msg.parsed.explanation" class="ai-explanation ai-markdown" v-html="renderMarkdown(msg.parsed.explanation)" />
               <ul v-if="msg.parsed.warnings && msg.parsed.warnings.length > 0" class="ai-warnings">
                 <li v-for="(w, wi) in msg.parsed.warnings" :key="wi">{{ w }}</li>
               </ul>
             </template>
-            <!-- Plain text fallback -->
+            <!-- Plain text fallback — rendered as markdown -->
             <template v-else>
-              <pre class="ai-plain-text">{{ msg.content }}</pre>
+              <div class="ai-plain-text ai-markdown" v-html="renderMarkdown(msg.content)" />
             </template>
           </div>
         </div>
@@ -184,16 +194,19 @@
     <!-- Input area -->
     <div class="ai-input-area">
       <textarea
+        ref="textareaEl"
         v-model="userInput"
         class="ai-textarea"
         placeholder="Ask a question about your data…"
         rows="3"
         :disabled="loading"
-        @keydown.enter.meta.prevent="sendMessage"
-        @keydown.enter.ctrl.prevent="sendMessage"
+        @keydown.enter.exact.prevent="sendMessage"
+        @keydown.enter.shift.exact.prevent="insertNewline"
+        @keydown.enter.meta.exact.prevent="insertNewline"
+        @keydown.enter.ctrl.exact.prevent="insertNewline"
       />
       <div class="ai-input-footer">
-        <span class="ai-hint">⌘↵ to send</span>
+        <span class="ai-hint">↵ to send · ⇧↵ for new line</span>
         <button v-if="loading" class="btn btn-stop btn-sm" @click="stopGeneration">
           <svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12" style="flex-shrink:0">
             <rect x="5" y="5" width="14" height="14" rx="2"/>
@@ -210,9 +223,15 @@
 
 <script setup lang="ts">
 import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { useConnectionStore } from '../stores/connection'
 
-type ParsedResponse = { sql?: string; explanation?: string; warnings?: string[] }
+function renderMarkdown(text: string): string {
+  return DOMPurify.sanitize(marked.parse(text) as string)
+}
+
+type ParsedResponse = { sql?: string; javascript?: string; explanation?: string; warnings?: string[] }
 
 interface AiMessage {
   role: 'user' | 'assistant' | 'tool_call' | 'tool_confirm' | 'error'
@@ -226,16 +245,19 @@ interface AiMessage {
   confirmConversationId?: string
   confirmPending?: boolean
   confirmError?: string
+  confirmType?: 'ddl' | 'javascript'
 }
 
 const conn = useConnectionStore()
 
 const emit = defineEmits<{
   (e: 'insert-sql', sql: string): void
+  (e: 'insert-js', code: string): void
 }>()
 
 const messages = ref<AiMessage[]>([])
 const userInput = ref('')
+const textareaEl = ref<HTMLTextAreaElement | null>(null)
 const loading = ref(false)
 const contextTruncated = ref(false)
 const conversationId = ref(crypto.randomUUID())
@@ -244,6 +266,7 @@ interface ToolTable { columns: string[]; rows: Record<string, unknown>[] }
 const toolModal = ref<{ title: string; content: string; table?: ToolTable } | null>(null)
 const modalCopied = ref(false)
 const runningSqlIdx = ref(new Set<number>())
+const jsCopiedIdx = ref<number | null>(null)
 // Incremented on each send and on Stop; lets background IPC completions know
 // whether their result is still relevant.
 const generationToken = ref(0)
@@ -324,13 +347,15 @@ onMounted(() => {
   refreshProviderSettings()
   unsubSettingsChanged = window.api.onLlmSettingsChanged(refreshProviderSettings)
   unsubConfirmRequest = window.api.onLlmConfirmRequest((e) => {
+    const confirmType = e.type ?? 'ddl'
     messages.value.push({
       role: 'tool_confirm',
       content: e.statement,
-      toolName: 'execute_ddl',
+      toolName: confirmType === 'javascript' ? 'execute_javascript' : 'execute_ddl',
       confirmReason: e.reason,
       confirmConversationId: e.conversationId,
-      confirmPending: true
+      confirmPending: true,
+      confirmType,
     })
     scrollToBottom()
   })
@@ -551,6 +576,27 @@ async function copyModalContent(): Promise<void> {
   setTimeout(() => { modalCopied.value = false }, 2000)
 }
 
+async function copyJsCode(code: string): Promise<void> {
+  const idx = messages.value.findIndex(m => m.parsed?.javascript === code)
+  await navigator.clipboard.writeText(code)
+  jsCopiedIdx.value = idx
+  setTimeout(() => { jsCopiedIdx.value = null }, 2000)
+}
+
+function insertNewline(): void {
+  const el = textareaEl.value
+  if (!el) {
+    userInput.value += '\n'
+    return
+  }
+  const start = el.selectionStart
+  const end = el.selectionEnd
+  userInput.value = userInput.value.slice(0, start) + '\n' + userInput.value.slice(end)
+  nextTick(() => {
+    el.selectionStart = el.selectionEnd = start + 1
+  })
+}
+
 async function sendMessage(): Promise<void> {
   const text = userInput.value.trim()
   if (!text || loading.value) {
@@ -588,7 +634,16 @@ async function sendMessage(): Promise<void> {
     const lastStreamingIdx = findLastStreamingIdx()
 
     if (lastStreamingIdx >= 0) {
-      const assistantMsg = messages.value[lastStreamingIdx]
+      // Remove any EARLIER streaming bubbles — they hold partial chunks from
+      // pre-tool-call iterations and are superseded by the complete result.reply
+      // that lands on the final bubble.
+      for (let i = lastStreamingIdx - 1; i >= 0; i--) {
+        if (messages.value[i].role === 'assistant' && messages.value[i].streaming) {
+          messages.value.splice(i, 1)
+        }
+      }
+
+      const assistantMsg = messages.value[findLastStreamingIdx()]
       assistantMsg.content = result.reply
       assistantMsg.streaming = false
       try {
@@ -837,8 +892,47 @@ async function scrollToBottom(): Promise<void> {
   font-size: 12px;
   color: #e2e8f0;
   padding: 10px;
-  white-space: pre-wrap;
-  word-break: break-all;
+  white-space: pre;
+  overflow-x: auto;
+  margin: 0;
+}
+
+/* JavaScript code block (Intent E) — mirrors the SQL block style */
+.ai-js-block {
+  background: #1e1e2e;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.ai-js-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: rgba(255,255,255,0.05);
+}
+
+.ai-js-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #f0c674;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ai-js-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ai-js-code {
+  font-family: 'SFMono-Regular', 'Consolas', monospace;
+  font-size: 12px;
+  color: #e2e8f0;
+  padding: 10px;
+  white-space: pre;
+  overflow-x: auto;
   margin: 0;
 }
 
@@ -848,6 +942,7 @@ async function scrollToBottom(): Promise<void> {
   color: var(--text);
   line-height: 1.5;
   margin-bottom: 4px;
+  margin-top: 0;
 }
 
 .ai-warnings {
@@ -871,12 +966,118 @@ async function scrollToBottom(): Promise<void> {
   content: '⚠ ';
 }
 
-/* Plain text fallback */
+/* Plain text fallback (now markdown-rendered) */
 .ai-plain-text {
-  font-family: inherit;
-  white-space: pre-wrap;
   font-size: 13px;
   margin: 0;
+}
+
+/* Shared markdown styles used by both plain-text and explanation.
+   :deep() is required because the content is injected via v-html and
+   does not receive Vue's scoped data attribute. */
+:deep(.ai-markdown) {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+:deep(.ai-markdown) > *:first-child { margin-top: 0; }
+:deep(.ai-markdown) > *:last-child  { margin-bottom: 0; }
+
+:deep(.ai-markdown) p {
+  margin: 0 0 8px;
+}
+
+:deep(.ai-markdown) h1,
+:deep(.ai-markdown) h2,
+:deep(.ai-markdown) h3,
+:deep(.ai-markdown) h4 {
+  margin: 12px 0 4px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+:deep(.ai-markdown) h1 { font-size: 16px; }
+:deep(.ai-markdown) h2 { font-size: 15px; }
+:deep(.ai-markdown) h3 { font-size: 14px; }
+:deep(.ai-markdown) h4 { font-size: 13px; }
+
+:deep(.ai-markdown) ul,
+:deep(.ai-markdown) ol {
+  margin: 4px 0 8px;
+  padding-left: 20px;
+}
+
+:deep(.ai-markdown) li {
+  margin-bottom: 2px;
+}
+
+:deep(.ai-markdown) code {
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 12px;
+  background: var(--surface2, rgba(0,0,0,0.06));
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+:deep(.ai-markdown) pre {
+  background: #1e1e2e;
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+
+:deep(.ai-markdown) pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  color: #cdd6f4;
+}
+
+:deep(.ai-markdown) blockquote {
+  margin: 6px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+
+:deep(.ai-markdown) hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 10px 0;
+}
+
+/* Markdown tables */
+:deep(.ai-markdown) table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  margin: 8px 0;
+  border: 1px solid #d1d5db;
+}
+
+:deep(.ai-markdown) th,
+:deep(.ai-markdown) td {
+  border: 1px solid #d1d5db;
+  padding: 5px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+:deep(.ai-markdown) th {
+  background: #f3f4f6;
+  font-weight: 600;
+  color: #374151;
+}
+
+:deep(.ai-markdown) tr:nth-child(even) td {
+  background: #f9fafb;
+}
+
+:deep(.ai-markdown) tr:hover td {
+  background: #eff6ff;
 }
 
 /* Tool call steps */

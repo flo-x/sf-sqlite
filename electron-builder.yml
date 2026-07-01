@@ -41,8 +41,13 @@ mac:
       arch:
         - x64
         - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
 dmg:
   artifactName: ${name}-${version}.${ext}
+  license: resources/license.rtf
 linux:
   target:
     - target: AppImage
@@ -56,6 +61,6 @@ appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: true
 publish:
-  provider: generic
-  url: https://example.com/auto-update
-  channel: latest
+  provider: github
+  owner: flo-x
+  repo: sf-sqlite

@@ -410,6 +410,7 @@ const outputTab = ref<'logs' | 'result'>('logs')
 const logList = ref<HTMLElement | null>(null)
 
 let offScriptLog: (() => void) | null = null
+let offScriptLogBatch: (() => void) | null = null
 let offScriptComplete: (() => void) | null = null
 let offScriptProgress: (() => void) | null = null
 
@@ -434,6 +435,8 @@ function pushLog(level: ScriptLog['level'], ...args: string[]): void {
 function teardownListeners(): void {
   offScriptLog?.()
   offScriptLog = null
+  offScriptLogBatch?.()
+  offScriptLogBatch = null
   offScriptComplete?.()
   offScriptComplete = null
   offScriptProgress?.()
@@ -454,11 +457,17 @@ async function runScript(): Promise<void> {
 
   pushLog('log', '▶ Script started')
 
-  // Both onScriptLog and onScriptComplete travel via webContents.send on the same
-  // ordered IPC channel, so completion is guaranteed to arrive after all log messages.
-  offScriptLog = window.api.onScriptLog((e) => {
-    if (e.runId !== runId) return
-    logs.value.push({ level: e.level, args: e.args, ts: e.ts })
+  // Logs arrive in batches (flushed every 50 ms) to reduce IPC round-trips.
+  // Completion is still sent on the same ordered channel so it always arrives
+  // after the final batch.
+  offScriptLogBatch = window.api.onScriptLogBatch((batch) => {
+    const relevant = batch.filter((e) => e.runId === runId)
+    if (relevant.length === 0) {
+      return
+    }
+    for (const e of relevant) {
+      logs.value.push({ level: e.level, args: e.args, ts: e.ts })
+    }
     nextTick(() => {
       if (logList.value) logList.value.scrollTop = logList.value.scrollHeight
     })
@@ -571,19 +580,60 @@ function onKeydown(e: KeyboardEvent): void {
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
+/**
+ * If the user arrived via "Open in Script Editor" from the AI chat, consume
+ * the pendingCode from history.state and open it as a new, distinctly-named
+ * unsaved script.
+ *
+ * Key design choices:
+ * - Uses history.replaceState to remove pendingCode immediately so that
+ *   navigating away and back does not re-apply the same code.
+ * - Does NOT call newScript() to avoid restoring previously-buffered unsaved
+ *   content from the null-slot edit buffer.
+ * - Sets a timestamped name so the script is clearly distinct from any
+ *   "Untitled Script" the user may already have in progress.
+ */
+function applyPendingCode(): void {
+  const state = history.state as Record<string, unknown>
+  const pendingCode = state?.pendingCode
+  if (typeof pendingCode !== 'string' || !pendingCode.trim()) {
+    return
+  }
+
+  // Consume the state so re-activation does not re-apply the same code.
+  history.replaceState({ ...state, pendingCode: undefined }, '')
+
+  // Save whatever is currently displayed before switching away from it.
+  flushToBuffer()
+
+  // Open a fresh unsaved slot with a unique timestamped name.
+  const ts = new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+  activeScript.savedId = null
+  activeScript.name = `AI Script — ${ts}`
+  activeScript.language = 'javascript'
+  activeScript.code = pendingCode
+  activeScript.dirty = true
+  showHelp.value = false
+  applyToEditor(pendingCode)
+}
+
 onMounted(async () => {
   if (!conn.dbConnected) return
   await loadScripts()
   await nextTick()
   initEditor()
+  applyPendingCode()
   // NOTE: window listener is managed by onActivated/onDeactivated (keep-alive).
 })
 
 // With <keep-alive>, onActivated/onDeactivated fire on every navigation in/out.
 // Using them instead of onMounted/onBeforeUnmount ensures the global keydown
 // listener is only active while this view is actually visible.
+// applyPendingCode() is also called here so that subsequent "Open in Script
+// Editor" clicks work correctly after the initial mount.
 onActivated(() => {
   window.addEventListener('keydown', onKeydown)
+  applyPendingCode()
 })
 
 onDeactivated(() => {

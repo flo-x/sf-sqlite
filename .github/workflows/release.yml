@@ -10,8 +10,19 @@ permissions:
   contents: write
 
 jobs:
+  # ── Create draft release ───────────────────────────────────────────────────
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create draft release with auto-generated notes
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+
   # ── macOS arm64 (Apple Silicon) ────────────────────────────────────────────
   build-mac-arm64:
+    needs: create-release
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -32,10 +43,14 @@ jobs:
       - name: Upload artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.dmg
+          draft: true
+          files: |
+            dist/*.dmg
+            dist/*.zip
 
   # ── macOS x64 (Intel) ─────────────────────────────────────────────────────
   build-mac-x64:
+    needs: create-release
     runs-on: macos-13
     steps:
       - name: Checkout
@@ -56,10 +71,14 @@ jobs:
       - name: Upload artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.dmg
+          draft: true
+          files: |
+            dist/*.dmg
+            dist/*.zip
 
   # ── Windows x64 + arm64 ───────────────────────────────────────────────────
   build-win:
+    needs: create-release
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -80,10 +99,12 @@ jobs:
       - name: Upload artifacts
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
           files: dist/*.exe
 
   # ── Linux x64 ─────────────────────────────────────────────────────────────
   build-linux:
+    needs: create-release
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -107,6 +128,7 @@ jobs:
       - name: Upload artifacts
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
           files: |
             dist/*.AppImage
             dist/*.deb

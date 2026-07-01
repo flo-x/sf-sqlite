@@ -1,8 +1,11 @@
-import { app, shell, BrowserWindow, dialog, session } from 'electron'
+import { app, shell, BrowserWindow, dialog, session, ipcMain } from 'electron'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
+import { readFileSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { autoUpdater } from 'electron-updater'
 import { registerIpcHandlers } from './ipc-handlers'
+import { applyExtraCaCert, setShellCaCertPath, disablePatch } from './tls-patch'
 import * as db from './database'
 
 // ── Fix PATH for packaged macOS/Linux apps ─────────────────────────────────────
@@ -41,6 +44,133 @@ let shellPathError: string | null = null
     shellPathError = `Could not spawn login shell (${userShell}): ${(err as Error).message}`
   }
 })()
+
+// ── Capture NODE_EXTRA_CA_CERTS from login shell ───────────────────────────────
+// Same technique as fixPath above.  Non-fatal if it fails.
+;(function captureShellCaCert(): void {
+  if (process.platform === 'win32') return
+  const userShell = process.env.SHELL || '/bin/zsh'
+  try {
+    const result = execFileSync(userShell, ['-lc', 'printf "%s" "$NODE_EXTRA_CA_CERTS"'], {
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).toString().trim()
+    if (result) {
+      setShellCaCertPath(result)
+      // Also propagate into process.env so node internals that read
+      // NODE_EXTRA_CA_CERTS directly also benefit.
+      process.env.NODE_EXTRA_CA_CERTS = result
+    }
+  } catch {
+    // non-fatal — if the shell fails we just have no auto-detected cert
+  }
+})()
+
+// ── Apply TLS patch early ──────────────────────────────────────────────────────
+// sf-settings.json (explicit user config) takes priority over the shell env.
+// This runs before app.whenReady() so all LLM SDK calls inherit the patch.
+;(function initTlsPatch(): void {
+  const shellCert = process.env.NODE_EXTRA_CA_CERTS ?? null
+  try {
+    const sfSettingsPath = join(app.getPath('userData'), 'sf-settings.json')
+    const sfSettings = JSON.parse(readFileSync(sfSettingsPath, 'utf-8')) as {
+      extraCaCertPath?: string
+      disableCaCertPatch?: boolean
+    }
+    if (sfSettings.disableCaCertPatch) {
+      disablePatch()
+      return
+    }
+    const certPath = sfSettings.extraCaCertPath || shellCert
+    if (certPath) {
+      applyExtraCaCert(certPath)
+    }
+  } catch {
+    // sf-settings.json doesn't exist yet — try shell-captured path
+    if (shellCert) {
+      applyExtraCaCert(shellCert)
+    }
+  }
+})()
+
+// ── Version comparison helper ──────────────────────────────────────────────
+function isNewerVersion(latest: string, current: string): boolean {
+  const parse = (v: string): number[] => v.replace(/^v/, '').split('.').map(Number)
+  const [la, lb, lc = 0] = parse(latest)
+  const [ca, cb, cc = 0] = parse(current)
+  if (la !== ca) {
+    return la > ca
+  }
+  if (lb !== cb) {
+    return lb > cb
+  }
+  return lc > cc
+}
+
+// ── macOS: version check via GitHub API (no auto-update without notarization) ──
+async function checkForUpdatesMac(win: BrowserWindow): Promise<void> {
+  const https = await import('https')
+  const response = await new Promise<string>((resolve, reject) => {
+    const req = https.get(
+      'https://api.github.com/repos/flo-x/sf-sqlite/releases/latest',
+      { headers: { 'User-Agent': `sf-sqlite/${app.getVersion()}` } },
+      (res) => {
+        let body = ''
+        res.on('data', (chunk: Buffer) => { body += chunk })
+        res.on('end', () => resolve(body))
+      }
+    )
+    req.on('error', reject)
+    req.setTimeout(10_000, () => { req.destroy(); reject(new Error('timeout')) })
+  })
+  const release = JSON.parse(response) as { tag_name: string }
+  const latestVersion = release.tag_name.replace(/^v/, '')
+  if (isNewerVersion(latestVersion, app.getVersion())) {
+    win.webContents.send('update:available', { version: latestVersion, manual: true })
+  }
+}
+
+function setupAutoUpdater(win: BrowserWindow): void {
+  if (is.dev) {
+    return
+  }
+
+  if (process.platform === 'darwin') {
+    // macOS: without notarization we can't auto-install, so just notify the user
+    // and let them download the new DMG manually from the releases page.
+    ipcMain.handle('update:open-releases-page', () =>
+      shell.openExternal('https://github.com/flo-x/sf-sqlite/releases')
+    )
+    setTimeout(() => checkForUpdatesMac(win).catch(() => {}), 5000)
+    return
+  }
+
+  // Windows / Linux: full auto-update via electron-updater
+  autoUpdater.autoDownload = false
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('update-available', (info) => {
+    win.webContents.send('update:available', { version: info.version, manual: false })
+  })
+
+  autoUpdater.on('download-progress', (progress) => {
+    win.webContents.send('update:progress', Math.round(progress.percent))
+  })
+
+  autoUpdater.on('update-downloaded', () => {
+    win.webContents.send('update:downloaded')
+  })
+
+  autoUpdater.on('error', () => {
+    // Silent — updates are a best-effort background feature.
+  })
+
+  ipcMain.handle('update:download', () => autoUpdater.downloadUpdate())
+  ipcMain.handle('update:install', () => autoUpdater.quitAndInstall())
+
+  // Delay the first check so it doesn't compete with app startup I/O.
+  setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5000)
+}
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -120,9 +250,10 @@ app.whenReady().then(() => {
   registerIpcHandlers()
   createWindow()
 
+  const win = BrowserWindow.getAllWindows()[0]
+  win.once('show', () => setupAutoUpdater(win))
+
   if (shellPathError) {
-    // Wait for the window to be visible before showing the dialog
-    const win = BrowserWindow.getAllWindows()[0]
     win.once('show', () => {
       dialog.showMessageBox(win, {
         type: 'warning',

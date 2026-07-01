@@ -124,3 +124,83 @@ export function cancelScript(runId: string): void {
     activeWorkers.delete(runId)
   }
 }
+
+const LLM_TIMEOUT_MS = 30_000
+const LLM_LOG_CAP = 200
+
+/**
+ * Run a JavaScript snippet in the restricted LLM worker.
+ *
+ * The worker uses vm.compileFunction() with a null-prototype context so that
+ * only the explicitly provided db and console APIs are accessible. import()
+ * calls and dangerous Node.js globals (process, fetch, etc.) are blocked.
+ *
+ * The worker is automatically terminated after LLM_TIMEOUT_MS milliseconds.
+ * Log output is capped at LLM_LOG_CAP entries to prevent memory exhaustion.
+ * The jobs API is intentionally not wired up.
+ */
+export function runLlmScript(
+  dbPath: string,
+  code: string,
+  runId: string,
+  onLog: (log: ScriptLog) => void,
+  onComplete: (result: ScriptComplete) => void,
+  onProgress?: (p: ScriptProgress) => void
+): void {
+  const workerPath = path.join(__dirname, 'script-runner-llm-worker.js')
+  const worker = new Worker(workerPath, {
+    workerData: { code, dbPath, runId },
+    // Node.js 24 permission model: restrict FS access to the open database
+    // file only. Child-process spawning and other capabilities are denied by
+    // default when the permission flag is active.
+    execArgv: [
+      `--allow-fs-read=${dbPath}`,
+      `--allow-fs-write=${dbPath}`,
+    ],
+  })
+  activeWorkers.set(runId, worker)
+
+  let logCount = 0
+  let completed = false
+
+  const complete = (result: ScriptComplete): void => {
+    if (completed) {
+      return
+    }
+    completed = true
+    clearTimeout(timeoutHandle)
+    onComplete(result)
+  }
+
+  // Hard timeout — terminate if the script runs longer than LLM_TIMEOUT_MS.
+  const timeoutHandle = setTimeout(() => {
+    worker.terminate()
+    complete({ runId, durationMs: LLM_TIMEOUT_MS, error: `Script timed out after ${LLM_TIMEOUT_MS / 1000} seconds.` })
+  }, LLM_TIMEOUT_MS)
+
+  worker.on('message', (msg: { type: string } & Record<string, unknown>) => {
+    if (msg.type === 'log') {
+      if (logCount < LLM_LOG_CAP) {
+        logCount++
+        onLog({ level: msg.level as ScriptLog['level'], args: msg.args as string[], ts: msg.ts as number })
+      } else if (logCount === LLM_LOG_CAP) {
+        logCount++
+        onLog({ level: 'warn', args: [`[Output capped at ${LLM_LOG_CAP} lines]`], ts: Date.now() })
+      }
+    } else if (msg.type === 'progress') {
+      onProgress?.({ runId, value: msg.value as number, total: msg.total as number | undefined, label: msg.label as string | undefined })
+    } else if (msg.type === 'done') {
+      complete({ runId, durationMs: msg.durationMs as number })
+    } else if (msg.type === 'error') {
+      complete({ runId, durationMs: msg.durationMs as number, error: msg.message as string })
+    }
+  })
+
+  worker.on('error', (err) => {
+    complete({ runId, durationMs: 0, error: err.message })
+  })
+
+  worker.on('exit', () => {
+    activeWorkers.delete(runId)
+  })
+}

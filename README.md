@@ -7,6 +7,7 @@ A desktop application for macOS, Windows and Linux that connects **Salesforce** 
 ## Features
 
 ### Connections
+
 - Open an existing **SQLite database** or create a new one.
 - Connect to Salesforce using **OAuth 2.0** (Connected App) or the **Salesforce CLI** (if you have `sf` installed and orgs already authenticated).
 - The app remembers recently opened databases for quick access.
@@ -14,6 +15,7 @@ A desktop application for macOS, Windows and Linux that connects **Salesforce** 
 ---
 
 ### SF → SQLite (Extract Jobs)
+
 Download data from Salesforce into your local SQLite database.
 
 - Pick any Salesforce object, or write a **full SOQL query** to extract exactly what you need.
@@ -28,6 +30,7 @@ Download data from Salesforce into your local SQLite database.
 ---
 
 ### SQLite → SF (Write-back Jobs)
+
 Push data from your local SQLite database back to Salesforce.
 
 - Write a SQL query that selects the rows to send.
@@ -41,6 +44,7 @@ Push data from your local SQLite database back to Salesforce.
 ---
 
 ### Query Editor
+
 Write and execute queries directly against your data.
 
 - Full-featured **SQL editor** with syntax highlighting, autocomplete for table and column names, and keyboard shortcuts.
@@ -54,6 +58,7 @@ Write and execute queries directly against your data.
 ---
 
 ### Database Explorer
+
 Browse and manage your SQLite database.
 
 - See all tables and views with row counts.
@@ -67,6 +72,7 @@ Browse and manage your SQLite database.
 ---
 
 ### JavaScript Script Runner
+
 Execute JavaScript code directly against your open database, and orchestrate full data-movement pipelines.
 
 - Write scripts using a built-in `db` API to run queries, iterate rows, and build automation logic.
@@ -79,11 +85,13 @@ Execute JavaScript code directly against your open database, and orchestrate ful
 ---
 
 ### AI Assistant
+
 An LLM-powered assistant that understands your database schema and can query and modify it on your behalf.
 
 - Ask questions in plain English — the assistant runs SQL queries and interprets the results for you.
 - Supports **OpenAI**, **Anthropic**, **Mistral**, **Ollama** (local), and **LiteLLM** (proxy).
 - Can execute DDL/DML statements (CREATE, INSERT, UPDATE, …) with your explicit confirmation before each change.
+- Can execute Javascript with your explicit confirmation.
 - Conversation history is preserved per database session.
 - Customize the system prompt template from the Settings view.
 
@@ -106,3 +114,4 @@ npm run dist:mac   # package for macOS
 npm run dist:win   # package for Windows
 npm run dist:linux # package for Linux
 ```
+

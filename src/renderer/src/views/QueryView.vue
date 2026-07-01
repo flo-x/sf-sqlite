@@ -157,7 +157,7 @@
         <span class="ai-drawer-title">AI Assistant</span>
         <button class="ai-drawer-close" title="Close" @click="aiDrawerOpen = false">✕</button>
       </div>
-      <AiChatPanel @insert-sql="insertSqlFromAi" style="flex:1;min-height:0;overflow:hidden;" />
+      <AiChatPanel @insert-sql="insertSqlFromAi" @insert-js="openInScriptEditor" style="flex:1;min-height:0;overflow:hidden;" />
     </div>
 
     <!-- Unsaved dialog -->
@@ -428,6 +428,10 @@ function insertAtCursor(text: string): void {
   if (!pos) return
   editor.executeEdits('schema-browser', [{ range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column), text }])
   editor.focus()
+}
+
+function openInScriptEditor(code: string): void {
+  router.push({ path: '/scripts', state: { pendingCode: code } })
 }
 
 function insertSqlFromAi(sql: string): void {
@@ -746,8 +750,27 @@ onUnmounted(() => { editor?.dispose() })
 .schema-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
 
 /* AI toggle button */
-.ai-toggle-btn { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; }
-.ai-toggle-btn.active { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.ai-toggle-btn {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #c4b5fd;
+  border-color: #c4b5fd;
+  background: transparent;
+  box-shadow: 0 0 3px 0px rgba(167, 139, 250, 0.45), 0 0 7px 1px rgba(139, 92, 246, 0.2);
+  transition: box-shadow 0.2s, background 0.2s, color 0.2s, border-color 0.2s;
+}
+.ai-toggle-btn:hover:not(.active) {
+  color: #ddd6fe;
+  border-color: #ddd6fe;
+  box-shadow: 0 0 5px 1px rgba(167, 139, 250, 0.65), 0 0 11px 2px rgba(139, 92, 246, 0.3);
+}
+.ai-toggle-btn.active {
+  background: #5b21b6;
+  color: #ede9fe;
+  border-color: #5b21b6;
+  box-shadow: 0 0 4px 1px rgba(91, 33, 182, 0.5), 0 0 9px 2px rgba(91, 33, 182, 0.25);
+}
 
 /* AI panel */
 .ai-drawer {

@@ -15,6 +15,27 @@
       </div>
     </header>
 
+    <!-- Update banner — only visible when an update is available or downloading -->
+    <div v-if="updateState !== 'idle'" class="update-banner">
+      <template v-if="updateState === 'available'">
+        <span>Version {{ updateVersion }} is available</span>
+        <button class="update-btn" @click="startDownload">
+          {{ updateManual ? 'Download manually' : 'Download' }}
+        </button>
+      </template>
+      <template v-else-if="updateState === 'downloading'">
+        <span>Downloading update… {{ updatePercent }}%</span>
+        <div class="update-progress-track">
+          <div class="update-progress-fill" :style="{ width: updatePercent + '%' }"></div>
+        </div>
+      </template>
+      <template v-else-if="updateState === 'ready'">
+        <span>Update ready — restart to apply</span>
+        <button class="update-btn update-btn-primary" @click="installNow">Restart &amp; Install</button>
+        <button class="update-btn update-btn-ghost" @click="updateState = 'idle'">Later</button>
+      </template>
+    </div>
+
     <div class="app-body">
     <!-- Sidebar -->
     <nav class="sidebar">
@@ -83,13 +104,32 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useConnectionStore } from './stores/connection'
 import { useJobStore } from './stores/job'
 import NavButton from './components/NavButton.vue'
 
 const conn = useConnectionStore()
 const jobs = useJobStore()
+
+type UpdateState = 'idle' | 'available' | 'downloading' | 'ready'
+const updateState = ref<UpdateState>('idle')
+const updateVersion = ref('')
+const updatePercent = ref(0)
+const updateManual = ref(false)
+
+async function startDownload(): Promise<void> {
+  if (updateManual.value) {
+    await window.api.openReleasesPage()
+    return
+  }
+  updateState.value = 'downloading'
+  await window.api.downloadUpdate()
+}
+
+function installNow(): void {
+  window.api.installUpdate()
+}
 
 onMounted(async () => {
   // Re-hydrate connection state from the main process in case the renderer was
@@ -102,6 +142,25 @@ onMounted(async () => {
     jobs.completeJob(e)
     conn.refreshDbInfo()
   })
-  window.addEventListener('beforeunload', () => { offProgress(); offComplete() })
+
+  const offUpdateAvailable = window.api.onUpdateAvailable((info) => {
+    updateVersion.value = info.version
+    updateManual.value = info.manual
+    updateState.value = 'available'
+  })
+  const offUpdateProgress = window.api.onUpdateProgress((percent) => {
+    updatePercent.value = percent
+  })
+  const offUpdateDownloaded = window.api.onUpdateDownloaded(() => {
+    updateState.value = 'ready'
+  })
+
+  window.addEventListener('beforeunload', () => {
+    offProgress()
+    offComplete()
+    offUpdateAvailable()
+    offUpdateProgress()
+    offUpdateDownloaded()
+  })
 })
 </script>

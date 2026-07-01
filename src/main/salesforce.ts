@@ -10,7 +10,7 @@ import { promisify } from 'util'
 import { readFile, access } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { OrgInfo, CliOrg, SObjectSummary, FieldDescriptor, PasswordCreds, QueryResult } from '../shared/types'
+import type { OrgInfo, CliOrg, CliDiagnosticStep, CliOrgsResult, SObjectSummary, FieldDescriptor, PasswordCreds, QueryResult } from '../shared/types'
 
 const execFileAsync = promisify(execFile)
 
@@ -26,10 +26,23 @@ const SFDX_EXTRA_PATHS: string[] = [
   '/usr/local/bin/sfdx',
 ]
 
+// User-supplied path to the sf binary, persisted across sessions.
+let customSfPath: string | null = null
+
+export function setCustomSfPath(path: string | null): void {
+  customSfPath = path || null
+}
+
+export function getCustomSfPath(): string | null {
+  return customSfPath
+}
+
 /** Returns every candidate command to try for a given base name, PATH-based first. */
 function sfCandidates(base: 'sf' | 'sfdx'): string[] {
   const extras = base === 'sf' ? SF_EXTRA_PATHS : SFDX_EXTRA_PATHS
-  return [base, ...extras]
+  // User-supplied path is tried first so it takes priority over all auto-detected ones.
+  const userPaths = base === 'sf' && customSfPath ? [customSfPath] : []
+  return [...userPaths, base, ...extras]
 }
 
 async function execSfCommand(
@@ -190,40 +203,108 @@ export function disconnectSalesforce(): void {
   currentOrgInfo = null
 }
 
-export async function listCliOrgs(): Promise<CliOrg[]> {
-  // Try 'sf' (v2+) then 'sfdx' (v1), each with multiple PATH/absolute candidates
+/**
+ * Resolve a bare command name to its full path via /usr/bin/which, or confirm
+ * that an absolute path exists.  Returns the resolved path or null if not found.
+ */
+async function resolveCommand(cmd: string): Promise<string | null> {
+  if (cmd.startsWith('/') || cmd.includes('/')) {
+    try {
+      await access(cmd)
+      return cmd
+    } catch {
+      return null
+    }
+  }
+  // Bare name: use /usr/bin/which (always present on macOS) so we don't depend
+  // on the Electron process PATH to find 'which' itself.
+  try {
+    const { stdout } = await execFileAsync('/usr/bin/which', [cmd], { timeout: 3000 })
+    const resolved = stdout.trim()
+    return resolved || null
+  } catch {
+    return null
+  }
+}
+
+function parseCliOrgs(parsed: Record<string, unknown>, isScratch: boolean): CliOrg[] {
+  const key = isScratch ? 'scratchOrgs' : 'nonScratchOrgs'
+  return ((parsed?.result as Record<string, unknown> ?? {})[key] as Record<string, unknown>[] ?? [])
+    .map((o) => ({
+      username: o.username as string,
+      alias: o.alias as string | undefined,
+      orgId: o.orgId as string | undefined,
+      instanceUrl: o.instanceUrl as string | undefined,
+      isDefaultOrg: o.isDefaultOrg as boolean | undefined,
+      isScratch,
+      connectedStatus: o.connectedStatus as string | undefined
+    }))
+}
+
+export async function listCliOrgs(): Promise<CliOrgsResult> {
+  const diagnostics: CliDiagnosticStep[] = []
+
+  // Step 1: always show the PATH the Electron main process sees
+  const pathEnv = process.env.PATH ?? ''
+  diagnostics.push({
+    label: 'PATH',
+    ok: true,
+    detail: pathEnv || '(not set)'
+  })
+
   for (const [base, args] of [
     ['sf',   ['org', 'list', '--json']],
     ['sfdx', ['force:org:list', '--json']]
   ] as ['sf' | 'sfdx', string[]][]) {
+    const candidates = sfCandidates(base)
+
+    // Step 2: find the first accessible binary
+    let foundCmd: string | null = null
+    for (const cmd of candidates) {
+      foundCmd = await resolveCommand(cmd)
+      if (foundCmd) break
+    }
+
+    if (!foundCmd) {
+      diagnostics.push({
+        label: `${base} command`,
+        ok: false,
+        detail: `Not found. Searched:\n${candidates.map(c => `  ${c}`).join('\n')}`
+      })
+      continue
+    }
+
+    diagnostics.push({
+      label: `${base} command`,
+      ok: true,
+      detail: `Found: ${foundCmd}`
+    })
+
+    // Step 3: execute the org-list command
+    const cmdLabel = `${base} ${args.join(' ')}`
     try {
-      const stdout = await execSfCommand(base, args, { timeout: 10_000 })
-      const parsed = JSON.parse(stdout)
-      const result = parsed?.result ?? {}
-      const nonScratch: CliOrg[] = (result.nonScratchOrgs ?? []).map((o: Record<string, unknown>) => ({
-        username: o.username as string,
-        alias: o.alias as string | undefined,
-        orgId: o.orgId as string | undefined,
-        instanceUrl: o.instanceUrl as string | undefined,
-        isDefaultOrg: o.isDefaultOrg as boolean | undefined,
-        isScratch: false,
-        connectedStatus: o.connectedStatus as string | undefined
-      }))
-      const scratch: CliOrg[] = (result.scratchOrgs ?? []).map((o: Record<string, unknown>) => ({
-        username: o.username as string,
-        alias: o.alias as string | undefined,
-        orgId: o.orgId as string | undefined,
-        instanceUrl: o.instanceUrl as string | undefined,
-        isDefaultOrg: o.isDefaultOrg as boolean | undefined,
-        isScratch: true,
-        connectedStatus: o.connectedStatus as string | undefined
-      }))
-      return [...nonScratch, ...scratch]
-    } catch {
-      // try next CLI variant
+      const { stdout } = await execFileAsync(foundCmd, args, { timeout: 10_000 })
+      const parsed = JSON.parse(stdout) as Record<string, unknown>
+      const orgs = [...parseCliOrgs(parsed, false), ...parseCliOrgs(parsed, true)]
+
+      diagnostics.push({
+        label: cmdLabel,
+        ok: true,
+        detail: `Found ${orgs.length} authenticated org(s)`
+      })
+
+      return { orgs, diagnostics }
+    } catch (err) {
+      diagnostics.push({
+        label: cmdLabel,
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err)
+      })
+      // fall through to try sfdx
     }
   }
-  return []
+
+  return { orgs: [], diagnostics }
 }
 
 export async function connectCliOrg(username: string): Promise<OrgInfo> {

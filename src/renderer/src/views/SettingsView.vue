@@ -22,6 +22,11 @@
           :class="{ active: settingsTab === 'prompt' }"
           @click="settingsTab = 'prompt'"
         >System Prompt</button>
+        <button
+          class="settings-top-tab"
+          :class="{ active: settingsTab === 'network' }"
+          @click="settingsTab = 'network'"
+        >Network</button>
       </div>
 
       <!-- LLM Provider Section -->
@@ -280,6 +285,9 @@
             ✕ Connection failed — click to view
           </button>
           <div style="flex:1" />
+          <button class="btn btn-secondary" :disabled="!isDirty || saving" @click="discardChanges">
+            Discard
+          </button>
           <button class="btn btn-primary" :disabled="saving" @click="saveSettings">
             <span v-if="saving" class="spinner" style="width:14px;height:14px;border-width:2px" />
             <span v-else>Save</span>
@@ -314,11 +322,113 @@
             title="Discard customisation and restore the built-in prompt"
           >Restore to default</button>
           <div style="flex:1" />
+          <button class="btn btn-secondary" :disabled="!isDirty || saving" @click="discardChanges">
+            Discard
+          </button>
           <button class="btn btn-primary" :disabled="saving" @click="saveSettings">
             <span v-if="saving" class="spinner" style="width:14px;height:14px;border-width:2px" />
             <span v-else>Save</span>
           </button>
           <div v-if="saved" class="test-result test-ok">Saved.</div>
+        </div>
+      </section>
+
+      <!-- Network Section -->
+      <section v-if="settingsTab === 'network'" class="settings-section">
+        <h3 class="settings-section-title">Network &amp; Certificates</h3>
+
+        <p class="settings-hint" style="margin-top:0;margin-bottom:14px">
+          In corporate environments with a TLS-intercepting proxy, Node.js (used
+          for all LLM API calls) needs to trust an extra CA certificate bundle.
+          Set <code class="prompt-code">NODE_EXTRA_CA_CERTS</code> in your shell
+          profile, or specify the path here explicitly.
+        </p>
+
+        <!-- Auto-detected from shell env -->
+        <div class="form-group" v-if="networkShellCert">
+          <label>Auto-detected from shell</label>
+          <div class="network-detected-path">{{ networkShellCert }}</div>
+          <div class="settings-hint" style="margin-top:4px">
+            This value was read from <code class="prompt-code">NODE_EXTRA_CA_CERTS</code>
+            in your login shell and is applied automatically.
+          </div>
+        </div>
+
+        <!-- Disable toggle -->
+        <div class="form-group">
+          <label class="network-toggle-row">
+            <input type="checkbox" v-model="networkPatchDisabled" />
+            <span>Disable CA certificate patch entirely</span>
+          </label>
+          <div class="settings-hint" style="margin-top:4px">
+            When checked, all certificate customisation is bypassed — useful for
+            testing whether the cert is the cause of a connection failure.
+            Takes effect after Save; requires an app restart to fully apply.
+          </div>
+        </div>
+
+        <!-- Manual override -->
+        <div class="form-group" :class="{ 'network-disabled-section': networkPatchDisabled }">
+          <label>CA Certificate file <span style="font-weight:400;color:var(--text-muted)">(override)</span></label>
+          <div class="cert-path-row">
+            <input
+              type="text"
+              class="form-input cert-path-input"
+              v-model="networkCertPath"
+              placeholder="/path/to/ca-bundle.pem"
+              spellcheck="false"
+            />
+            <button class="btn btn-secondary" @click="browseCaCert">Browse…</button>
+            <button
+              class="btn btn-secondary"
+              :disabled="!networkCertPath"
+              @click="networkCertPath = ''"
+              title="Remove the configured certificate path"
+            >Clear</button>
+          </div>
+          <div class="settings-hint" style="margin-top:4px">
+            Overrides the auto-detected path. Leave blank to use the auto-detected
+            value (if any).
+          </div>
+        </div>
+
+        <!-- Active cert indicator -->
+        <div v-if="networkActiveCert" class="form-group">
+          <label>Currently active</label>
+          <div class="network-detected-path network-active-path">{{ networkActiveCert }}</div>
+        </div>
+
+        <!-- Shell environment diagnostics -->
+        <details class="shell-diag-details">
+          <summary class="shell-diag-summary">Shell environment captured at startup</summary>
+          <div class="shell-diag-body">
+            <div class="shell-diag-row">
+              <span class="shell-diag-label">NODE_EXTRA_CA_CERTS</span>
+              <span v-if="networkShellCert" class="shell-diag-value">{{ networkShellCert }}</span>
+              <span v-else class="shell-diag-value shell-diag-empty">not set</span>
+            </div>
+            <div class="shell-diag-row">
+              <span class="shell-diag-label">PATH</span>
+              <span v-if="networkShellPath" class="shell-diag-value shell-diag-path">{{ networkShellPath }}</span>
+              <span v-else class="shell-diag-value shell-diag-empty">not captured</span>
+            </div>
+          </div>
+        </details>
+
+        <div class="settings-actions">
+          <div style="flex:1" />
+          <button
+            class="btn btn-secondary"
+            :disabled="!isNetworkDirty || networkSaving"
+            @click="discardNetworkChanges"
+          >
+            Discard
+          </button>
+          <button class="btn btn-primary" :disabled="networkSaving" @click="saveNetworkSettings">
+            <span v-if="networkSaving" class="spinner" style="width:14px;height:14px;border-width:2px" />
+            <span v-else>Save</span>
+          </button>
+          <div v-if="networkSaved" class="test-result test-ok">Saved.</div>
         </div>
       </section>
     </div>
@@ -373,7 +483,7 @@ const providers = [
   { id: 'litellm' as const, label: 'LiteLLM' }
 ]
 
-const settingsTab = ref<'provider' | 'prompt'>('provider')
+const settingsTab = ref<'provider' | 'prompt' | 'network'>('provider')
 const encryptionAvailable = ref(true)
 const saving = ref(false)
 const saved = ref(false)
@@ -386,6 +496,34 @@ const modelLists = ref<Record<string, string[]>>({})
 const defaultPromptTemplate = ref('')
 const promptText = ref('')
 const schemaPlaceholder = '{{schema}}'
+
+// Last-committed (saved or freshly loaded) snapshots — used for dirty-detection and discard.
+const committedSettings = ref<LlmSettings | null>(null)
+const committedPromptText = ref('')
+
+// ── Network / certificate settings ────────────────────────────────────────────
+const networkShellPath = ref<string | null>(null)
+const networkShellCert = ref<string | null>(null)
+const networkPatchDisabled = ref(false)
+const committedNetworkPatchDisabled = ref(false)
+const networkCertPath = ref('')
+const committedNetworkCertPath = ref('')
+const networkActiveCert = ref<string | null>(null)
+const networkSaving = ref(false)
+const networkSaved = ref(false)
+
+const isNetworkDirty = computed(() =>
+  networkCertPath.value !== committedNetworkCertPath.value ||
+  networkPatchDisabled.value !== committedNetworkPatchDisabled.value
+)
+
+const isDirty = computed(() => {
+  if (!committedSettings.value) return false
+  return (
+    JSON.stringify(settings.value) !== JSON.stringify(committedSettings.value) ||
+    promptText.value !== committedPromptText.value
+  )
+})
 
 // Whether an encrypted key blob exists in the settings file for each provider.
 // True even when decryption fails (e.g. macOS keychain permission denied).
@@ -474,8 +612,24 @@ onMounted(async () => {
     }
     defaultPromptTemplate.value = raw.defaultSystemPromptTemplate ?? ''
     promptText.value = settings.value.systemPromptTemplate || defaultPromptTemplate.value
+    // Capture committed state so discard can restore it
+    committedSettings.value = { ...settings.value }
+    committedPromptText.value = promptText.value
   } catch {
     // Fresh install — use defaults
+  }
+
+  try {
+    const netSettings = await window.api.getNetworkSettings()
+    networkShellPath.value = netSettings.shellPath
+    networkShellCert.value = netSettings.shellCaCertPath
+    networkCertPath.value = netSettings.savedCaCertPath ?? ''
+    committedNetworkCertPath.value = networkCertPath.value
+    networkPatchDisabled.value = netSettings.patchDisabled
+    committedNetworkPatchDisabled.value = netSettings.patchDisabled
+    networkActiveCert.value = await window.api.getActiveCaCertPath()
+  } catch {
+    // non-fatal
   }
 })
 
@@ -501,11 +655,49 @@ async function saveSettings(): Promise<void> {
     if (settings.value.litellmApiKey !== '') {
       litellmKeySet.value = true
     }
+    // Advance the committed snapshot so discard knows the new baseline.
+    committedSettings.value = { ...settings.value }
+    committedPromptText.value = promptText.value
     saved.value = true
     setTimeout(() => { saved.value = false }, 2000)
   } finally {
     saving.value = false
   }
+}
+
+function discardChanges(): void {
+  if (!committedSettings.value) return
+  settings.value = { ...committedSettings.value }
+  promptText.value = committedPromptText.value
+  testResult.value = null
+}
+
+async function browseCaCert(): Promise<void> {
+  const picked = await window.api.browseCaCert()
+  if (picked) {
+    networkCertPath.value = picked
+  }
+}
+
+async function saveNetworkSettings(): Promise<void> {
+  networkSaving.value = true
+  networkSaved.value = false
+  try {
+    const pathToSave = networkCertPath.value.trim() || null
+    await window.api.setCaCertPath(pathToSave, networkPatchDisabled.value)
+    committedNetworkCertPath.value = networkCertPath.value
+    committedNetworkPatchDisabled.value = networkPatchDisabled.value
+    networkActiveCert.value = await window.api.getActiveCaCertPath()
+    networkSaved.value = true
+    setTimeout(() => { networkSaved.value = false }, 2000)
+  } finally {
+    networkSaving.value = false
+  }
+}
+
+function discardNetworkChanges(): void {
+  networkCertPath.value = committedNetworkCertPath.value
+  networkPatchDisabled.value = committedNetworkPatchDisabled.value
 }
 
 async function copyError(): Promise<void> {
@@ -915,5 +1107,113 @@ async function loadModels(): Promise<void> {
   border-radius: 3px;
   padding: 1px 4px;
   color: var(--accent, #3b82f6);
+}
+
+/* Network / certificate settings */
+.cert-path-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.cert-path-input {
+  flex: 1;
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 12px;
+}
+
+.network-detected-path {
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 12px;
+  padding: 6px 10px;
+  background: var(--surface2, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.network-active-path {
+  color: var(--success, #22c55e);
+  border-color: var(--success, #22c55e);
+}
+
+/* Network disable toggle */
+.network-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.network-disabled-section {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Shell environment diagnostics */
+.shell-diag-details {
+  margin: 20px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--surface2, var(--surface));
+}
+
+.shell-diag-summary {
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-muted);
+  list-style: none;
+}
+
+.shell-diag-summary::before {
+  content: '▶ ';
+  font-size: 10px;
+}
+
+details[open] > .shell-diag-summary::before {
+  content: '▼ ';
+}
+
+.shell-diag-body {
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.shell-diag-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.shell-diag-label {
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.shell-diag-value {
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--text);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.shell-diag-path {
+  /* PATH entries are colon-separated — break at each colon so they read like a list */
+  word-break: break-all;
+}
+
+.shell-diag-empty {
+  color: var(--text-muted);
+  font-style: italic;
 }
 </style>

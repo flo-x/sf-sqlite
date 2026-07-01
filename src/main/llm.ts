@@ -2,8 +2,6 @@ import OpenAI from 'openai'
 import Anthropic from '@anthropic-ai/sdk'
 import { Mistral } from '@mistralai/mistralai'
 import { Ollama } from 'ollama'
-import { get_encoding } from 'tiktoken'
-
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type LlmProvider = 'openai' | 'anthropic' | 'mistral' | 'ollama' | 'litellm'
@@ -174,21 +172,8 @@ function isReasoningModel(model: string): boolean {
 
 // ── Token counting ─────────────────────────────────────────────────────────────
 
-let _enc: ReturnType<typeof get_encoding> | null = null
-
-function getEnc(): ReturnType<typeof get_encoding> {
-  if (!_enc) {
-    _enc = get_encoding('cl100k_base')
-  }
-  return _enc
-}
-
 function countTokens(text: string): number {
-  try {
-    return getEnc().encode(text).length
-  } catch {
-    return Math.ceil(text.length / 4)
-  }
+  return Math.ceil(text.length / 4)
 }
 
 function countMessageTokens(messages: ChatMessage[]): number {
@@ -227,7 +212,7 @@ function trimMessages(
  * the live DDL schema will be injected at runtime. Users can override this in
  * Settings → System Prompt; the placeholder must be preserved for schema injection.
  */
-export const DEFAULT_SYSTEM_PROMPT_TEMPLATE = `You are an expert SQLite data analyst and SQL assistant. You help users both analyze data and write SQL queries.
+export const DEFAULT_SYSTEM_PROMPT_TEMPLATE = `You are an expert SQLite data analyst and SQL assistant. You help users both analyze data and write SQL queries, and sometimes JavaScript code for data processing.
 
 ## Database Schema
 {{schema}}
@@ -241,18 +226,31 @@ Do not query the database for the schema. The schema is provided above, use that
 
 ## Detecting User Intent
 
-Before responding, identify which of the three intents the user has:
+Before responding, identify which of the following intents the user has:
 
 ### Intent A — Data Analysis
-Signals: "how many", "what is the distribution", "show me", "analyze", "summarize", "find", "what are the top", "is there a trend", "tell me about the data", "what insights", etc.
+Signals: "how many", "what is the distribution", "show me", "analyze", "summarize", "find", "what are the top", "is there a trend", "tell me about the data", "what insights", "clean up", "normalise", "transform", "process row by row", "apply regex", etc.
 The user wants **answers and insights**, not a query to copy. The user may also want new tables to be created, or existing data to be modified. You should:
 - Use the execute_sql tool proactively to fetch the data you need.
-- You can use the execute_ddl tool to run DDL/DML statements to create tables, indexes etc. However, if the user's request can be fulfilled without using DDL/DML, do not use the execute_ddl tool.
+- You can use the execute_ddl tool to run DDL/DML statements to create tables, indexes, bulk updates etc. However, if the user's request can be fulfilled without using DDL/DML, do not use the execute_ddl tool.
 - Interpret the results and present findings in plain language.
 - Create temporary tables when needed to perform the analysis, but only if impossible to do otherwise.
 - Omit the "sql" key from your response — the queries were internal steps, not the deliverable.
 - If the analysis is multi-step (e.g. first count totals, then compute ratios), call execute_sql and execute_ddl tools as many times as needed. Do not send two or more statements as one statement to the execute_sql and execute_ddl tools, as SQLite does not support that, but repeat the tool calls as needed.
 - The execute_sql tool caps results at 5000 rows. If it returns a "Too many rows" error, the dataset is too large for inline analysis. In that case switch to Intent B: explain the limitation to the user and provide the SQL queries they can run themselves to get the full result.
+
+**JavaScript as a last resort within Intent A:**
+If a step in the analysis or transformation genuinely cannot be expressed in SQL or DDL/DML, you may use execute_javascript. Use it only when SQL is provably insufficient — for example, SQLite lacks a built-in function you need, or the logic requires iterative per-row computation that cannot be expressed as a single SQL statement. Aggregations, filtering, joins, bulk INSERT/UPDATE, and CREATE TABLE AS SELECT must always use SQL, never JavaScript.
+Before calling execute_javascript, you MUST state in the "explanation" field exactly why SQL/DDL is insufficient, naming the specific limitation (e.g. "SQLite has no built-in regex replace function, so row-by-row normalisation of the phone column requires JavaScript"). This explanation is shown to the user before they decide whether to approve the script.
+The script runs in an isolated environment with access to:
+- db.query(sql, params?) → { columns: string[], rows: unknown[][] } — reads data; all rows loaded into memory
+- db.execute(sql, params?) → { changes: number, lastInsertRowid: number } — runs INSERT / UPDATE / DELETE
+- db.iterate(sql, params?) → IterableIterator<Record<string, unknown>> — lazy row-by-row cursor, use for large tables
+- db.transaction(fn) — wraps fn() in a BEGIN/COMMIT; batching writes in one transaction is 10–100× faster
+- console.log/warn/error(...) — output is captured and returned to the user as the tool result
+- Top-level await is supported; process.env, fetch(), import(), and require() are not available
+- There is no DOM: document, window, HTMLElement and all browser APIs are undefined
+If the script produces data, it MUST write it to a new SQLite table (CREATE TABLE + INSERT) rather than printing rows to console. Use console.log only for brief status messages (row counts, success/error confirmation). After the script completes, call execute_sql to query the result table and show the user the output. Name result tables with a clear prefix such as "ai_" (e.g. "ai_phone_normalised", "ai_revenue_by_month").
 
 ### Intent B — SQL Query Creation
 Signals: "write a query", "give me a query", "how do I select", "create a view", "build a query for", explicit request for SQL syntax, etc.
@@ -269,17 +267,29 @@ The user wants to understand the **shape of the data**, not its content. You sho
 - Describe tables, columns, types, and inferred relationships in plain language.
 - Omit the "sql" key unless a query genuinely helps illustrate the answer.
 
-When the intent is ambiguous, prefer Intent C for structural questions, Intent A for factual questions about data content, and Intent B only when the user explicitly asks for SQL.
+### Intent D — JavaScript Code Generation
+Signals: "write me a script", "give me JavaScript", "create a JS snippet", "generate JavaScript code", explicit requests for JS code as a deliverable.
+The user wants **JavaScript code to run themselves**, not an autonomous execution. You should:
+- Generate the code using the same db.* and console.* API documented under Intent A.
+- Do NOT call execute_javascript — return the code in the "javascript" key instead.
+- The value of the "javascript" key MUST be the raw code as a plain JSON string — no markdown code fences (no \`\`\` blocks), no language tags, just the source code itself.
+- Do NOT put the code in the "explanation" field, in a markdown block, or anywhere other than the "javascript" key.
+- Explain what the script does in "explanation".
+- Never combine "javascript" and "sql" keys in the same response.
+
+When the intent is ambiguous, prefer Intent C for structural questions, Intent A for factual questions about data content or transformation requests, and Intent B only when the user explicitly asks for SQL.
 
 ## Response Format
 Always respond with a JSON object in this exact shape:
 {
-  "sql": "SELECT … (include ONLY for Intent B — omit entirely for Intent A)",
-  "explanation": "For Intent A: your analysis findings in plain language. For Intent B: what the query does.",
+  "sql": "SELECT … (Intent B only — omit for all other intents)",
+  "javascript": "const rows = … (Intent D only — omit for all other intents, never combine with sql)",
+  "explanation": "For Intent A: analysis findings (and, if JavaScript was used, why SQL was insufficient). For Intent B: what the query does. For Intent D: what the script does.",
   "warnings": ["Optional performance, correctness, or data-quality notes — empty array if none"]
 }
 
 Do NOT wrap the JSON in markdown code fences.
+Do NOT use emojis anywhere in your responses.
 
 Whenever a tool was executed but resulted in an error, explain the error to the user in the "explanation" key. Do not attempt to fulfill the user's request, do not attempt to rerun the query, just explain the error.
 
@@ -315,7 +325,21 @@ Assistant: {"explanation":"Average order value by country: US $142, DE $98, FR $
 
 User: "What are the distinct status values in orders?"
 → Intent A (analysis). Quick lookup via execute_sql.
-Assistant: {"explanation":"The orders table contains 3 distinct status values: pending, completed, cancelled.","warnings":[]}`
+Assistant: {"explanation":"The orders table contains 3 distinct status values: pending, completed, cancelled.","warnings":[]}
+
+User: "Normalise the phone column in contacts — strip all non-digit characters from every row"
+→ Intent A (analysis/transformation). SQL cannot do this; execute_javascript is the last resort.
+Assistant (before calling execute_javascript): {"explanation":"SQLite has no built-in function to strip non-digit characters from a string, so SQL alone cannot perform this transformation. I will run a JavaScript script that reads every row, applies a regex replace, and writes the results to a new table 'ai_phone_normalised'. I will then query it so you can review the output.","warnings":[]}
+The script should: CREATE TABLE ai_phone_normalised, iterate over contacts, insert cleaned rows, console.log("Created table 'ai_phone_normalised' with N rows"). Then call execute_sql("SELECT * FROM ai_phone_normalised LIMIT 20") to show results.
+
+User: "Write me a JavaScript script that computes revenue by month and saves it to a table"
+→ Intent D (JavaScript code generation). User explicitly asked for a script.
+
+WRONG (never do this — code embedded in markdown inside explanation):
+{"explanation":"Here is the script:\n\`\`\`javascript\ndb.execute('CREATE TABLE ...')\n\`\`\`","warnings":[]}
+
+CORRECT (raw code string in the javascript key, no fences):
+{"javascript":"db.execute('DROP TABLE IF EXISTS ai_revenue_by_month')\ndb.execute('CREATE TABLE ai_revenue_by_month (month TEXT, total_revenue REAL, order_count INTEGER)')\nconst { rows } = db.query(\"SELECT strftime('%Y-%m', created_at) AS month, SUM(amount) AS total, COUNT(*) AS cnt FROM orders GROUP BY month ORDER BY month\")\ndb.transaction(() => {\n  for (const [month, total, cnt] of rows) {\n    db.execute('INSERT INTO ai_revenue_by_month VALUES (?, ?, ?)', [month, total, cnt])\n  }\n})\nconsole.log('Created table ai_revenue_by_month with ' + rows.length + ' rows')","explanation":"Creates a table ai_revenue_by_month with one row per calendar month. Run this script, then query SELECT * FROM ai_revenue_by_month to review the results.","warnings":[]}`
 
 /**
  * Build the final system prompt by injecting the live schema DDL into the
@@ -1043,6 +1067,35 @@ export const EXECUTE_DDL_TOOL: ToolDefinition = {
       }
     },
     required: ['statement', 'reason']
+  }
+}
+
+export const EXECUTE_JAVASCRIPT_TOOL: ToolDefinition = {
+  name: 'execute_javascript',
+  description:
+    'Run a JavaScript snippet in a restricted Worker thread with read/write access to the open SQLite database. ' +
+    'Use ONLY when the task genuinely cannot be expressed in SQL or DDL/DML — if any combination of ' +
+    'execute_sql and execute_ddl can solve the problem, those must be used instead. ' +
+    'Before calling this tool, state in the explanation field why SQL/DDL is insufficient. ' +
+    'Available APIs: db.query(sql, params?), db.execute(sql, params?), db.iterate(sql, params?), ' +
+    'db.transaction(fn), console.log/warn/error(). ' +
+    'Top-level await is supported. ' +
+    'Results must be written to a new database table using db.execute() — do NOT return large datasets via console.log. ' +
+    'Use console.log only for brief status messages (e.g. row counts, success/error confirmation). ' +
+    'After the script completes, query the result table with execute_sql to show the user the output.',
+  parameters: {
+    type: 'object',
+    properties: {
+      code: {
+        type: 'string',
+        description: 'The JavaScript code to execute. Top-level await is supported. Write results to a new table via db.execute(); use console.log() only for brief status messages.'
+      },
+      reason: {
+        type: 'string',
+        description: 'A plain-language explanation of why this task cannot be solved with SQL or DDL/DML, and what the script does.'
+      }
+    },
+    required: ['code', 'reason']
   }
 }
 

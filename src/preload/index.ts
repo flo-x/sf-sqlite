@@ -5,6 +5,7 @@ import type {
   CsvPreview,
   OrgInfo,
   CliOrg,
+  CliOrgsResult,
   SObjectSummary,
   FieldDescriptor,
   ExtractJob,
@@ -95,8 +96,26 @@ const api = {
   getConnectionStatus: (): Promise<{ sfOrg: OrgInfo | null; dbPath: string | null }> =>
     ipcRenderer.invoke('app:get-connection-status'),
 
-  listCliOrgs: (): Promise<CliOrg[]> =>
+  listCliOrgs: (): Promise<CliOrgsResult> =>
     ipcRenderer.invoke('sf:list-cli-orgs'),
+
+  getSfCliPath: (): Promise<string | null> =>
+    ipcRenderer.invoke('sf:get-custom-path'),
+
+  setSfCliPath: (path: string): Promise<void> =>
+    ipcRenderer.invoke('sf:set-custom-path', path),
+
+  getNetworkSettings: (): Promise<{ shellCaCertPath: string | null; savedCaCertPath: string | null; shellPath: string | null; patchDisabled: boolean }> =>
+    ipcRenderer.invoke('sf:get-network-settings'),
+
+  setCaCertPath: (certPath: string | null, disabled: boolean): Promise<void> =>
+    ipcRenderer.invoke('sf:set-ca-cert-path', certPath, disabled),
+
+  browseCaCert: (): Promise<string | null> =>
+    ipcRenderer.invoke('sf:browse-ca-cert'),
+
+  getActiveCaCertPath: (): Promise<string | null> =>
+    ipcRenderer.invoke('sf:get-active-ca-cert-path'),
 
   connectCliOrg: (username: string): Promise<OrgInfo> =>
     ipcRenderer.invoke('sf:connect-cli-org', username),
@@ -280,6 +299,12 @@ const api = {
     return () => ipcRenderer.removeListener('script:log', handler)
   },
 
+  onScriptLogBatch: (cb: (batch: Array<ScriptLog & { runId: string }>) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, batch: Array<ScriptLog & { runId: string }>): void => cb(batch)
+    ipcRenderer.on('script:log-batch', handler)
+    return () => ipcRenderer.removeListener('script:log-batch', handler)
+  },
+
   onScriptComplete: (cb: (e: ScriptComplete) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: ScriptComplete): void => cb(data)
     ipcRenderer.on('script:complete', handler)
@@ -335,8 +360,33 @@ const api = {
     return () => ipcRenderer.removeListener('llm:settings-changed', handler)
   },
 
-  onLlmConfirmRequest: (cb: (e: { conversationId: string; statement: string; reason: string }) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; statement: string; reason: string }): void => cb(data)
+  // ── Auto-update ────────────────────────────────────────────────────────────
+  // `manual: true`  → macOS: open GitHub releases page for manual download
+  // `manual: false` → Windows/Linux: trigger in-app download via electron-updater
+  onUpdateAvailable: (cb: (info: { version: string; manual: boolean }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, info: { version: string; manual: boolean }): void => cb(info)
+    ipcRenderer.on('update:available', handler)
+    return () => ipcRenderer.removeListener('update:available', handler)
+  },
+
+  onUpdateProgress: (cb: (percent: number) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, percent: number): void => cb(percent)
+    ipcRenderer.on('update:progress', handler)
+    return () => ipcRenderer.removeListener('update:progress', handler)
+  },
+
+  onUpdateDownloaded: (cb: () => void): (() => void) => {
+    const handler = (): void => cb()
+    ipcRenderer.on('update:downloaded', handler)
+    return () => ipcRenderer.removeListener('update:downloaded', handler)
+  },
+
+  downloadUpdate: (): Promise<void> => ipcRenderer.invoke('update:download'),
+  installUpdate: (): Promise<void> => ipcRenderer.invoke('update:install'),
+  openReleasesPage: (): Promise<void> => ipcRenderer.invoke('update:open-releases-page'),
+
+  onLlmConfirmRequest: (cb: (e: { conversationId: string; statement: string; reason: string; type?: 'ddl' | 'javascript' }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; statement: string; reason: string; type?: 'ddl' | 'javascript' }): void => cb(data)
     ipcRenderer.on('llm:confirm-request', handler)
     return () => ipcRenderer.removeListener('llm:confirm-request', handler)
   },

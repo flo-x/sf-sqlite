@@ -106,7 +106,40 @@
               Detecting authenticated orgs…
             </div>
             <div v-else-if="cliOrgs.length === 0" style="padding: 12px 0;">
-              <p style="font-size:13px; color: var(--text-muted); margin-bottom: 10px;">
+              <!-- Diagnostic steps -->
+              <div v-if="cliDiagnostics.length" class="cli-diag-panel">
+                <div class="cli-diag-title">Diagnostic</div>
+                <div v-for="step in cliDiagnostics" :key="step.label" class="cli-diag-step">
+                  <span :class="step.ok ? 'cli-diag-ok' : 'cli-diag-fail'">{{ step.ok ? '✓' : '✗' }}</span>
+                  <div class="cli-diag-body">
+                    <span class="cli-diag-label">{{ step.label }}</span>
+                    <code class="cli-diag-detail">{{ step.detail }}</code>
+                  </div>
+                </div>
+
+                <!-- Custom path input shown when sf/sfdx could not be found automatically -->
+                <div v-if="sfNotFound" class="cli-path-override">
+                  <label class="cli-path-label">sf not found automatically — enter its full path:</label>
+                  <div class="cli-path-row">
+                    <input
+                      v-model="sfCliPathInput"
+                      type="text"
+                      class="cli-path-input"
+                      placeholder="/opt/homebrew/bin/sf"
+                      @keydown.enter="saveSfCliPath"
+                    />
+                    <button
+                      class="btn btn-primary btn-sm"
+                      :disabled="!sfCliPathInput.trim() || sfCliPathSaving"
+                      @click="saveSfCliPath"
+                    >
+                      <span v-if="sfCliPathSaving" class="spinner" style="width:12px;height:12px;border-width:2px" />
+                      <span v-else>Save &amp; retry</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <p style="font-size:13px; color: var(--text-muted); margin: 10px 0;">
                 No orgs found. Authenticate one with:
               </p>
               <code style="font-size:12px; background: var(--surface2); padding: 6px 10px; border-radius: 4px; display:block;">sf org login web</code>
@@ -182,9 +215,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useConnectionStore } from '../stores/connection'
-import type { CliOrg, RecentDatabase } from '../../../shared/types'
+import type { CliOrg, CliDiagnosticStep, RecentDatabase } from '../../../shared/types'
 
 const conn = useConnectionStore()
 const sfTab = ref<'cli' | 'oauth'>('cli')
@@ -193,21 +226,42 @@ const oauthClientId = ref('')
 
 // ── SF CLI ───────────────────────────────────────────────────────────────────
 const cliOrgs = ref<CliOrg[]>([])
+const cliDiagnostics = ref<CliDiagnosticStep[]>([])
 const cliLoading = ref(false)
 const selectedCliOrg = ref<string>('')
+
+// Custom sf path input
+const sfCliPathInput = ref('')
+const sfCliPathSaving = ref(false)
+const sfNotFound = computed(() =>
+  cliDiagnostics.value.some(s => s.label === 'sf command' && !s.ok)
+)
 
 async function loadCliOrgs(): Promise<void> {
   cliLoading.value = true
   cliOrgs.value = []
+  cliDiagnostics.value = []
   selectedCliOrg.value = ''
   try {
-    cliOrgs.value = await window.api.listCliOrgs()
+    const result = await window.api.listCliOrgs()
+    cliOrgs.value = result.orgs
+    cliDiagnostics.value = result.diagnostics
     if (cliOrgs.value.length > 0) {
       const def = cliOrgs.value.find((o) => o.isDefaultOrg)
       selectedCliOrg.value = def?.username ?? cliOrgs.value[0].username
     }
   } finally {
     cliLoading.value = false
+  }
+}
+
+async function saveSfCliPath(): Promise<void> {
+  sfCliPathSaving.value = true
+  try {
+    await window.api.setSfCliPath(sfCliPathInput.value)
+    await loadCliOrgs()
+  } finally {
+    sfCliPathSaving.value = false
   }
 }
 
@@ -243,7 +297,11 @@ async function removeRecent(filePath: string): Promise<void> {
   await loadRecentDbs()
 }
 
-onMounted(() => {
+onMounted(async () => {
+  const saved = await window.api.getSfCliPath()
+  if (saved) {
+    sfCliPathInput.value = saved
+  }
   loadCliOrgs()
   loadRecentDbs()
 })
@@ -295,4 +353,98 @@ async function loginOAuth(): Promise<void> {
 .recent-db-remove { flex-shrink: 0; background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 11px; padding: 2px 5px; border-radius: 3px; opacity: 0; transition: opacity 0.1s; }
 .recent-db-item:hover .recent-db-remove { opacity: 1; }
 .recent-db-remove:hover { background: var(--danger); color: #fff; }
+
+/* ── CLI diagnostics ────────────────────────────────────────────────────── */
+.cli-diag-panel {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cli-diag-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.cli-diag-step {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.cli-diag-ok {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #16a34a;
+  margin-top: 1px;
+}
+
+.cli-diag-fail {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #dc2626;
+  margin-top: 1px;
+}
+
+.cli-diag-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cli-diag-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.cli-diag-detail {
+  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: none;
+  padding: 0;
+}
+
+.cli-path-override {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cli-path-label {
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.cli-path-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.cli-path-input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 12px;
+}
 </style>
