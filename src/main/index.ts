@@ -1,76 +1,23 @@
 import { app, shell, BrowserWindow, dialog, session, ipcMain } from 'electron'
 import { join } from 'path'
-import { execFileSync } from 'child_process'
+import { execFile } from 'child_process'
 import { readFileSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { autoUpdater } from 'electron-updater'
 import { registerIpcHandlers } from './ipc-handlers'
-import { applyExtraCaCert, setShellCaCertPath, disablePatch } from './tls-patch'
+import {
+  applyExtraCaCert,
+  setShellCaCertPath,
+  disablePatch,
+  isPatchDisabled,
+  getActiveCaCertPath
+} from './tls-patch'
 import * as db from './database'
 
-// ── Fix PATH for packaged macOS/Linux apps ─────────────────────────────────────
-// Packaged apps launched from Finder/Launchpad inherit a minimal PATH from
-// launchd and never source the user's shell profile.  Spawn a login shell
-// to capture the real PATH.  If that fails, warn the user — no silent fallback.
-let shellPathError: string | null = null
-
-;(function fixPath(): void {
-  if (process.platform === 'win32') return
-
-  const userShell = process.env.SHELL || '/bin/zsh'
-  try {
-    // -l  = login shell (sources ~/.zprofile / ~/.bash_profile / ~/.profile)
-    // -c  = run one command and exit
-    // fish uses space-separated PATH; all other common shells use colon-separated.
-    // execFileSync (not execSync) spawns the binary directly — the shell path is
-    // never interpolated into a shell command string, preventing injection via $SHELL.
-    const shellArgs = userShell.endsWith('fish')
-      ? ['-lc', 'string join : $PATH || true']
-      : ['-lc', 'echo $PATH || true']
-
-    const shellPath = execFileSync(userShell, shellArgs, {
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'ignore']
-    })
-      .toString()
-      .trim()
-
-    if (shellPath) {
-      process.env.PATH = shellPath
-    } else {
-      shellPathError = `Login shell (${userShell}) returned an empty PATH.`
-    }
-  } catch (err) {
-    shellPathError = `Could not spawn login shell (${userShell}): ${(err as Error).message}`
-  }
-})()
-
-// ── Capture NODE_EXTRA_CA_CERTS from login shell ───────────────────────────────
-// Same technique as fixPath above.  Non-fatal if it fails.
-;(function captureShellCaCert(): void {
-  if (process.platform === 'win32') return
-  const userShell = process.env.SHELL || '/bin/zsh'
-  try {
-    const result = execFileSync(userShell, ['-lc', 'printf "%s" "$NODE_EXTRA_CA_CERTS"'], {
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).toString().trim()
-    if (result) {
-      setShellCaCertPath(result)
-      // Also propagate into process.env so node internals that read
-      // NODE_EXTRA_CA_CERTS directly also benefit.
-      process.env.NODE_EXTRA_CA_CERTS = result
-    }
-  } catch {
-    // non-fatal — if the shell fails we just have no auto-detected cert
-  }
-})()
-
 // ── Apply TLS patch early ──────────────────────────────────────────────────────
-// sf-settings.json (explicit user config) takes priority over the shell env.
-// This runs before app.whenReady() so all LLM SDK calls inherit the patch.
+// Only the explicit user config (sf-settings.json) is available at this point.
+// The shell-captured NODE_EXTRA_CA_CERTS is applied later by initShellEnvironment.
 ;(function initTlsPatch(): void {
-  const shellCert = process.env.NODE_EXTRA_CA_CERTS ?? null
   try {
     const sfSettingsPath = join(app.getPath('userData'), 'sf-settings.json')
     const sfSettings = JSON.parse(readFileSync(sfSettingsPath, 'utf-8')) as {
@@ -81,17 +28,75 @@ let shellPathError: string | null = null
       disablePatch()
       return
     }
-    const certPath = sfSettings.extraCaCertPath || shellCert
-    if (certPath) {
-      applyExtraCaCert(certPath)
+    if (sfSettings.extraCaCertPath) {
+      applyExtraCaCert(sfSettings.extraCaCertPath)
     }
   } catch {
-    // sf-settings.json doesn't exist yet — try shell-captured path
-    if (shellCert) {
-      applyExtraCaCert(shellCert)
-    }
+    // sf-settings.json doesn't exist yet — shell cert will be applied async below.
   }
 })()
+
+// ── Async shell environment init ───────────────────────────────────────────────
+// Runs after the window is shown so it never blocks startup.  Uses execFile
+// (async) with a generous timeout to handle heavy shell configs (nvm, conda…).
+function initShellEnvironment(win: BrowserWindow): void {
+  if (process.platform === 'win32') {
+    return
+  }
+
+  const userShell = process.env.SHELL || '/bin/zsh'
+  const TIMEOUT_MS = 10_000
+
+  // ── PATH ────────────────────────────────────────────────────────────────────
+  // -l  = login shell (sources ~/.zprofile / ~/.bash_profile / ~/.profile)
+  // execFile (not execSync) spawns the binary directly — the shell path is
+  // never interpolated into a shell command string, preventing injection via $SHELL.
+  const pathArgs = userShell.endsWith('fish')
+    ? ['-lc', 'string join : $PATH || true']
+    : ['-lc', 'echo $PATH || true']
+
+  execFile(userShell, pathArgs, { timeout: TIMEOUT_MS }, (err, stdout) => {
+    if (err) {
+      dialog.showMessageBox(win, {
+        type: 'warning',
+        title: 'Shell PATH unavailable',
+        message: "Could not read your shell's PATH",
+        detail:
+          `SF-SQLite was unable to spawn a login shell to discover your PATH. ` +
+          `The Salesforce CLI (sf / sfdx) may not be found and SF CLI features will be unavailable.\n\n` +
+          `Error: ${err.message}\n\n` +
+          `To fix this, ensure your shell starts without errors and that $SHELL points to your shell binary.`,
+        buttons: ['OK']
+      })
+      return
+    }
+    const shellPath = stdout.trim()
+    if (shellPath) {
+      process.env.PATH = shellPath
+    }
+  })
+
+  // ── NODE_EXTRA_CA_CERTS ────────────────────────────────────────────────────
+  execFile(
+    userShell,
+    ['-lc', 'printf "%s" "$NODE_EXTRA_CA_CERTS"'],
+    { timeout: TIMEOUT_MS },
+    (err, stdout) => {
+      if (err) {
+        return
+      }
+      const certPath = stdout.trim()
+      if (certPath) {
+        setShellCaCertPath(certPath)
+        process.env.NODE_EXTRA_CA_CERTS = certPath
+        // Apply only as fallback — sf-settings.json explicit cert takes priority.
+        if (!isPatchDisabled() && getActiveCaCertPath() === null) {
+          applyExtraCaCert(certPath)
+        }
+      }
+    }
+  )
+}
 
 // ── Version comparison helper ──────────────────────────────────────────────
 function isNewerVersion(latest: string, current: string): boolean {
@@ -251,23 +256,10 @@ app.whenReady().then(() => {
   createWindow()
 
   const win = BrowserWindow.getAllWindows()[0]
-  win.once('show', () => setupAutoUpdater(win))
-
-  if (shellPathError) {
-    win.once('show', () => {
-      dialog.showMessageBox(win, {
-        type: 'warning',
-        title: 'Shell PATH unavailable',
-        message: "Could not read your shell's PATH",
-        detail:
-          `SF-SQLite was unable to spawn a login shell to discover your PATH. ` +
-          `The Salesforce CLI (sf / sfdx) may not be found and SF CLI features will be unavailable.\n\n` +
-          `Error: ${shellPathError}\n\n` +
-          `To fix this, ensure your shell starts without errors and that $SHELL points to your shell binary.`,
-        buttons: ['OK']
-      })
-    })
-  }
+  win.once('show', () => {
+    initShellEnvironment(win)
+    setupAutoUpdater(win)
+  })
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
