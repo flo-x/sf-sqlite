@@ -48,10 +48,10 @@ jobs:
             dist/*.dmg
             dist/*.zip
 
-  # ── macOS x64 (Intel) ─────────────────────────────────────────────────────
+  # ── macOS x64 (Intel) — cross-compiled from Apple Silicon runner ──────────
   build-mac-x64:
     needs: create-release
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
