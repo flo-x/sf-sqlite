@@ -184,34 +184,83 @@
 
           <div v-if="sfTab === 'oauth'" class="conn-form">
             <div class="oauth-requirements">
-              <div class="oauth-req-title">Requirements</div>
-              <div class="oauth-req-item">
-                <span class="oauth-req-num">1</span>
-                <span>Create a <strong>Connected App</strong> in Salesforce (Setup → App Manager → New Connected App).</span>
-              </div>
-              <div class="oauth-req-item">
-                <span class="oauth-req-num">2</span>
-                <span>Enable <strong>OAuth Settings</strong>, tick <em>Enable for Device Flow</em>, and add the following as an allowed callback URL:</span>
-              </div>
-              <code class="oauth-callback-hint">http://localhost:[8788–8987]/callback</code>
-              <div class="oauth-req-item" style="margin-top: 6px;">
-                <span class="oauth-req-num">3</span>
-                <span>Add the <strong>Access and manage your data (api)</strong> and <strong>Perform requests on your behalf at any time (refresh_token)</strong> OAuth scopes.</span>
-              </div>
-              <div class="oauth-req-item">
-                <span class="oauth-req-num">4</span>
-                <span>Copy the <strong>Consumer Key</strong> (Client ID) from the Connected App and paste it below.</span>
-              </div>
+              <button class="oauth-req-toggle" @click="oauthSetupOpen = !oauthSetupOpen">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"
+                  style="flex-shrink:0; transition: transform 0.15s"
+                  :style="oauthSetupOpen ? 'transform:rotate(90deg)' : ''">
+                  <polyline points="9 18 15 12 9 6"/>
+                </svg>
+                <span>One-time Salesforce app setup</span>
+                <span class="oauth-req-toggle-hint">{{ oauthSetupOpen ? 'hide' : 'show instructions' }}</span>
+              </button>
+
+              <template v-if="oauthSetupOpen">
+                <div class="oauth-req-item" style="background:color-mix(in srgb,var(--warning,#f59e0b) 12%,transparent);border-radius:4px;padding:6px 8px; margin-top:8px;">
+                  <span style="font-size:13px;">⚠</span>
+                  <span>Works with both <strong>Connected Apps</strong> and <strong>External Client Apps</strong>. For External Client Apps, select <em>My Domain / Custom</em> as the environment and enter your org's My Domain URL — generic login URLs will be rejected.</span>
+                </div>
+                <div class="oauth-req-item">
+                  <span class="oauth-req-num">1</span>
+                  <span>In Salesforce Setup, go to <strong>App Manager → New Connected App</strong>.</span>
+                </div>
+                <div class="oauth-req-item">
+                  <span class="oauth-req-num">2</span>
+                  <span>Enable <strong>OAuth Settings</strong> and add <em>all five</em> of these as callback URLs (the app tries each port in order):</span>
+                </div>
+                <code class="oauth-callback-hint">http://localhost:8788/callback<br>http://localhost:8789/callback<br>http://localhost:8790/callback<br>http://localhost:8791/callback<br>http://localhost:8792/callback</code>
+                <div class="oauth-req-item" style="margin-top: 6px;">
+                  <span class="oauth-req-num">3</span>
+                  <span>Add the <strong>api</strong> and <strong>refresh_token</strong> OAuth scopes.</span>
+                </div>
+                <div class="oauth-req-item">
+                  <span class="oauth-req-num">4</span>
+                  <span>
+                    Uncheck <em>Require Secret for Web Server Flow</em> — this app does not use a client secret.
+                    PKCE can remain enabled; this app supports it.
+                  </span>
+                </div>
+                <div class="oauth-req-item">
+                  <span class="oauth-req-num">5</span>
+                  <span>Copy the <strong>Consumer Key</strong> (Client ID) and paste it below.</span>
+                </div>
+              </template>
             </div>
             <div class="form-group">
               <label>Consumer Key (Client ID)</label>
               <input v-model="oauthClientId" type="text" placeholder="3MVG9…" />
             </div>
+            <div class="form-group">
+              <label>Environment</label>
+              <div class="oauth-env-toggle">
+                <label class="oauth-env-option">
+                  <input v-model="oauthEnv" type="radio" value="production" />
+                  Production
+                </label>
+                <label class="oauth-env-option">
+                  <input v-model="oauthEnv" type="radio" value="sandbox" />
+                  Sandbox
+                </label>
+                <label class="oauth-env-option">
+                  <input v-model="oauthEnv" type="radio" value="custom" />
+                  My Domain / Custom
+                </label>
+              </div>
+              <input
+                v-if="oauthEnv === 'custom'"
+                v-model="oauthCustomUrl"
+                type="text"
+                placeholder="https://mycompany.my.salesforce.com"
+                style="margin-top: 6px;"
+              />
+              <div v-if="oauthEnv === 'custom'" style="font-size:11px; color:var(--text-muted); margin-top:4px;">
+                Required for External Client Apps — use your org's My Domain URL.
+              </div>
+            </div>
             <p style="font-size:12px; color: var(--text-muted); margin-bottom: 12px;">
               A browser window will open for Salesforce login. After authentication, you'll be redirected back automatically.
             </p>
             <div v-if="sfError" class="alert alert-error">{{ sfError }}</div>
-            <button class="btn btn-primary" :disabled="conn.sfConnecting || !oauthClientId" @click="loginOAuth">
+            <button class="btn btn-primary" :disabled="conn.sfConnecting || !oauthClientId || (oauthEnv === 'custom' && !oauthCustomUrl.trim())" @click="loginOAuth">
               <span v-if="conn.sfConnecting" class="spinner" style="width:14px;height:14px;border-width:2px;"></span>
               <span>Login with Browser</span>
             </button>
@@ -232,6 +281,15 @@ const conn = useConnectionStore()
 const sfTab = ref<'cli' | 'oauth'>('cli')
 const sfError = ref('')
 const oauthClientId = ref('')
+const oauthEnv = ref<'production' | 'sandbox' | 'custom'>('production')
+const oauthCustomUrl = ref('')
+const oauthSetupOpen = ref(false)
+
+const oauthLoginUrl = computed((): string => {
+  if (oauthEnv.value === 'sandbox') return 'https://test.salesforce.com'
+  if (oauthEnv.value === 'custom') return oauthCustomUrl.value.trim().replace(/\/$/, '')
+  return 'https://login.salesforce.com'
+})
 
 // ── SF CLI ───────────────────────────────────────────────────────────────────
 const cliOrgs = ref<CliOrg[]>([])
@@ -325,7 +383,7 @@ onMounted(async () => {
 async function loginOAuth(): Promise<void> {
   sfError.value = ''
   try {
-    await conn.connectOAuth(oauthClientId.value)
+    await conn.connectOAuth(oauthClientId.value, oauthLoginUrl.value)
   } catch (e) {
     sfError.value = e instanceof Error ? e.message : String(e)
   }
@@ -349,6 +407,12 @@ async function loginOAuth(): Promise<void> {
 .oauth-req-item { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.5; }
 .oauth-req-num { flex-shrink: 0; width: 18px; height: 18px; border-radius: 50%; background: var(--primary); color: #fff; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-top: 1px; }
 .oauth-callback-hint { font-size: 11px; background: var(--surface); padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); display: block; margin-left: 26px; user-select: all; }
+.oauth-req-toggle { display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: none; padding: 0; cursor: pointer; color: var(--text); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+.oauth-req-toggle:hover { color: var(--primary); }
+.oauth-req-toggle span:first-of-type { flex: 1; text-align: left; }
+.oauth-req-toggle-hint { font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--primary); opacity: 0.8; }
+.oauth-env-toggle { display: flex; gap: 16px; }
+.oauth-env-option { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
 .cli-org-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
 .cli-org-item { padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; border: 1px solid transparent; }
 .cli-org-item:hover { background: var(--surface2); }

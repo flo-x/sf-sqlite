@@ -33,6 +33,7 @@
         <li>Uses tokens from your provider — may incur costs.</li>
         <li>Receives your database schema and may query data.</li>
         <li>Can run DDL/DML and JavaScript with your confirmation.</li>
+        <li>If asked, can generate SQL and Javascript programs.</li>
       </ul>
     </div>
 

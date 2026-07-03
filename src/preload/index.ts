@@ -87,8 +87,8 @@ const api = {
   connectPassword: (creds: PasswordCreds): Promise<OrgInfo> =>
     ipcRenderer.invoke('sf:connect-password', creds),
 
-  connectOAuth: (clientId: string): Promise<OrgInfo> =>
-    ipcRenderer.invoke('sf:connect-oauth', clientId),
+  connectOAuth: (clientId: string, loginUrl: string): Promise<OrgInfo> =>
+    ipcRenderer.invoke('sf:connect-oauth', clientId, loginUrl),
 
   disconnectSalesforce: (): Promise<void> =>
     ipcRenderer.invoke('sf:disconnect'),

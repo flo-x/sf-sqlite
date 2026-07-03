@@ -26,10 +26,10 @@ export const useConnectionStore = defineStore('connection', () => {
     }
   }
 
-  async function connectOAuth(clientId: string): Promise<void> {
+  async function connectOAuth(clientId: string, loginUrl: string): Promise<void> {
     sfConnecting.value = true
     try {
-      sfOrg.value = await window.api.connectOAuth(clientId)
+      sfOrg.value = await window.api.connectOAuth(clientId, loginUrl)
       sfObjects.value = []
     } finally {
       sfConnecting.value = false

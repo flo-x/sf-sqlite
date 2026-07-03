@@ -3,7 +3,7 @@ import type { Connection as SfConnection, Record as SfRecord, Field as SfField, 
 import { createServer } from 'http'
 import { request as httpsRequest } from 'https'
 import { createGunzip } from 'zlib'
-import { randomBytes } from 'crypto'
+import { randomBytes, createHash } from 'crypto'
 import { shell } from 'electron'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -85,6 +85,14 @@ async function execSfCommand(
 let connection: SfConnection | null = null
 let currentOrgInfo: OrgInfo | null = null
 
+// Tracks how the current session was established so it can be refreshed
+// automatically when INVALID_SESSION_ID is returned by Salesforce.
+type ConnectionSource =
+  | { type: 'cli'; username: string }
+  | { type: 'password' }
+  | { type: 'oauth' }
+let connectionSource: ConnectionSource | null = null
+
 export function getConnection(): SfConnection {
   if (!connection) throw new Error('Not connected to Salesforce')
   return connection
@@ -131,6 +139,7 @@ export async function connectPassword(creds: PasswordCreds): Promise<OrgInfo> {
   await conn.login(creds.username, creds.password + creds.token)
   await detectAndSetApiVersion(conn)
   connection = conn
+  connectionSource = { type: 'password' }
   const identity = await conn.identity()
   currentOrgInfo = {
     instanceUrl: conn.instanceUrl,
@@ -140,34 +149,151 @@ export async function connectPassword(creds: PasswordCreds): Promise<OrgInfo> {
   return currentOrgInfo
 }
 
-export async function connectOAuth(clientId: string): Promise<OrgInfo> {
+// ── PKCE helpers ──────────────────────────────────────────────────────────────
+
+function base64url(buf: Buffer): string {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+}
+
+function generateCodeVerifier(): string {
+  // 32 random bytes → 43-char URL-safe base64url string (within the 43–128 char range)
+  return base64url(randomBytes(32))
+}
+
+function generateCodeChallenge(verifier: string): string {
+  return base64url(createHash('sha256').update(verifier).digest())
+}
+
+/**
+ * POST to /services/oauth2/token and return the parsed JSON response.
+ * Used instead of jsforce's authorize() so we can include the PKCE code_verifier.
+ */
+function exchangeCodeForTokens(
+  loginUrl: string,
+  params: Record<string, string>
+): Promise<Record<string, string>> {
   return new Promise((resolve, reject) => {
-    const port = 8788 + Math.floor(Math.random() * 200)
-    const redirectUri = `http://localhost:${port}/callback`
+    const body = new URLSearchParams(params).toString()
+    const endpoint = new URL('/services/oauth2/token', loginUrl)
 
-    // Random state nonce — prevents CSRF / authorization-code injection attacks.
-    // The callback server rejects any request whose state parameter doesn't match.
-    const expectedState = randomBytes(24).toString('hex')
+    // ── DEBUG ────────────────────────────────────────────────────────────────
+    console.log('[OAuth] Token exchange → POST', endpoint.toString())
+    const debugParams = { ...params }
+    if (debugParams.code)          debugParams.code          = debugParams.code.slice(0, 8) + '…'
+    if (debugParams.code_verifier) debugParams.code_verifier = debugParams.code_verifier.slice(0, 8) + '…'
+    console.log('[OAuth] Request body:', debugParams)
+    // ─────────────────────────────────────────────────────────────────────────
 
-    const oauth2 = new jsforce.OAuth2({
-      loginUrl: 'https://login.salesforce.com',
-      clientId,
-      redirectUri
-    })
+    const req = httpsRequest(
+      {
+        hostname: endpoint.hostname,
+        path: endpoint.pathname + endpoint.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        // ── DEBUG ────────────────────────────────────────────────────────────
+        console.log('[OAuth] Token response status:', res.statusCode, res.statusMessage)
+        console.log('[OAuth] Token response headers:', res.headers)
+        // ─────────────────────────────────────────────────────────────────────
+        let data = ''
+        res.on('data', (chunk: string) => { data += chunk })
+        res.on('end', () => {
+          console.log('[OAuth] Token response body:', data)
+          try {
+            const parsed = JSON.parse(data) as Record<string, string>
+            if (parsed.error) {
+              reject(new Error(`${parsed.error}: ${parsed.error_description ?? ''}`.trim()))
+            } else {
+              resolve(parsed)
+            }
+          } catch {
+            reject(new Error(`Failed to parse token response: ${data}`))
+          }
+        })
+      }
+    )
+    req.on('error', reject)
+    req.write(body)
+    req.end()
+  })
+}
 
-    const server = createServer((req, res) => {
+// Ports tried in order for the OAuth callback server.  Users register these
+// exact URLs in their Connected App / External Client App.
+const OAUTH_CALLBACK_PORTS = [8788, 8789, 8790, 8791, 8792]
+
+/** Start an HTTP server on the first available port from OAUTH_CALLBACK_PORTS. */
+function startCallbackServer(
+  handler: Parameters<typeof createServer>[0]
+): Promise<{ server: ReturnType<typeof createServer>; port: number }> {
+  return new Promise((resolve, reject) => {
+    const tryPort = (idx: number): void => {
+      if (idx >= OAUTH_CALLBACK_PORTS.length) {
+        reject(
+          new Error(
+            `None of the OAuth callback ports (${OAUTH_CALLBACK_PORTS.join(', ')}) are available. ` +
+            'Close any application using those ports and try again.'
+          )
+        )
+        return
+      }
+      const port = OAUTH_CALLBACK_PORTS[idx]
+      const server = createServer(handler)
+      server.once('error', () => {
+        server.close()
+        tryPort(idx + 1)
+      })
+      server.listen(port, () => resolve({ server, port }))
+    }
+    tryPort(0)
+  })
+}
+
+export async function connectOAuth(clientId: string, loginUrl: string): Promise<OrgInfo> {
+  // CSRF protection: random state nonce verified before accepting the auth code.
+  const expectedState = randomBytes(24).toString('hex')
+
+  // PKCE: generate a verifier and its SHA-256 challenge so the token exchange
+  // is bound to this specific browser session (RFC 7636, S256 method).
+  const codeVerifier = generateCodeVerifier()
+  const codeChallenge = generateCodeChallenge(codeVerifier)
+
+  return new Promise((resolve, reject) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let activeServer: ReturnType<typeof createServer> | null = null
+
+    const handler: Parameters<typeof createServer>[0] = (req, res) => {
       if (!req.url?.startsWith('/callback')) {
         res.writeHead(404)
         res.end()
         return
       }
+
+      // The server was already bound to a known port before we opened the
+      // browser, so req.socket.localPort is the authoritative port value.
+      const port = (req.socket as { localPort: number }).localPort
       const url = new URL(req.url, `http://localhost:${port}`)
+
+      // ── DEBUG ──────────────────────────────────────────────────────────────
+      console.log('[OAuth] Callback received on port', port)
+      console.log('[OAuth] Callback full URL:', url.toString())
+      console.log('[OAuth] Callback params:')
+      url.searchParams.forEach((v, k) => {
+        const display = (k === 'code' || k === 'state') ? v.slice(0, 8) + '…' : v
+        console.log(`  ${k}: ${display}`)
+      })
+      // ────────────────────────────────────────────────────────────────────────
+
       const returnedState = url.searchParams.get('state')
       if (returnedState !== expectedState) {
         res.writeHead(400)
         res.end('Invalid state')
         reject(new Error('OAuth callback state mismatch — possible CSRF attack'))
-        server.close()
+        activeServer?.close()
         return
       }
       const code = url.searchParams.get('code')
@@ -175,48 +301,148 @@ export async function connectOAuth(clientId: string): Promise<OrgInfo> {
         res.writeHead(400)
         res.end('Missing code')
         reject(new Error('OAuth callback missing code'))
-        server.close()
+        activeServer?.close()
         return
       }
       res.writeHead(200, { 'Content-Type': 'text/html' })
       res.end('<html><body><h2>Authenticated! You can close this tab.</h2></body></html>')
-      server.close()
+      activeServer?.close()
 
-      // compress: true is valid at runtime but absent from @types/jsforce typings
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const conn = new jsforce.Connection({ oauth2, compress: true } as any)
-      conn
-        .authorize(code)
-        .then(() => detectAndSetApiVersion(conn))
-        .then(() => conn.identity())
-        .then((identity) => {
+      const redirectUri = `http://localhost:${port}/callback`
+
+      // Exchange the authorization code for tokens, sending the PKCE verifier.
+      // No client secret is included — the verifier proves authenticity instead.
+      exchangeCodeForTokens(loginUrl, {
+        grant_type: 'authorization_code',
+        code,
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        code_verifier: codeVerifier,
+      })
+        .then(async (tokens) => {
+          const instanceUrl = tokens.instance_url
+          const accessToken = tokens.access_token
+          const refreshToken = tokens.refresh_token
+
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const conn = new jsforce.Connection({ instanceUrl, accessToken, compress: true } as any)
+
+          // Wire the refresh token + OAuth2 config into jsforce so it can
+          // auto-refresh the access token when it expires.
+          if (refreshToken) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const c = conn as any
+            c.refreshToken = refreshToken
+            c.oauth2 = new jsforce.OAuth2({ loginUrl, clientId, redirectUri })
+          }
+
+          await detectAndSetApiVersion(conn)
+          const identity = await conn.identity()
           connection = conn
+          connectionSource = { type: 'oauth' }
           currentOrgInfo = {
             instanceUrl: conn.instanceUrl,
             username: identity.username,
-            orgId: identity.organization_id
+            orgId: identity.organization_id,
           }
           resolve(currentOrgInfo)
         })
         .catch(reject)
-    })
+    }
 
-    server.listen(port, () => {
-      const authUrl = oauth2.getAuthorizationUrl({ scope: 'api refresh_token', state: expectedState })
-      shell.openExternal(authUrl)
-    })
+    startCallbackServer(handler)
+      .then(({ server, port }) => {
+        activeServer = server
+        server.on('error', reject)
 
-    server.on('error', reject)
-    setTimeout(() => {
-      server.close()
-      reject(new Error('OAuth timeout'))
-    }, 120_000)
+        const redirectUri = `http://localhost:${port}/callback`
+        const authParams = new URLSearchParams({
+          response_type: 'code',
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          scope: 'api refresh_token',
+          state: expectedState,
+          code_challenge: codeChallenge,
+          code_challenge_method: 'S256',
+        })
+        const authUrl = `${loginUrl}/services/oauth2/authorize?${authParams.toString()}`
+
+        // ── DEBUG ──────────────────────────────────────────────────────────
+        console.log('[OAuth] Callback server listening on port', port)
+        console.log('[OAuth] redirect_uri that will be sent:', redirectUri)
+        console.log('[OAuth] Opening authorization URL:')
+        console.log('  loginUrl         :', loginUrl)
+        console.log('  client_id        :', clientId)
+        console.log('  redirect_uri     :', redirectUri)
+        console.log('  scope            :', 'api refresh_token')
+        console.log('  code_challenge   :', codeChallenge)
+        console.log('  code_challenge_method: S256')
+        console.log('  state            :', expectedState.slice(0, 8) + '…')
+        console.log('[OAuth] Full auth URL:', authUrl)
+        // ──────────────────────────────────────────────────────────────────
+
+        shell.openExternal(authUrl)
+
+        setTimeout(() => {
+          server.close()
+          reject(new Error('OAuth timeout: no response from browser within 2 minutes'))
+        }, 120_000)
+      })
+      .catch(reject)
   })
 }
 
 export function disconnectSalesforce(): void {
   connection = null
   currentOrgInfo = null
+  connectionSource = null
+}
+
+// ── Session refresh ───────────────────────────────────────────────────────────
+
+function isSessionExpiredError(err: unknown): boolean {
+  if (err instanceof Error && err.message.includes('INVALID_SESSION_ID')) {
+    return true
+  }
+  const e = err as Record<string, unknown>
+  if (e?.errorCode === 'INVALID_SESSION_ID') {
+    return true
+  }
+  if (Array.isArray(e) && (e[0] as Record<string, unknown>)?.errorCode === 'INVALID_SESSION_ID') {
+    return true
+  }
+  return false
+}
+
+async function refreshSession(): Promise<void> {
+  if (!connectionSource) {
+    throw new Error('Session expired. Please reconnect to Salesforce.')
+  }
+  if (connectionSource.type === 'cli') {
+    // Re-run sf org display to get a fresh token and rebuild the connection.
+    await connectCliOrg(connectionSource.username)
+    return
+  }
+  // Password and OAuth connections cannot be refreshed automatically —
+  // the user must reconnect manually.
+  throw new Error('Session expired. Please reconnect to Salesforce.')
+}
+
+/**
+ * Runs fn(), and if Salesforce returns INVALID_SESSION_ID, refreshes the
+ * session token once and retries.  fn() is called fresh after the refresh so
+ * it picks up the new connection via getConnection().
+ */
+async function withSessionRefresh<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn()
+  } catch (err) {
+    if (!isSessionExpiredError(err)) {
+      throw err
+    }
+    await refreshSession()
+    return await fn()
+  }
 }
 
 /**
@@ -403,6 +629,7 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
   await detectAndSetApiVersion(conn)
   const identity = await conn.identity()
   connection = conn
+  connectionSource = { type: 'cli', username: identity.username }
   currentOrgInfo = {
     instanceUrl: conn.instanceUrl,
     username: identity.username,
@@ -1193,8 +1420,6 @@ export async function writebackBulk2(
 // ─── SOQL Query ───────────────────────────────────────────────────────────────
 
 export async function runSoqlQuery(soql: string): Promise<QueryResult> {
-  const conn = getConnection()
-
   function isSfRelObject(v: unknown): v is Record<string, unknown> {
     return typeof v === 'object' && v !== null && 'attributes' in v
   }
@@ -1217,27 +1442,30 @@ export async function runSoqlQuery(soql: string): Promise<QueryResult> {
 
   const SOQL_ROW_CAP = 100_000
 
-  const allRecords: Record<string, unknown>[] = []
-  const result = await conn.query(soql)
-  allRecords.push(...result.records.map(flattenRecord))
+  return withSessionRefresh(async () => {
+    const conn = getConnection()
+    const allRecords: Record<string, unknown>[] = []
+    const result = await conn.query(soql)
+    allRecords.push(...result.records.map(flattenRecord))
 
-  let next = result
-  while (!next.done) {
-    if (allRecords.length >= SOQL_ROW_CAP) {
-      throw new Error(
-        `SOQL query returned more than ${SOQL_ROW_CAP.toLocaleString()} rows. ` +
-        `Add a LIMIT clause or narrow your WHERE condition to reduce the result set.`
-      )
+    let next = result
+    while (!next.done) {
+      if (allRecords.length >= SOQL_ROW_CAP) {
+        throw new Error(
+          `SOQL query returned more than ${SOQL_ROW_CAP.toLocaleString()} rows. ` +
+          `Add a LIMIT clause or narrow your WHERE condition to reduce the result set.`
+        )
+      }
+      next = await conn.queryMore(next.nextRecordsUrl!)
+      allRecords.push(...next.records.map(flattenRecord))
     }
-    next = await conn.queryMore(next.nextRecordsUrl!)
-    allRecords.push(...next.records.map(flattenRecord))
-  }
 
-  if (allRecords.length === 0) {
-    return { columns: [], rows: [], durationMs: 0 }
-  }
+    if (allRecords.length === 0) {
+      return { columns: [], rows: [], durationMs: 0 }
+    }
 
-  const columns = Object.keys(allRecords[0])
-  const rows = allRecords.map((r) => columns.map((c) => r[c] ?? null))
-  return { columns, rows, durationMs: 0 }
+    const columns = Object.keys(allRecords[0])
+    const rows = allRecords.map((r) => columns.map((c) => r[c] ?? null))
+    return { columns, rows, durationMs: 0 }
+  })
 }

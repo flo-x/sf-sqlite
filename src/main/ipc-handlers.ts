@@ -802,8 +802,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('sf:connect-password', (_e, creds: PasswordCreds) =>
     sf.connectPassword(creds)
   )
-  ipcMain.handle('sf:connect-oauth', (_e, clientId: string) =>
-    sf.connectOAuth(clientId)
+  ipcMain.handle('sf:connect-oauth', (_e, clientId: string, loginUrl: string) =>
+    sf.connectOAuth(clientId, loginUrl)
   )
   ipcMain.handle('sf:disconnect', () => sf.disconnectSalesforce())
 
