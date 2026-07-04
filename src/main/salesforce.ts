@@ -66,6 +66,16 @@ export function getCustomSfPath(): string | null {
   return customSfPath
 }
 
+/**
+ * Returns true if the string looks like a real Salesforce access token.
+ * Newer SF CLI versions return "[REDACTED]" from `sf org display` instead of
+ * the real token.  Real tokens are also always longer than 50 characters and
+ * never contain asterisks (some older CLIs masked with those instead).
+ */
+function looksLikeValidSfToken(token: string): boolean {
+  return token.length >= 50 && !token.includes('[REDACTED]') && !token.includes('*')
+}
+
 /** Returns every candidate command to try for a given base name, PATH-based first. */
 function sfCandidates(base: 'sf' | 'sfdx'): string[] {
   const extras = base === 'sf' ? SF_EXTRA_PATHS : SFDX_EXTRA_PATHS
@@ -568,10 +578,12 @@ export async function listCliOrgs(): Promise<CliOrgsResult> {
 export async function connectCliOrg(username: string): Promise<OrgInfo> {
   debugLog('sfCliAuth', `connectCliOrg("${username}") start`)
 
-  // 'sf org display' fetches current auth info and refreshes the token if needed
   let accessToken: string | undefined
   let instanceUrl: string | undefined
 
+  // ── Step 1: sf/sfdx org display ───────────────────────────────────────────
+  // All CLI versions expose instanceUrl here.  Older versions also include
+  // accessToken; newer SF CLI (v2+) omit it and require a separate command.
   for (const [base, args] of [
     ['sf',   ['org', 'display', '--target-org', username, '--json']],
     ['sfdx', ['force:org:display', '--targetusername', username, '--json']]
@@ -579,18 +591,61 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
     try {
       const stdout = await execSfCommand(base, args, { timeout: 15_000 })
       const parsed = JSON.parse(stdout)
-      // Trim to strip any trailing \r or whitespace that Windows stdout can inject.
-      accessToken = parsed?.result?.accessToken?.trim()
-      instanceUrl = parsed?.result?.instanceUrl?.trim()
-      debugLog('sfCliAuth', `${base} org display → accessToken: ${accessToken ? `"${accessToken.slice(0, 8)}…" len=${accessToken.length}` : 'missing'}, instanceUrl: ${instanceUrl ?? 'missing'}`)
-      if (accessToken && instanceUrl) break
+      const token = (parsed?.result?.accessToken as string | undefined)?.trim()
+      const url   = (parsed?.result?.instanceUrl  as string | undefined)?.trim()
+      const valid = token ? looksLikeValidSfToken(token) : false
+      debugLog('sfCliAuth', `${base} org display → accessToken: ${token ? `"${token.slice(0, 8)}…" len=${token.length} valid=${valid}` : 'missing'}, instanceUrl: ${url ?? 'missing'}`)
+      if (url) {
+        instanceUrl = url
+      }
+      if (token && valid) {
+        accessToken = token
+        break
+      } else if (token && !valid) {
+        debugLog('sfCliAuth', `  token looks masked/invalid — will try show-access-token next`)
+      }
     } catch (err) {
       debugLog('sfCliAuth', `${base} org display failed: ${err instanceof Error ? err.message : String(err)}`)
-      // try next CLI variant or fall through to credential file
     }
   }
 
-  // Fallback: read credential files directly
+  // ── Step 2: newer SF CLI — token moved to a dedicated command ─────────────
+  // `sf org auth show-access-token -o <username> --json` was introduced in
+  // SF CLI v2 to separate token retrieval from org metadata display.
+  // result may be the token string directly, or an object with an accessToken
+  // field; handle both shapes.
+  if (!accessToken) {
+    debugLog('sfCliAuth', `accessToken missing after org display — trying sf org auth show-access-token`)
+    try {
+      const stdout = await execSfCommand(
+        'sf',
+        ['org', 'auth', 'show-access-token', '-o', username, '--json'],
+        { timeout: 10_000 }
+      )
+      const parsed = JSON.parse(stdout)
+      debugLog('sfCliAuth', `sf org auth show-access-token raw result: ${JSON.stringify(parsed?.result).slice(0, 200)}`)
+      const raw =
+        typeof parsed?.result === 'string'
+          ? parsed.result
+          : (parsed?.result?.accessToken as string | undefined)
+      const token = raw?.trim()
+      const url = (parsed?.result?.instanceUrl as string | undefined)?.trim()
+      const valid = token ? looksLikeValidSfToken(token) : false
+      debugLog('sfCliAuth', `  → accessToken: ${token ? `"${token.slice(0, 8)}…" len=${token.length} valid=${valid}` : 'missing'}, instanceUrl: ${url ?? 'not in response'}`)
+      if (token && valid) {
+        accessToken = token
+      } else if (token && !valid) {
+        debugLog('sfCliAuth', `  token from show-access-token also looks masked/invalid`)
+      }
+      if (url && !instanceUrl) {
+        instanceUrl = url
+      }
+    } catch (err) {
+      debugLog('sfCliAuth', `sf org auth show-access-token failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  // ── Step 3: fallback — read credential files directly ─────────────────────
   if (!accessToken || !instanceUrl) {
     const sfCredPath = join(homedir(), '.sf', 'credentials.json')
     const sfdxCredPath = join(homedir(), '.sfdx', `${username}.json`)
@@ -601,9 +656,14 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
       const raw = JSON.parse(await readFile(sfCredPath, 'utf8'))
       const cred = raw[username]
       if (cred?.accessToken) {
-        accessToken = (cred.accessToken as string).trim()
-        instanceUrl = (cred.instanceUrl as string | undefined)?.trim()
-        debugLog('sfCliAuth', `  ~/.sf/credentials.json → accessToken len=${accessToken.length}, instanceUrl=${instanceUrl ?? 'missing'}`)
+        const t = (cred.accessToken as string).trim()
+        if (looksLikeValidSfToken(t)) {
+          accessToken = t
+          instanceUrl = (cred.instanceUrl as string | undefined)?.trim() ?? instanceUrl
+          debugLog('sfCliAuth', `  ~/.sf/credentials.json → accessToken len=${t.length}, instanceUrl=${instanceUrl ?? 'missing'}`)
+        } else {
+          debugLog('sfCliAuth', `  ~/.sf/credentials.json → token looks masked/invalid (len=${t.length})`)
+        }
       } else {
         debugLog('sfCliAuth', `  ~/.sf/credentials.json → entry for "${username}" not found or no accessToken`)
       }
@@ -616,9 +676,14 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
       try {
         const cred = JSON.parse(await readFile(sfdxCredPath, 'utf8'))
         if (cred?.accessToken) {
-          accessToken = (cred.accessToken as string).trim()
-          instanceUrl = (cred.instanceUrl as string | undefined)?.trim()
-          debugLog('sfCliAuth', `  ~/.sfdx/${username}.json → accessToken len=${accessToken.length}, instanceUrl=${instanceUrl ?? 'missing'}`)
+          const t = (cred.accessToken as string).trim()
+          if (looksLikeValidSfToken(t)) {
+            accessToken = t
+            instanceUrl = (cred.instanceUrl as string | undefined)?.trim() ?? instanceUrl
+            debugLog('sfCliAuth', `  ~/.sfdx/${username}.json → accessToken len=${t.length}, instanceUrl=${instanceUrl ?? 'missing'}`)
+          } else {
+            debugLog('sfCliAuth', `  ~/.sfdx/${username}.json → token looks masked/invalid (len=${t.length})`)
+          }
         } else {
           debugLog('sfCliAuth', `  ~/.sfdx/${username}.json → no accessToken field`)
         }

@@ -481,7 +481,7 @@
             <div style="font-size: 13px;">
               Version <strong>{{ aboutUpdateResult.latestVersion }}</strong> is available.
             </div>
-            <button class="btn btn-primary btn-sm" style="margin-top: 8px;" @click="() => window.api.openReleasesPage()">
+            <button class="btn btn-primary btn-sm" style="margin-top: 8px;" @click="openReleasesPage">
               Get update from GitHub
             </button>
           </template>
@@ -494,7 +494,7 @@
           <a
             href="#"
             style="font-size: 12px; color: var(--primary); text-decoration: none;"
-            @click.prevent="() => window.api.openReleasesPage()"
+            @click.prevent="openReleasesPage"
           >View releases on GitHub</a>
         </div>
       </section>
@@ -703,6 +703,10 @@ const aboutPlatformLabel = computed(() => {
   }
   return p ?? '…'
 })
+
+function openReleasesPage(): void {
+  window.api.openReleasesPage()
+}
 
 async function checkForUpdatesManual(): Promise<void> {
   aboutChecking.value = true
