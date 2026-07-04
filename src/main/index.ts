@@ -12,6 +12,13 @@ import {
   isPatchDisabled,
   getActiveCaCertPath
 } from './tls-patch'
+import {
+  setDebugWindow,
+  getDebugFlags,
+  setDebugFlags,
+  getDebugLogs,
+  clearDebugLogs
+} from './debug-logger'
 import * as db from './database'
 
 // ── Apply TLS patch early ──────────────────────────────────────────────────────
@@ -146,6 +153,13 @@ async function checkForUpdatesMac(win: BrowserWindow): Promise<void> {
 }
 
 function setupAutoUpdater(win: BrowserWindow): void {
+  // ── Debug / Diagnostics handlers ───────────────────────────────────────────
+  setDebugWindow(win)
+  ipcMain.handle('debug:get-flags', () => getDebugFlags())
+  ipcMain.handle('debug:set-flags', (_e, f: Record<string, boolean>) => { setDebugFlags(f) })
+  ipcMain.handle('debug:get-logs', () => getDebugLogs())
+  ipcMain.handle('debug:clear-logs', () => { clearDebugLogs() })
+
   // ── Handlers available on all platforms ────────────────────────────────────
   // Version info for the About tab.
   ipcMain.handle('app:get-version-info', () => ({

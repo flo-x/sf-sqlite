@@ -391,6 +391,25 @@ const api = {
   checkForUpdates: (): Promise<{ latestVersion: string; isNewer: boolean }> =>
     ipcRenderer.invoke('app:check-for-updates'),
 
+  // ── Diagnostics / Debug ───────────────────────────────────────────────────
+  getDebugFlags: (): Promise<{ sfCliExec: boolean; sfCliAuth: boolean }> =>
+    ipcRenderer.invoke('debug:get-flags'),
+
+  setDebugFlags: (flags: { sfCliExec?: boolean; sfCliAuth?: boolean }): Promise<void> =>
+    ipcRenderer.invoke('debug:set-flags', flags),
+
+  getDebugLogs: (): Promise<string[]> =>
+    ipcRenderer.invoke('debug:get-logs'),
+
+  clearDebugLogs: (): Promise<void> =>
+    ipcRenderer.invoke('debug:clear-logs'),
+
+  onDebugLog: (cb: (line: string) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, line: string): void => cb(line)
+    ipcRenderer.on('debug:log', handler)
+    return () => ipcRenderer.removeListener('debug:log', handler)
+  },
+
   onLlmConfirmRequest: (cb: (e: { conversationId: string; statement: string; reason: string; type?: 'ddl' | 'javascript' }) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; statement: string; reason: string; type?: 'ddl' | 'javascript' }): void => cb(data)
     ipcRenderer.on('llm:confirm-request', handler)

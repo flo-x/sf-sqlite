@@ -32,6 +32,11 @@
           :class="{ active: settingsTab === 'about' }"
           @click="settingsTab = 'about'"
         >About</button>
+        <button
+          class="settings-top-tab"
+          :class="{ active: settingsTab === 'diagnostics' }"
+          @click="settingsTab = 'diagnostics'"
+        >Diagnostics</button>
       </div>
 
       <!-- LLM Provider Section -->
@@ -493,6 +498,45 @@
           >View releases on GitHub</a>
         </div>
       </section>
+
+      <!-- ── Diagnostics ───────────────────────────────────────────────────── -->
+      <section v-if="settingsTab === 'diagnostics'" class="settings-section">
+        <h3 class="settings-section-title">Diagnostics</h3>
+
+        <p class="settings-hint" style="margin-top: 0; margin-bottom: 16px;">
+          Enable flags below to capture debug information from the main process.
+          Logs appear in real time and can be copied for support.
+        </p>
+
+        <div class="diag-flags">
+          <label class="diag-flag-row">
+            <input type="checkbox" :checked="diagFlags.sfCliExec" @change="toggleFlag('sfCliExec', ($event.target as HTMLInputElement).checked)" />
+            <span class="diag-flag-label">SF CLI execution</span>
+            <span class="diag-flag-hint">Logs every CLI command: resolved binary, arguments, stdout, stderr, errors.</span>
+          </label>
+          <label class="diag-flag-row">
+            <input type="checkbox" :checked="diagFlags.sfCliAuth" @change="toggleFlag('sfCliAuth', ($event.target as HTMLInputElement).checked)" />
+            <span class="diag-flag-label">CLI authentication</span>
+            <span class="diag-flag-hint">Logs token extraction in connectCliOrg: source, token length, instanceUrl.</span>
+          </label>
+        </div>
+
+        <div class="diag-toolbar">
+          <span class="diag-log-count">{{ diagLogs.length }} line{{ diagLogs.length === 1 ? '' : 's' }}</span>
+          <div style="flex: 1" />
+          <button class="btn btn-secondary btn-sm" :disabled="diagLogs.length === 0" @click="copyDiagLogs">
+            {{ diagCopied ? '✓ Copied' : 'Copy all' }}
+          </button>
+          <button class="btn btn-secondary btn-sm" :disabled="diagLogs.length === 0" @click="clearDiag">Clear</button>
+        </div>
+
+        <div ref="diagLogEl" class="diag-log-output">
+          <span v-if="diagLogs.length === 0" class="diag-log-empty">
+            No logs yet. Enable a flag above, then perform the action you want to debug.
+          </span>
+          <div v-for="(line, i) in diagLogs" :key="i" class="diag-log-line">{{ line }}</div>
+        </div>
+      </section>
     </div>
   </div>
 
@@ -517,7 +561,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 
 interface LlmSettings {
   provider: 'openai' | 'anthropic' | 'mistral' | 'ollama' | 'litellm'
@@ -545,7 +589,7 @@ const providers = [
   { id: 'litellm' as const, label: 'LiteLLM' }
 ]
 
-const settingsTab = ref<'provider' | 'prompt' | 'network' | 'about'>('provider')
+const settingsTab = ref<'provider' | 'prompt' | 'network' | 'about' | 'diagnostics'>('provider')
 const encryptionAvailable = ref(true)
 const saving = ref(false)
 const saved = ref(false)
@@ -676,6 +720,34 @@ async function checkForUpdatesManual(): Promise<void> {
   }
 }
 
+// ── Diagnostics tab ────────────────────────────────────────────────────────
+const diagFlags = ref({ sfCliExec: false, sfCliAuth: false })
+const diagLogs = ref<string[]>([])
+const diagCopied = ref(false)
+const diagLogEl = ref<HTMLElement | null>(null)
+
+async function toggleFlag(flag: 'sfCliExec' | 'sfCliAuth', value: boolean): Promise<void> {
+  diagFlags.value[flag] = value
+  await window.api.setDebugFlags({ [flag]: value })
+}
+
+async function clearDiag(): Promise<void> {
+  await window.api.clearDebugLogs()
+  diagLogs.value = []
+}
+
+async function copyDiagLogs(): Promise<void> {
+  await navigator.clipboard.writeText(diagLogs.value.join('\n'))
+  diagCopied.value = true
+  setTimeout(() => { diagCopied.value = false }, 2000)
+}
+
+let removeDebugLogListener: (() => void) | null = null
+
+onUnmounted(() => {
+  removeDebugLogListener?.()
+})
+
 onMounted(async () => {
   // Load basic version info immediately (no network call)
   try {
@@ -683,6 +755,24 @@ onMounted(async () => {
   } catch {
     // Non-critical; the About tab will just show '…' placeholders.
   }
+
+  // Load current debug flags and existing log buffer from main process.
+  try {
+    diagFlags.value = await window.api.getDebugFlags()
+    diagLogs.value = await window.api.getDebugLogs()
+  } catch {
+    // non-critical
+  }
+
+  // Stream new log lines from main process in real time.
+  removeDebugLogListener = window.api.onDebugLog((line) => {
+    diagLogs.value.push(line)
+    nextTick(() => {
+      if (diagLogEl.value) {
+        diagLogEl.value.scrollTop = diagLogEl.value.scrollHeight
+      }
+    })
+  })
 
   try {
     const raw = await window.api.getLlmSettings() as LlmSettings & {
@@ -1358,5 +1448,79 @@ details[open] > .shell-diag-summary::before {
 .about-row:last-child .about-label,
 .about-row:last-child .about-value {
   border-bottom: none;
+}
+
+/* ── Diagnostics tab ──────────────────────────────────────────────────────── */
+.diag-flags {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.diag-flag-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: start;
+  cursor: pointer;
+}
+
+.diag-flag-row input[type="checkbox"] {
+  grid-row: 1;
+  margin-top: 2px;
+}
+
+.diag-flag-label {
+  grid-row: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.diag-flag-hint {
+  grid-column: 2;
+  grid-row: 2;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.diag-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.diag-log-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.diag-log-output {
+  background: var(--surface2, #1e1e1e);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  height: 320px;
+  overflow-y: auto;
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.diag-log-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.diag-log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 </style>

@@ -11,6 +11,7 @@ import { readFile, access } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { OrgInfo, CliOrg, CliDiagnosticStep, CliOrgsResult, SObjectSummary, FieldDescriptor, PasswordCreds, QueryResult } from '../shared/types'
+import { debugLog } from './debug-logger'
 
 const execFileAsync = promisify(execFile)
 
@@ -22,10 +23,24 @@ async function execCliAsync(
   args: string[],
   opts: { timeout: number }
 ): Promise<{ stdout: string; stderr: string }> {
-  if (process.platform === 'win32' && cmd.toLowerCase().endsWith('.cmd')) {
-    return execFileAsync('cmd.exe', ['/c', cmd, ...args], opts)
+  const isCmd = process.platform === 'win32' && cmd.toLowerCase().endsWith('.cmd')
+  const actualCmd = isCmd ? 'cmd.exe' : cmd
+  const actualArgs = isCmd ? ['/c', cmd, ...args] : args
+
+  debugLog('sfCliExec', `run: ${actualCmd} ${actualArgs.map(a => `"${a}"`).join(' ')}`)
+
+  try {
+    const result = await execFileAsync(actualCmd, actualArgs, opts)
+    const outSnip = result.stdout.slice(0, 300)
+    debugLog('sfCliExec', `stdout (${result.stdout.length} chars): ${outSnip}${result.stdout.length > 300 ? '…' : ''}`)
+    if (result.stderr?.trim()) {
+      debugLog('sfCliExec', `stderr: ${result.stderr.slice(0, 200)}`)
+    }
+    return result
+  } catch (err) {
+    debugLog('sfCliExec', `error: ${err instanceof Error ? err.message : String(err)}`)
+    throw err
   }
-  return execFileAsync(cmd, args, opts)
 }
 
 // Additional absolute paths to try if 'sf' / 'sfdx' are not on PATH.
@@ -64,7 +79,10 @@ async function execSfCommand(
   args: string[],
   opts: { timeout: number }
 ): Promise<string> {
-  for (const cmd of sfCandidates(base)) {
+  const candidates = sfCandidates(base)
+  debugLog('sfCliExec', `execSfCommand(${base}) — trying ${candidates.length} candidate(s): ${candidates.join(', ')}`)
+
+  for (const cmd of candidates) {
     try {
       // For absolute paths, resolve to the real on-disk binary first (handles
       // Windows .cmd/.exe extensions and spaces) then spawn that exact path.
@@ -73,10 +91,15 @@ async function execSfCommand(
             ? await resolveWindowsAbsPath(cmd)
             : await (async () => { try { await access(cmd); return cmd } catch { return null } })())
         : cmd
-      if (resolved === null) continue
+      if (resolved === null) {
+        debugLog('sfCliExec', `  candidate "${cmd}" → not found on disk, skipping`)
+        continue
+      }
+      debugLog('sfCliExec', `  candidate "${cmd}" → resolved to "${resolved}"`)
       const { stdout } = await execCliAsync(resolved, args, opts)
       return stdout
-    } catch {
+    } catch (err) {
+      debugLog('sfCliExec', `  candidate "${cmd}" failed: ${err instanceof Error ? err.message : String(err)}`)
       // try next candidate
     }
   }
@@ -543,6 +566,8 @@ export async function listCliOrgs(): Promise<CliOrgsResult> {
 }
 
 export async function connectCliOrg(username: string): Promise<OrgInfo> {
+  debugLog('sfCliAuth', `connectCliOrg("${username}") start`)
+
   // 'sf org display' fetches current auth info and refreshes the token if needed
   let accessToken: string | undefined
   let instanceUrl: string | undefined
@@ -557,8 +582,10 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
       // Trim to strip any trailing \r or whitespace that Windows stdout can inject.
       accessToken = parsed?.result?.accessToken?.trim()
       instanceUrl = parsed?.result?.instanceUrl?.trim()
+      debugLog('sfCliAuth', `${base} org display → accessToken: ${accessToken ? `"${accessToken.slice(0, 8)}…" len=${accessToken.length}` : 'missing'}, instanceUrl: ${instanceUrl ?? 'missing'}`)
       if (accessToken && instanceUrl) break
-    } catch {
+    } catch (err) {
+      debugLog('sfCliAuth', `${base} org display failed: ${err instanceof Error ? err.message : String(err)}`)
       // try next CLI variant or fall through to credential file
     }
   }
@@ -568,46 +595,67 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
     const sfCredPath = join(homedir(), '.sf', 'credentials.json')
     const sfdxCredPath = join(homedir(), '.sfdx', `${username}.json`)
 
+    debugLog('sfCliAuth', `CLI display gave no credentials — trying credential files`)
+    debugLog('sfCliAuth', `  checking: ${sfCredPath}`)
     try {
       const raw = JSON.parse(await readFile(sfCredPath, 'utf8'))
       const cred = raw[username]
       if (cred?.accessToken) {
         accessToken = (cred.accessToken as string).trim()
         instanceUrl = (cred.instanceUrl as string | undefined)?.trim()
+        debugLog('sfCliAuth', `  ~/.sf/credentials.json → accessToken len=${accessToken.length}, instanceUrl=${instanceUrl ?? 'missing'}`)
+      } else {
+        debugLog('sfCliAuth', `  ~/.sf/credentials.json → entry for "${username}" not found or no accessToken`)
       }
-    } catch { /* try sfdx path */ }
+    } catch (err) {
+      debugLog('sfCliAuth', `  ~/.sf/credentials.json read failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
 
     if (!accessToken) {
+      debugLog('sfCliAuth', `  checking: ${sfdxCredPath}`)
       try {
         const cred = JSON.parse(await readFile(sfdxCredPath, 'utf8'))
         if (cred?.accessToken) {
           accessToken = (cred.accessToken as string).trim()
           instanceUrl = (cred.instanceUrl as string | undefined)?.trim()
+          debugLog('sfCliAuth', `  ~/.sfdx/${username}.json → accessToken len=${accessToken.length}, instanceUrl=${instanceUrl ?? 'missing'}`)
+        } else {
+          debugLog('sfCliAuth', `  ~/.sfdx/${username}.json → no accessToken field`)
         }
-      } catch { /* ignore */ }
+      } catch (err) {
+        debugLog('sfCliAuth', `  ~/.sfdx/${username}.json read failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
     }
   }
 
-
   if (!accessToken || !instanceUrl) {
+    debugLog('sfCliAuth', `connectCliOrg failed: no credentials for "${username}"`)
     throw new Error(
       `Could not retrieve credentials for ${username}.\nRun: sf org login web --target-org ${username}`
     )
   }
 
+  debugLog('sfCliAuth', `connecting jsforce — instanceUrl: ${instanceUrl}, token len: ${accessToken.length}`)
+
   // compress: true is valid at runtime but absent from @types/jsforce typings
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const conn = new jsforce.Connection({ instanceUrl, accessToken, compress: true } as any)
   await detectAndSetApiVersion(conn)
-  const identity = await conn.identity()
-  connection = conn
-  connectionSource = { type: 'cli', username: identity.username }
-  currentOrgInfo = {
-    instanceUrl: conn.instanceUrl,
-    username: identity.username,
-    orgId: identity.organization_id
+  try {
+    const identity = await conn.identity()
+    connection = conn
+    connectionSource = { type: 'cli', username: identity.username }
+    currentOrgInfo = {
+      instanceUrl: conn.instanceUrl,
+      username: identity.username,
+      orgId: identity.organization_id
+    }
+    debugLog('sfCliAuth', `connectCliOrg success — username: ${identity.username}, orgId: ${identity.organization_id}`)
+    return currentOrgInfo
+  } catch (err) {
+    debugLog('sfCliAuth', `jsforce identity() failed: ${err instanceof Error ? err.message : String(err)}`)
+    throw err
   }
-  return currentOrgInfo
 }
 
 export async function listObjects(): Promise<SObjectSummary[]> {
