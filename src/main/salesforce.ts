@@ -602,7 +602,10 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
         accessToken = token
         break
       } else if (token && !valid) {
-        debugLog('sfCliAuth', `  token looks masked/invalid — will try show-access-token next`)
+        // Token is masked ([REDACTED] etc.) — no point trying the next CLI variant,
+        // go straight to sf org auth show-access-token in Step 2.
+        debugLog('sfCliAuth', `  token looks masked/invalid — skipping remaining display commands`)
+        break
       }
     } catch (err) {
       debugLog('sfCliAuth', `${base} org display failed: ${err instanceof Error ? err.message : String(err)}`)
