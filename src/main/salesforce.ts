@@ -1,6 +1,6 @@
 import jsforce from 'jsforce'
 import type { Connection as SfConnection, Record as SfRecord, Field as SfField, SaveResult as SfSaveResult } from 'jsforce'
-import { createServer } from 'http'
+import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { request as httpsRequest } from 'https'
 import { createGunzip } from 'zlib'
 import { randomBytes, createHash } from 'crypto'
@@ -68,8 +68,10 @@ async function execSfCommand(
     try {
       // For absolute paths, resolve to the real on-disk binary first (handles
       // Windows .cmd/.exe extensions and spaces) then spawn that exact path.
-      const resolved = isAbsolutePath(cmd)
-        ? (process.platform === 'win32' ? await resolveWindowsAbsPath(cmd) : (async () => { try { await access(cmd); return cmd } catch { return null } })())
+      const resolved: string | null = isAbsolutePath(cmd)
+        ? (process.platform === 'win32'
+            ? await resolveWindowsAbsPath(cmd)
+            : await (async () => { try { await access(cmd); return cmd } catch { return null } })())
         : cmd
       if (resolved === null) continue
       const { stdout } = await execCliAsync(resolved, args, opts)
@@ -176,14 +178,6 @@ function exchangeCodeForTokens(
     const body = new URLSearchParams(params).toString()
     const endpoint = new URL('/services/oauth2/token', loginUrl)
 
-    // ── DEBUG ────────────────────────────────────────────────────────────────
-    console.log('[OAuth] Token exchange → POST', endpoint.toString())
-    const debugParams = { ...params }
-    if (debugParams.code)          debugParams.code          = debugParams.code.slice(0, 8) + '…'
-    if (debugParams.code_verifier) debugParams.code_verifier = debugParams.code_verifier.slice(0, 8) + '…'
-    console.log('[OAuth] Request body:', debugParams)
-    // ─────────────────────────────────────────────────────────────────────────
-
     const req = httpsRequest(
       {
         hostname: endpoint.hostname,
@@ -195,14 +189,9 @@ function exchangeCodeForTokens(
         },
       },
       (res) => {
-        // ── DEBUG ────────────────────────────────────────────────────────────
-        console.log('[OAuth] Token response status:', res.statusCode, res.statusMessage)
-        console.log('[OAuth] Token response headers:', res.headers)
-        // ─────────────────────────────────────────────────────────────────────
         let data = ''
         res.on('data', (chunk: string) => { data += chunk })
         res.on('end', () => {
-          console.log('[OAuth] Token response body:', data)
           try {
             const parsed = JSON.parse(data) as Record<string, string>
             if (parsed.error) {
@@ -228,7 +217,7 @@ const OAUTH_CALLBACK_PORTS = [8788, 8789, 8790, 8791, 8792]
 
 /** Start an HTTP server on the first available port from OAUTH_CALLBACK_PORTS. */
 function startCallbackServer(
-  handler: Parameters<typeof createServer>[0]
+  handler: (req: IncomingMessage, res: ServerResponse) => void
 ): Promise<{ server: ReturnType<typeof createServer>; port: number }> {
   return new Promise((resolve, reject) => {
     const tryPort = (idx: number): void => {
@@ -263,10 +252,9 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
   const codeChallenge = generateCodeChallenge(codeVerifier)
 
   return new Promise((resolve, reject) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let activeServer: ReturnType<typeof createServer> | null = null
 
-    const handler: Parameters<typeof createServer>[0] = (req, res) => {
+    const handler = (req: IncomingMessage, res: ServerResponse): void => {
       if (!req.url?.startsWith('/callback')) {
         res.writeHead(404)
         res.end()
@@ -277,16 +265,6 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
       // browser, so req.socket.localPort is the authoritative port value.
       const port = (req.socket as { localPort: number }).localPort
       const url = new URL(req.url, `http://localhost:${port}`)
-
-      // ── DEBUG ──────────────────────────────────────────────────────────────
-      console.log('[OAuth] Callback received on port', port)
-      console.log('[OAuth] Callback full URL:', url.toString())
-      console.log('[OAuth] Callback params:')
-      url.searchParams.forEach((v, k) => {
-        const display = (k === 'code' || k === 'state') ? v.slice(0, 8) + '…' : v
-        console.log(`  ${k}: ${display}`)
-      })
-      // ────────────────────────────────────────────────────────────────────────
 
       const returnedState = url.searchParams.get('state')
       if (returnedState !== expectedState) {
@@ -366,20 +344,6 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
           code_challenge_method: 'S256',
         })
         const authUrl = `${loginUrl}/services/oauth2/authorize?${authParams.toString()}`
-
-        // ── DEBUG ──────────────────────────────────────────────────────────
-        console.log('[OAuth] Callback server listening on port', port)
-        console.log('[OAuth] redirect_uri that will be sent:', redirectUri)
-        console.log('[OAuth] Opening authorization URL:')
-        console.log('  loginUrl         :', loginUrl)
-        console.log('  client_id        :', clientId)
-        console.log('  redirect_uri     :', redirectUri)
-        console.log('  scope            :', 'api refresh_token')
-        console.log('  code_challenge   :', codeChallenge)
-        console.log('  code_challenge_method: S256')
-        console.log('  state            :', expectedState.slice(0, 8) + '…')
-        console.log('[OAuth] Full auth URL:', authUrl)
-        // ──────────────────────────────────────────────────────────────────
 
         shell.openExternal(authUrl)
 
@@ -590,8 +554,9 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
     try {
       const stdout = await execSfCommand(base, args, { timeout: 15_000 })
       const parsed = JSON.parse(stdout)
-      accessToken = parsed?.result?.accessToken
-      instanceUrl = parsed?.result?.instanceUrl
+      // Trim to strip any trailing \r or whitespace that Windows stdout can inject.
+      accessToken = parsed?.result?.accessToken?.trim()
+      instanceUrl = parsed?.result?.instanceUrl?.trim()
       if (accessToken && instanceUrl) break
     } catch {
       // try next CLI variant or fall through to credential file
@@ -606,16 +571,23 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
     try {
       const raw = JSON.parse(await readFile(sfCredPath, 'utf8'))
       const cred = raw[username]
-      if (cred?.accessToken) { accessToken = cred.accessToken; instanceUrl = cred.instanceUrl }
+      if (cred?.accessToken) {
+        accessToken = (cred.accessToken as string).trim()
+        instanceUrl = (cred.instanceUrl as string | undefined)?.trim()
+      }
     } catch { /* try sfdx path */ }
 
     if (!accessToken) {
       try {
         const cred = JSON.parse(await readFile(sfdxCredPath, 'utf8'))
-        if (cred?.accessToken) { accessToken = cred.accessToken; instanceUrl = cred.instanceUrl }
+        if (cred?.accessToken) {
+          accessToken = (cred.accessToken as string).trim()
+          instanceUrl = (cred.instanceUrl as string | undefined)?.trim()
+        }
       } catch { /* ignore */ }
     }
   }
+
 
   if (!accessToken || !instanceUrl) {
     throw new Error(
