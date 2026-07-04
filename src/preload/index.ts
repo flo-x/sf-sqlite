@@ -392,10 +392,10 @@ const api = {
     ipcRenderer.invoke('app:check-for-updates'),
 
   // ── Diagnostics / Debug ───────────────────────────────────────────────────
-  getDebugFlags: (): Promise<{ sfCliExec: boolean; sfCliAuth: boolean }> =>
+  getDebugFlags: (): Promise<{ sfCliExec: boolean; sfCliAuth: boolean; oauthFlow: boolean }> =>
     ipcRenderer.invoke('debug:get-flags'),
 
-  setDebugFlags: (flags: { sfCliExec?: boolean; sfCliAuth?: boolean }): Promise<void> =>
+  setDebugFlags: (flags: { sfCliExec?: boolean; sfCliAuth?: boolean; oauthFlow?: boolean }): Promise<void> =>
     ipcRenderer.invoke('debug:set-flags', flags),
 
   getDebugLogs: (): Promise<string[]> =>
@@ -416,8 +416,18 @@ const api = {
     return () => ipcRenderer.removeListener('llm:confirm-request', handler)
   },
 
+  // Fired after the user approves a JavaScript execution and the worker actually starts.
+  onLlmToolExecuting: (cb: (e: { conversationId: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string }): void => cb(data)
+    ipcRenderer.on('llm:tool-executing', handler)
+    return () => ipcRenderer.removeListener('llm:tool-executing', handler)
+  },
+
   confirmLlmStatement: (conversationId: string, approved: boolean): Promise<void> =>
-    ipcRenderer.invoke('llm:confirm-response', { conversationId, approved })
+    ipcRenderer.invoke('llm:confirm-response', { conversationId, approved }),
+
+  cancelTool: (conversationId: string): Promise<void> =>
+    ipcRenderer.invoke('llm:cancel-tool', conversationId),
 }
 
 contextBridge.exposeInMainWorld('api', api)

@@ -94,6 +94,12 @@
           </div>
           <div v-else-if="msg.result === 'executing'" class="confirm-outcome confirm-executing">
             <span class="spinner" style="width:10px;height:10px;border-width:2px;"></span> Executing…
+            <button
+              v-if="msg.confirmType === 'javascript'"
+              class="btn btn-secondary btn-sm"
+              style="margin-left:10px"
+              @click="cancelTool(idx)"
+            >Cancel</button>
           </div>
           <div v-else-if="msg.result === 'error'" class="confirm-outcome confirm-error">
             <span>✗ Failed: {{ msg.confirmError }}</span>
@@ -110,8 +116,8 @@
               <pre class="ai-streaming-text">{{ msg.content }}</pre>
               <span class="ai-cursor">▋</span>
             </template>
-            <!-- Parsed structured response -->
-            <template v-else-if="msg.parsed">
+            <!-- Parsed structured response (only when at least one field is present) -->
+            <template v-else-if="msg.parsed && (msg.parsed.sql || msg.parsed.javascript || msg.parsed.explanation || (msg.parsed.warnings && msg.parsed.warnings.length > 0))">
               <div v-if="msg.parsed.sql" class="ai-sql-block">
                 <div class="ai-sql-header">
                   <span class="ai-sql-label">SQL</span>
@@ -234,6 +240,31 @@ function renderMarkdown(text: string): string {
 
 type ParsedResponse = { sql?: string; javascript?: string; explanation?: string; warnings?: string[] }
 
+/**
+ * Extract a ParsedResponse from a model reply that may contain markdown preamble
+ * before the JSON object (some models prepend explanatory text despite instructions).
+ * Finds the outermost { … } block and folds any leading text into explanation.
+ */
+function extractParsedResponse(text: string): ParsedResponse | null {
+  if (!text) { return null }
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end <= start) { return null }
+  let parsed: ParsedResponse
+  try {
+    parsed = JSON.parse(text.slice(start, end + 1)) as ParsedResponse
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) { return null }
+  // Fold any markdown preamble before the JSON into the explanation field
+  const preamble = text.slice(0, start).trim()
+  if (preamble) {
+    parsed.explanation = preamble + (parsed.explanation ? '\n\n' + parsed.explanation : '')
+  }
+  return parsed
+}
+
 interface AiMessage {
   role: 'user' | 'assistant' | 'tool_call' | 'tool_confirm' | 'error'
   content: string
@@ -315,6 +346,7 @@ let unsubToolCall: (() => void) | null = null
 let unsubToolResult: (() => void) | null = null
 let unsubSettingsChanged: (() => void) | null = null
 let unsubConfirmRequest: (() => void) | null = null
+let unsubToolExecuting: (() => void) | null = null
 
 function approveConfirm(idx: number): void {
   const msg = messages.value[idx]
@@ -329,6 +361,13 @@ function rejectConfirm(idx: number): void {
   if (!msg || !msg.confirmPending) { return }
   window.api.confirmLlmStatement(msg.confirmConversationId!, false)
   msg.confirmPending = false
+  msg.result = 'cancelled'
+}
+
+function cancelTool(idx: number): void {
+  const msg = messages.value[idx]
+  if (!msg || msg.result !== 'executing') { return }
+  window.api.cancelTool(msg.confirmConversationId!)
   msg.result = 'cancelled'
 }
 
@@ -359,6 +398,19 @@ onMounted(() => {
       confirmType,
     })
     scrollToBottom()
+  })
+
+  // When the main process actually starts the JS worker (post-approval), flip the
+  // confirm card from "Executing…" to a cancellable state that shows a Cancel button.
+  // The result field stays 'executing' — the Cancel button now appears in the template.
+  unsubToolExecuting = window.api.onLlmToolExecuting((e) => {
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      const m = messages.value[i]
+      if (m.role === 'tool_confirm' && m.confirmConversationId === e.conversationId && m.result === 'executing') {
+        // Already in executing state — the template will show the Cancel button.
+        break
+      }
+    }
   })
   unsubChunk = window.api.onLlmChunk((text) => {
     const last = messages.value[messages.value.length - 1]
@@ -391,8 +443,9 @@ onMounted(() => {
         break
       }
     }
-    // For execute_ddl: also update the confirm card with the real execution outcome
-    if (e.name === 'execute_ddl') {
+    // For execute_ddl and execute_javascript: also update the confirm card with
+    // the real execution outcome so it doesn't stay stuck in "Executing…".
+    if (e.name === 'execute_ddl' || e.name === 'execute_javascript') {
       for (let i = messages.value.length - 1; i >= 0; i--) {
         const m = messages.value[i]
         if (m.role === 'tool_confirm' && m.result === 'executing') {
@@ -403,11 +456,12 @@ onMounted(() => {
               m.confirmError = parsed.error
             } else {
               m.result = 'executed'
-              conn.refreshDbInfo()
+              if (e.name === 'execute_ddl') {
+                conn.refreshDbInfo()
+              }
             }
           } catch {
             m.result = 'executed'
-            conn.refreshDbInfo()
           }
           break
         }
@@ -422,6 +476,7 @@ onUnmounted(() => {
   unsubToolResult?.()
   unsubSettingsChanged?.()
   unsubConfirmRequest?.()
+  unsubToolExecuting?.()
 })
 
 function startNewConversation(): void {
@@ -435,11 +490,15 @@ function startNewConversation(): void {
 function stopGeneration(): void {
   generationToken.value++ // invalidate current in-flight request
   loading.value = false
-  // If a DDL confirmation is open inline, cancel it so the backend promise resolves.
+  // Cancel any pending or executing tool confirmation.
   const pendingMsg = messages.value.find(m => m.role === 'tool_confirm' && (m.confirmPending || m.result === 'executing'))
   if (pendingMsg) {
     if (pendingMsg.confirmPending) {
+      // Still waiting for user approval — reject it.
       window.api.confirmLlmStatement(pendingMsg.confirmConversationId!, false)
+    } else if (pendingMsg.result === 'executing' && pendingMsg.confirmType === 'javascript') {
+      // JS worker is running — terminate it.
+      window.api.cancelTool(pendingMsg.confirmConversationId!)
     }
     pendingMsg.confirmPending = false
     pendingMsg.result = 'cancelled'
@@ -450,14 +509,7 @@ function stopGeneration(): void {
     const msg = messages.value[idx]
     msg.streaming = false
     if (msg.content) {
-      try {
-        const parsed = JSON.parse(msg.content) as ParsedResponse
-        if (typeof parsed === 'object' && parsed !== null) {
-          msg.parsed = parsed
-        }
-      } catch {
-        msg.parsed = null
-      }
+      msg.parsed = extractParsedResponse(msg.content)
     } else {
       messages.value.splice(idx, 1) // nothing was received yet — remove empty bubble
     }
@@ -647,18 +699,10 @@ async function sendMessage(): Promise<void> {
       const assistantMsg = messages.value[findLastStreamingIdx()]
       assistantMsg.content = result.reply
       assistantMsg.streaming = false
-      try {
-        const parsed = JSON.parse(result.reply) as ParsedResponse
-        if (typeof parsed === 'object' && parsed !== null) {
-          assistantMsg.parsed = parsed
-        }
-      } catch {
-        assistantMsg.parsed = null
-      }
+      assistantMsg.parsed = extractParsedResponse(result.reply)
     } else if (result.reply) {
       // Model returned a reply but never streamed any chunks (e.g. non-streaming path)
-      const parsed = (() => { try { return JSON.parse(result.reply) as ParsedResponse } catch { return null } })()
-      messages.value.push({ role: 'assistant', content: result.reply, streaming: false, parsed })
+      messages.value.push({ role: 'assistant', content: result.reply, streaming: false, parsed: extractParsedResponse(result.reply) })
     }
 
     if (result.contextTruncated) {

@@ -125,7 +125,6 @@ export function cancelScript(runId: string): void {
   }
 }
 
-const LLM_TIMEOUT_MS = 30_000
 const LLM_LOG_CAP = 200
 
 /**
@@ -135,8 +134,10 @@ const LLM_LOG_CAP = 200
  * only the explicitly provided db and console APIs are accessible. import()
  * calls and dangerous Node.js globals (process, fetch, etc.) are blocked.
  *
- * The worker is automatically terminated after LLM_TIMEOUT_MS milliseconds.
+ * Returns a cancel function that terminates the worker immediately and
+ * resolves the completion with a "Cancelled by user." error.
  * Log output is capped at LLM_LOG_CAP entries to prevent memory exhaustion.
+ * There is no hard timeout — use the Cancel button in the UI to stop a long run.
  * The jobs API is intentionally not wired up.
  */
 export function runLlmScript(
@@ -146,17 +147,16 @@ export function runLlmScript(
   onLog: (log: ScriptLog) => void,
   onComplete: (result: ScriptComplete) => void,
   onProgress?: (p: ScriptProgress) => void
-): void {
+): () => void {
   const workerPath = path.join(__dirname, 'script-runner-llm-worker.js')
   const worker = new Worker(workerPath, {
     workerData: { code, dbPath, runId },
-    // Node.js 24 permission model: restrict FS access to the open database
-    // file only. Child-process spawning and other capabilities are denied by
-    // default when the permission flag is active.
-    execArgv: [
-      `--allow-fs-read=${dbPath}`,
-      `--allow-fs-write=${dbPath}`,
-    ],
+    // Security is enforced inside the worker via vm.compileFunction() with a
+    // null-prototype context that blocks import(), process, fetch, etc.
+    // The Node.js permission-model flags (--allow-fs-read / --allow-fs-write)
+    // are intentionally NOT used here: they would also block the worker from
+    // loading its own module, Node.js built-ins, and the better-sqlite3 native
+    // addon, causing a silent startup failure.
   })
   activeWorkers.set(runId, worker)
 
@@ -168,15 +168,8 @@ export function runLlmScript(
       return
     }
     completed = true
-    clearTimeout(timeoutHandle)
     onComplete(result)
   }
-
-  // Hard timeout — terminate if the script runs longer than LLM_TIMEOUT_MS.
-  const timeoutHandle = setTimeout(() => {
-    worker.terminate()
-    complete({ runId, durationMs: LLM_TIMEOUT_MS, error: `Script timed out after ${LLM_TIMEOUT_MS / 1000} seconds.` })
-  }, LLM_TIMEOUT_MS)
 
   worker.on('message', (msg: { type: string } & Record<string, unknown>) => {
     if (msg.type === 'log') {
@@ -200,7 +193,21 @@ export function runLlmScript(
     complete({ runId, durationMs: 0, error: err.message })
   })
 
-  worker.on('exit', () => {
+  worker.on('exit', (code) => {
     activeWorkers.delete(runId)
+    // If the worker exits without having sent a 'done' or 'error' message (e.g.
+    // the permission model rejected the script, the worker module failed to load,
+    // or an uncaught exception bypassed the message channel), resolve the promise
+    // now so the UI doesn't stay stuck in "Executing…" forever.
+    if (!completed) {
+      complete({ runId, durationMs: 0, error: `Worker exited unexpectedly (exit code ${code ?? 'unknown'}).` })
+    }
   })
+
+  return (): void => {
+    if (!completed) {
+      worker.terminate()
+      complete({ runId, durationMs: 0, error: 'Cancelled by user.' })
+    }
+  }
 }

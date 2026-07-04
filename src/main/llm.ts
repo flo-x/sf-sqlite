@@ -288,8 +288,11 @@ Always respond with a JSON object in this exact shape:
   "warnings": ["Optional performance, correctness, or data-quality notes — empty array if none"]
 }
 
-Do NOT wrap the JSON in markdown code fences.
-Do NOT use emojis anywhere in your responses.
+CRITICAL OUTPUT RULES — violations break the UI parser:
+- Your ENTIRE response MUST be a single JSON object. Start with { and end with }.
+- Do NOT write any text, sentence, or explanation before or after the JSON object.
+- Do NOT wrap the JSON in markdown code fences or any other formatting.
+- Do NOT use emojis anywhere in your responses.
 
 Whenever a tool was executed but resulted in an error, explain the error to the user in the "explanation" key. Do not attempt to fulfill the user's request, do not attempt to rerun the query, just explain the error.
 

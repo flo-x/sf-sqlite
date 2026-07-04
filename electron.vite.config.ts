@@ -9,7 +9,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve('src/main/index.ts'),
-          'script-runner-worker': resolve('src/main/script-runner-worker.ts')
+          'script-runner-worker': resolve('src/main/script-runner-worker.ts'),
+          'script-runner-llm-worker': resolve('src/main/script-runner-llm-worker.ts')
         },
         output: {
           entryFileNames: '[name].js'

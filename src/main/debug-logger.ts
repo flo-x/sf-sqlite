@@ -13,11 +13,27 @@ export interface DebugFlags {
   sfCliExec: boolean
   /** Logs credential extraction in connectCliOrg: token length, instanceUrl, source. */
   sfCliAuth: boolean
+  /** Logs the full OAuth 2.0 flow: callback server port, auth URL, callback
+   *  params, token exchange result, and jsforce identity call. */
+  oauthFlow: boolean
+  /** Logs LLM execute_sql tool calls: query text, row/column counts, errors. */
+  llmSql: boolean
+  /** Logs LLM execute_ddl tool calls: statement, approval result, execution outcome. */
+  llmDdl: boolean
+  /** Logs LLM execute_javascript tool calls: code length, log lines, duration, errors. */
+  llmJavascript: boolean
 }
 
 const MAX_ENTRIES = 500
 
-let flags: DebugFlags = { sfCliExec: false, sfCliAuth: false }
+let flags: DebugFlags = {
+  sfCliExec: false,
+  sfCliAuth: false,
+  oauthFlow: false,
+  llmSql: false,
+  llmDdl: false,
+  llmJavascript: false,
+}
 let rendererWindow: BrowserWindow | null = null
 
 const entries: string[] = []

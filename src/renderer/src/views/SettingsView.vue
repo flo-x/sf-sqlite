@@ -519,6 +519,26 @@
             <span class="diag-flag-label">CLI authentication</span>
             <span class="diag-flag-hint">Logs token extraction in connectCliOrg: source, token length, instanceUrl.</span>
           </label>
+          <label class="diag-flag-row">
+            <input type="checkbox" :checked="diagFlags.oauthFlow" @change="toggleFlag('oauthFlow', ($event.target as HTMLInputElement).checked)" />
+            <span class="diag-flag-label">OAuth 2.0 flow</span>
+            <span class="diag-flag-hint">Logs the full OAuth flow: callback server port, auth URL, callback params, token exchange result, identity call.</span>
+          </label>
+          <label class="diag-flag-row">
+            <input type="checkbox" :checked="diagFlags.llmSql" @change="toggleFlag('llmSql', ($event.target as HTMLInputElement).checked)" />
+            <span class="diag-flag-label">AI — SQL tool</span>
+            <span class="diag-flag-hint">Logs every execute_sql call: query text, safety rejections, row/column counts, errors.</span>
+          </label>
+          <label class="diag-flag-row">
+            <input type="checkbox" :checked="diagFlags.llmDdl" @change="toggleFlag('llmDdl', ($event.target as HTMLInputElement).checked)" />
+            <span class="diag-flag-label">AI — DDL tool</span>
+            <span class="diag-flag-hint">Logs every execute_ddl call: statement, approval result, execution outcome.</span>
+          </label>
+          <label class="diag-flag-row">
+            <input type="checkbox" :checked="diagFlags.llmJavascript" @change="toggleFlag('llmJavascript', ($event.target as HTMLInputElement).checked)" />
+            <span class="diag-flag-label">AI — JavaScript tool</span>
+            <span class="diag-flag-hint">Logs every execute_javascript call: code length, worker log lines, duration, errors.</span>
+          </label>
         </div>
 
         <div class="diag-toolbar">
@@ -725,12 +745,12 @@ async function checkForUpdatesManual(): Promise<void> {
 }
 
 // ── Diagnostics tab ────────────────────────────────────────────────────────
-const diagFlags = ref({ sfCliExec: false, sfCliAuth: false })
+const diagFlags = ref({ sfCliExec: false, sfCliAuth: false, oauthFlow: false, llmSql: false, llmDdl: false, llmJavascript: false })
 const diagLogs = ref<string[]>([])
 const diagCopied = ref(false)
 const diagLogEl = ref<HTMLElement | null>(null)
 
-async function toggleFlag(flag: 'sfCliExec' | 'sfCliAuth', value: boolean): Promise<void> {
+async function toggleFlag(flag: 'sfCliExec' | 'sfCliAuth' | 'oauthFlow' | 'llmSql' | 'llmDdl' | 'llmJavascript', value: boolean): Promise<void> {
   diagFlags.value[flag] = value
   await window.api.setDebugFlags({ [flag]: value })
 }

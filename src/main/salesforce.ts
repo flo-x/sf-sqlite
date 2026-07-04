@@ -276,6 +276,8 @@ function startCallbackServer(
 }
 
 export async function connectOAuth(clientId: string, loginUrl: string): Promise<OrgInfo> {
+  debugLog('oauthFlow', `connectOAuth start — clientId: "${clientId}", loginUrl: "${loginUrl}"`)
+
   // CSRF protection: random state nonce verified before accepting the auth code.
   const expectedState = randomBytes(24).toString('hex')
 
@@ -283,12 +285,14 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
   // is bound to this specific browser session (RFC 7636, S256 method).
   const codeVerifier = generateCodeVerifier()
   const codeChallenge = generateCodeChallenge(codeVerifier)
+  debugLog('oauthFlow', `PKCE — verifier len: ${codeVerifier.length}, challenge: "${codeChallenge}"`)
 
   return new Promise((resolve, reject) => {
     let activeServer: ReturnType<typeof createServer> | null = null
 
     const handler = (req: IncomingMessage, res: ServerResponse): void => {
       if (!req.url?.startsWith('/callback')) {
+        debugLog('oauthFlow', `callback server: ignored non-callback request: ${req.url}`)
         res.writeHead(404)
         res.end()
         return
@@ -299,22 +303,41 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
       const port = (req.socket as { localPort: number }).localPort
       const url = new URL(req.url, `http://localhost:${port}`)
 
+      debugLog('oauthFlow', `callback received on port ${port}: ${url.pathname}${url.search}`)
+
       const returnedState = url.searchParams.get('state')
       if (returnedState !== expectedState) {
+        debugLog('oauthFlow', `state mismatch — expected: "${expectedState.slice(0, 8)}…", got: "${(returnedState ?? '').slice(0, 8)}…"`)
         res.writeHead(400)
         res.end('Invalid state')
         reject(new Error('OAuth callback state mismatch — possible CSRF attack'))
         activeServer?.close()
         return
       }
+
       const code = url.searchParams.get('code')
+      const error = url.searchParams.get('error')
+      const errorDescription = url.searchParams.get('error_description')
+
+      if (error) {
+        debugLog('oauthFlow', `Salesforce returned an error: ${error} — ${errorDescription ?? '(no description)'}`)
+        res.writeHead(400)
+        res.end('Authorization error')
+        reject(new Error(`${error}: ${errorDescription ?? ''}`.trim()))
+        activeServer?.close()
+        return
+      }
+
       if (!code) {
+        debugLog('oauthFlow', `callback missing both code and error — full search: ${url.search}`)
         res.writeHead(400)
         res.end('Missing code')
         reject(new Error('OAuth callback missing code'))
         activeServer?.close()
         return
       }
+
+      debugLog('oauthFlow', `authorization code received (len: ${code.length}) — proceeding to token exchange`)
       res.writeHead(200, { 'Content-Type': 'text/html' })
       res.end('<html><body><h2>Authenticated! You can close this tab.</h2></body></html>')
       activeServer?.close()
@@ -323,6 +346,8 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
 
       // Exchange the authorization code for tokens, sending the PKCE verifier.
       // No client secret is included — the verifier proves authenticity instead.
+      debugLog('oauthFlow', `token exchange POST → ${loginUrl}/services/oauth2/token`)
+      debugLog('oauthFlow', `  grant_type: authorization_code, redirect_uri: ${redirectUri}`)
       exchangeCodeForTokens(loginUrl, {
         grant_type: 'authorization_code',
         code,
@@ -334,6 +359,7 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
           const instanceUrl = tokens.instance_url
           const accessToken = tokens.access_token
           const refreshToken = tokens.refresh_token
+          debugLog('oauthFlow', `token exchange success — instanceUrl: ${instanceUrl}, accessToken len: ${accessToken?.length ?? 0}, refreshToken: ${refreshToken ? 'present' : 'absent'}`)
 
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const conn = new jsforce.Connection({ instanceUrl, accessToken, compress: true } as any)
@@ -345,20 +371,30 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
             const c = conn as any
             c.refreshToken = refreshToken
             c.oauth2 = new jsforce.OAuth2({ loginUrl, clientId, redirectUri })
+            debugLog('oauthFlow', `jsforce configured with refresh token and OAuth2 for auto-refresh`)
           }
 
           await detectAndSetApiVersion(conn)
-          const identity = await conn.identity()
-          connection = conn
-          connectionSource = { type: 'oauth' }
-          currentOrgInfo = {
-            instanceUrl: conn.instanceUrl,
-            username: identity.username,
-            orgId: identity.organization_id,
+          try {
+            const identity = await conn.identity()
+            connection = conn
+            connectionSource = { type: 'oauth' }
+            currentOrgInfo = {
+              instanceUrl: conn.instanceUrl,
+              username: identity.username,
+              orgId: identity.organization_id,
+            }
+            debugLog('oauthFlow', `connectOAuth success — username: ${identity.username}, orgId: ${identity.organization_id}`)
+            resolve(currentOrgInfo)
+          } catch (err) {
+            debugLog('oauthFlow', `jsforce identity() failed: ${err instanceof Error ? err.message : String(err)}`)
+            reject(err)
           }
-          resolve(currentOrgInfo)
         })
-        .catch(reject)
+        .catch((err) => {
+          debugLog('oauthFlow', `token exchange failed: ${err instanceof Error ? err.message : String(err)}`)
+          reject(err)
+        })
     }
 
     startCallbackServer(handler)
@@ -367,6 +403,8 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
         server.on('error', reject)
 
         const redirectUri = `http://localhost:${port}/callback`
+        debugLog('oauthFlow', `callback server listening on port ${port} — redirectUri: ${redirectUri}`)
+
         const authParams = new URLSearchParams({
           response_type: 'code',
           client_id: clientId,
@@ -377,15 +415,20 @@ export async function connectOAuth(clientId: string, loginUrl: string): Promise<
           code_challenge_method: 'S256',
         })
         const authUrl = `${loginUrl}/services/oauth2/authorize?${authParams.toString()}`
+        debugLog('oauthFlow', `opening browser → ${authUrl}`)
 
         shell.openExternal(authUrl)
 
         setTimeout(() => {
           server.close()
+          debugLog('oauthFlow', `OAuth timed out after 2 minutes waiting for browser callback`)
           reject(new Error('OAuth timeout: no response from browser within 2 minutes'))
         }, 120_000)
       })
-      .catch(reject)
+      .catch((err) => {
+        debugLog('oauthFlow', `callback server failed to start: ${err instanceof Error ? err.message : String(err)}`)
+        reject(err)
+      })
   })
 }
 

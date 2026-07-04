@@ -7,6 +7,7 @@ import * as sf from './salesforce'
 import * as recent from './recentDbs'
 import * as scriptRunner from './script-runner'
 import { scheduler } from './job-scheduler'
+import { debugLog } from './debug-logger'
 import {
   sendMessage,
   listModels,
@@ -80,6 +81,10 @@ const activeJobs = new Map<string, AbortController>()
 // Resolvers for in-flight DDL/DML confirmation requests, keyed by conversationId.
 // Only one confirmation can be pending per conversation at a time.
 const pendingConfirms = new Map<string, (approved: boolean) => void>()
+
+// Cancel functions for in-flight LLM JavaScript executions, keyed by conversationId.
+// Calling the function terminates the worker and resolves the runTool promise with an error.
+const pendingToolCancels = new Map<string, () => void>()
 
 // ── Per-run writeback state ──────────────────────────────────────────────────
 // Stores failed-row data so the renderer can browse results and retry without
@@ -1400,6 +1405,16 @@ export function registerIpcHandlers(): void {
     }
   })
 
+  // ── LLM JavaScript cancel ──────────────────────────────────────────────────
+
+  ipcMain.handle('llm:cancel-tool', (_e, cid: string): void => {
+    const cancel = pendingToolCancels.get(cid)
+    if (cancel) {
+      pendingToolCancels.delete(cid)
+      cancel()
+    }
+  })
+
   // ── LLM Chat ──────────────────────────────────────────────────────────────────
 
   ipcMain.handle(
@@ -1453,10 +1468,13 @@ export function registerIpcHandlers(): void {
             // as a second (empty) statement and throws "more than one statement".
             const query = rawQuery.trimEnd().replace(/;+$/, '').trimEnd()
 
+            debugLog('llmSql', `execute_sql called — query (${query.length} chars): ${query.slice(0, 500)}`)
+
             // Reject multi-statement input (semicolon in the middle of the query).
             // Strip string literals first to avoid false positives.
             const queryNoStrings = query.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""')
             if (queryNoStrings.includes(';')) {
+              debugLog('llmSql', 'Rejected: multi-statement query')
               return JSON.stringify({ error: 'Please send one SQL statement at a time — use a single SELECT query without semicolons.' })
             }
 
@@ -1469,12 +1487,14 @@ export function registerIpcHandlers(): void {
               .trim()
             const firstKeyword = stripped.match(/^(\w+)/)?.[1]?.toUpperCase()
             if (firstKeyword !== 'SELECT' && firstKeyword !== 'WITH') {
+              debugLog('llmSql', `Rejected: first keyword is "${firstKeyword}", not SELECT/WITH`)
               return JSON.stringify({ error: 'Only SELECT queries are allowed.' })
             }
             // Even for WITH (CTE), reject if the query contains any write keywords
             // at the top level (i.e. outside a sub-select).  A simple keyword scan
             // is sufficient here because the LLM is told to issue SELECT-only queries.
             if (/\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|REPLACE|ATTACH|DETACH|PRAGMA)\b/i.test(stripped)) {
+              debugLog('llmSql', 'Rejected: write keyword detected in query')
               return JSON.stringify({ error: 'Only SELECT queries are allowed.' })
             }
 
@@ -1495,11 +1515,13 @@ export function registerIpcHandlers(): void {
               }
             }
 
+            debugLog('llmSql', `Running query (LIMIT applied: ${safeQuery !== query}): ${safeQuery.slice(0, 500)}`)
             const qr = db.executeQuery(safeQuery)
 
             if (qr.error) {
               const count = (sqlErrorCounts.get(qr.error) ?? 0) + 1
               sqlErrorCounts.set(qr.error, count)
+              debugLog('llmSql', `Query error (occurrence #${count}): ${qr.error}`)
               if (count >= 3) {
                 return JSON.stringify({
                   error: `${qr.error} — This SQL error has now occurred ${count} times. Stop retrying similar queries. Switch to a different approach or provide the user with SQL they can run manually.`
@@ -1512,9 +1534,11 @@ export function registerIpcHandlers(): void {
             // Signal this so the assistant can fall back to providing the SQL
             // for the user to run directly instead of attempting inline analysis.
             if (qr.rows.length === ROW_CAP) {
+              debugLog('llmSql', `Query hit ROW_CAP (${ROW_CAP}) — result truncated`)
               return JSON.stringify({ error: `Too many rows: the query returned ${ROW_CAP} rows, which is the maximum allowed for inline analysis. Switch to Intent B and provide SQL queries the user can run themselves to obtain the full result.` })
             }
 
+            debugLog('llmSql', `Query OK — ${qr.columns.length} column(s), ${qr.rows.length} row(s)`)
             const rows = qr.rows.map(row => {
               const obj: Record<string, unknown> = {}
               qr.columns.forEach((col, i) => { obj[col] = row[i] })
@@ -1527,6 +1551,8 @@ export function registerIpcHandlers(): void {
             const statement = (args.statement as string ?? '').trim()
             const reason = (args.reason as string ?? '')
 
+            debugLog('llmDdl', `execute_ddl called — reason: "${reason}" | statement (${statement.length} chars): ${statement.slice(0, 500)}`)
+
             // Ask the renderer to show the confirmation modal and wait for the response.
             win?.webContents.send('llm:confirm-request', { conversationId, statement, reason })
 
@@ -1535,13 +1561,17 @@ export function registerIpcHandlers(): void {
             })
 
             if (!approved) {
+              debugLog('llmDdl', 'User declined execution')
               return JSON.stringify({ error: 'User declined to execute this statement.' })
             }
 
+            debugLog('llmDdl', 'User approved — executing statement')
             try {
               db.executeRaw(statement)
+              debugLog('llmDdl', 'Statement executed successfully')
               return JSON.stringify({ ok: true, message: 'Statement executed successfully.' })
             } catch (err) {
+              debugLog('llmDdl', `Execution error: ${String(err)}`)
               return JSON.stringify({ error: String(err) })
             }
           }
@@ -1549,6 +1579,8 @@ export function registerIpcHandlers(): void {
           if (name === 'execute_javascript') {
             const code = (args.code as string ?? '').trim()
             const reason = (args.reason as string ?? '')
+
+            debugLog('llmJavascript', `execute_javascript called — reason: "${reason}" | code (${code.length} chars): ${code.slice(0, 500)}`)
 
             // Show the confirmation modal in the renderer and wait for the user.
             win?.webContents.send('llm:confirm-request', { conversationId, statement: code, reason, type: 'javascript' })
@@ -1558,34 +1590,48 @@ export function registerIpcHandlers(): void {
             })
 
             if (!approved) {
+              debugLog('llmJavascript', 'User declined execution')
               return JSON.stringify({ error: 'User declined to run the script.' })
             }
 
             const openPath = db.getPath()
             if (!openPath) {
+              debugLog('llmJavascript', 'Aborted: no database open')
               return JSON.stringify({ error: 'No database is open.' })
             }
 
             const logs: string[] = []
             const runId = randomUUID()
 
+            debugLog('llmJavascript', `User approved — starting worker (runId: ${runId})`)
+
+            // Notify the renderer that execution has actually started (distinct from
+            // the confirmation step) so it can show a Cancel button.
+            win?.webContents.send('llm:tool-executing', { conversationId })
+
             const outcome = await new Promise<{ durationMs: number; error?: string }>((resolve) => {
-              scriptRunner.runLlmScript(
+              const cancel = scriptRunner.runLlmScript(
                 openPath,
                 code,
                 runId,
                 (log) => {
-                  logs.push(`[${log.level}] ${log.args.join(' ')}`)
+                  const line = `[${log.level}] ${log.args.join(' ')}`
+                  logs.push(line)
+                  debugLog('llmJavascript', `Worker log: ${line}`)
                 },
                 (result) => {
+                  pendingToolCancels.delete(conversationId)
                   resolve({ durationMs: result.durationMs, error: result.error })
                 }
               )
+              pendingToolCancels.set(conversationId, cancel)
             })
 
             if (outcome.error) {
+              debugLog('llmJavascript', `Worker finished with error after ${outcome.durationMs}ms: ${outcome.error}`)
               return JSON.stringify({ error: outcome.error, output: logs })
             }
+            debugLog('llmJavascript', `Worker finished OK in ${outcome.durationMs}ms — ${logs.length} log line(s)`)
             return JSON.stringify({ ok: true, output: logs, durationMs: outcome.durationMs })
           }
 
