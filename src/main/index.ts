@@ -112,23 +112,33 @@ function isNewerVersion(latest: string, current: string): boolean {
   return lc > cc
 }
 
-// ── macOS: version check via GitHub API (no auto-update without notarization) ──
-async function checkForUpdatesMac(win: BrowserWindow): Promise<void> {
+// ── GitHub release fetching ────────────────────────────────────────────────────
+async function fetchLatestRelease(): Promise<{ tag_name: string }> {
   const https = await import('https')
-  const response = await new Promise<string>((resolve, reject) => {
+  const { body, statusCode } = await new Promise<{ body: string; statusCode: number }>((resolve, reject) => {
     const req = https.get(
       'https://api.github.com/repos/flo-x/sf-sqlite/releases/latest',
       { headers: { 'User-Agent': `sf-sqlite/${app.getVersion()}` } },
       (res) => {
         let body = ''
         res.on('data', (chunk: Buffer) => { body += chunk })
-        res.on('end', () => resolve(body))
+        res.on('end', () => resolve({ body, statusCode: res.statusCode ?? 0 }))
       }
     )
     req.on('error', reject)
-    req.setTimeout(10_000, () => { req.destroy(); reject(new Error('timeout')) })
+    req.setTimeout(10_000, () => { req.destroy(); reject(new Error('Request timed out')) })
   })
-  const release = JSON.parse(response) as { tag_name: string }
+  const data = JSON.parse(body) as { tag_name?: string; message?: string }
+  if (!data.tag_name) {
+    const apiMessage = data.message ? `: ${data.message}` : ''
+    throw new Error(`GitHub API returned HTTP ${statusCode}${apiMessage}`)
+  }
+  return data as { tag_name: string }
+}
+
+// ── macOS: version check via GitHub API (no auto-update without notarization) ──
+async function checkForUpdatesMac(win: BrowserWindow): Promise<void> {
+  const release = await fetchLatestRelease()
   const latestVersion = release.tag_name.replace(/^v/, '')
   if (isNewerVersion(latestVersion, app.getVersion())) {
     win.webContents.send('update:available', { version: latestVersion, manual: true })
@@ -136,16 +146,37 @@ async function checkForUpdatesMac(win: BrowserWindow): Promise<void> {
 }
 
 function setupAutoUpdater(win: BrowserWindow): void {
+  // ── Handlers available on all platforms ────────────────────────────────────
+  // Version info for the About tab.
+  ipcMain.handle('app:get-version-info', () => ({
+    appVersion: app.getVersion(),
+    electronVersion: process.versions.electron,
+    nodeVersion: process.versions.node,
+    platform: process.platform,
+  }))
+
+  // On-demand GitHub release check used by the About tab (all platforms).
+  // Throws on any network or parse failure so the renderer can display the
+  // actual error message rather than a generic fallback.
+  ipcMain.handle('app:check-for-updates', async () => {
+    const release = await fetchLatestRelease()
+    const latestVersion = release.tag_name.replace(/^v/, '')
+    return { latestVersion, isNewer: isNewerVersion(latestVersion, app.getVersion()) }
+  })
+
+  // Opens the GitHub releases page — used by the About tab on all platforms
+  // and by the macOS update banner.
+  ipcMain.handle('update:open-releases-page', () =>
+    shell.openExternal('https://github.com/flo-x/sf-sqlite/releases')
+  )
+
   if (is.dev) {
     return
   }
 
   if (process.platform === 'darwin') {
-    // macOS: without notarization we can't auto-install, so just notify the user
-    // and let them download the new DMG manually from the releases page.
-    ipcMain.handle('update:open-releases-page', () =>
-      shell.openExternal('https://github.com/flo-x/sf-sqlite/releases')
-    )
+    // macOS: without notarization we can't auto-install, so just notify the
+    // user and let them download the new DMG manually from the releases page.
     setTimeout(() => checkForUpdatesMac(win).catch(() => {}), 5000)
     return
   }

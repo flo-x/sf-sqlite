@@ -27,6 +27,11 @@
           :class="{ active: settingsTab === 'network' }"
           @click="settingsTab = 'network'"
         >Network</button>
+        <button
+          class="settings-top-tab"
+          :class="{ active: settingsTab === 'about' }"
+          @click="settingsTab = 'about'"
+        >About</button>
       </div>
 
       <!-- LLM Provider Section -->
@@ -431,6 +436,63 @@
           <div v-if="networkSaved" class="test-result test-ok">Saved.</div>
         </div>
       </section>
+
+      <!-- ── About ─────────────────────────────────────────────────────────── -->
+      <section v-if="settingsTab === 'about'" class="settings-section">
+        <h3 class="settings-section-title">About sf-sqlite</h3>
+
+        <div class="about-grid">
+          <div class="about-row">
+            <span class="about-label">Version</span>
+            <code class="about-value">{{ aboutInfo?.appVersion ?? '…' }}</code>
+          </div>
+          <div class="about-row">
+            <span class="about-label">Electron</span>
+            <code class="about-value">{{ aboutInfo?.electronVersion ?? '…' }}</code>
+          </div>
+          <div class="about-row">
+            <span class="about-label">Node.js</span>
+            <code class="about-value">{{ aboutInfo?.nodeVersion ?? '…' }}</code>
+          </div>
+          <div class="about-row">
+            <span class="about-label">Platform</span>
+            <code class="about-value">{{ aboutPlatformLabel }}</code>
+          </div>
+        </div>
+
+        <div style="margin-top: 20px;">
+          <button class="btn btn-secondary" :disabled="aboutChecking" @click="checkForUpdatesManual">
+            <span v-if="aboutChecking" class="spinner" style="width:14px;height:14px;border-width:2px" />
+            <span v-else>Check for updates</span>
+          </button>
+        </div>
+
+        <div v-if="aboutUpdateError" class="alert alert-error" style="margin-top: 12px; font-size: 13px;">
+          Could not check for updates: {{ aboutUpdateError }}
+        </div>
+
+        <div v-if="aboutUpdateResult && !aboutUpdateError" style="margin-top: 12px;">
+          <template v-if="aboutUpdateResult.isNewer">
+            <div style="font-size: 13px;">
+              Version <strong>{{ aboutUpdateResult.latestVersion }}</strong> is available.
+            </div>
+            <button class="btn btn-primary btn-sm" style="margin-top: 8px;" @click="() => window.api.openReleasesPage()">
+              Get update from GitHub
+            </button>
+          </template>
+          <div v-else class="test-result test-ok" style="margin-top: 0;">
+            You are up to date (latest: {{ aboutUpdateResult.latestVersion }}).
+          </div>
+        </div>
+
+        <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border);">
+          <a
+            href="#"
+            style="font-size: 12px; color: var(--primary); text-decoration: none;"
+            @click.prevent="() => window.api.openReleasesPage()"
+          >View releases on GitHub</a>
+        </div>
+      </section>
     </div>
   </div>
 
@@ -483,7 +545,7 @@ const providers = [
   { id: 'litellm' as const, label: 'LiteLLM' }
 ]
 
-const settingsTab = ref<'provider' | 'prompt' | 'network'>('provider')
+const settingsTab = ref<'provider' | 'prompt' | 'network' | 'about'>('provider')
 const encryptionAvailable = ref(true)
 const saving = ref(false)
 const saved = ref(false)
@@ -578,7 +640,50 @@ function isProviderConfigured(id: string): boolean {
   return false
 }
 
+// ── About tab ──────────────────────────────────────────────────────────────
+const aboutInfo = ref<{ appVersion: string; electronVersion: string; nodeVersion: string; platform: string } | null>(null)
+const aboutChecking = ref(false)
+const aboutUpdateResult = ref<{ latestVersion: string; isNewer: boolean } | null>(null)
+const aboutUpdateError = ref<string | null>(null)
+
+const aboutPlatformLabel = computed(() => {
+  const p = aboutInfo.value?.platform
+  if (p === 'darwin') {
+    return 'macOS'
+  }
+  if (p === 'win32') {
+    return 'Windows'
+  }
+  if (p === 'linux') {
+    return 'Linux'
+  }
+  return p ?? '…'
+})
+
+async function checkForUpdatesManual(): Promise<void> {
+  aboutChecking.value = true
+  aboutUpdateResult.value = null
+  aboutUpdateError.value = null
+  try {
+    aboutUpdateResult.value = await window.api.checkForUpdates()
+  } catch (e) {
+    // Electron IPC can serialize errors with undefined message; fall back to String(e).
+    const raw = (e instanceof Error ? e.message : null) ?? String(e)
+    // Strip the Electron "Error invoking remote method '...':" prefix.
+    aboutUpdateError.value = raw.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
+  } finally {
+    aboutChecking.value = false
+  }
+}
+
 onMounted(async () => {
+  // Load basic version info immediately (no network call)
+  try {
+    aboutInfo.value = await window.api.getVersionInfo()
+  } catch {
+    // Non-critical; the About tab will just show '…' placeholders.
+  }
+
   try {
     const raw = await window.api.getLlmSettings() as LlmSettings & {
       encryptionAvailable?: boolean
@@ -1215,5 +1320,43 @@ details[open] > .shell-diag-summary::before {
 .shell-diag-empty {
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* ── About tab ────────────────────────────────────────────────────────────── */
+.about-grid {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 13px;
+  max-width: 480px;
+}
+
+.about-row {
+  display: contents;
+}
+
+.about-label {
+  padding: 9px 14px;
+  background: var(--surface2, var(--surface));
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.about-value {
+  padding: 9px 14px;
+  background: transparent;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 12px;
+}
+
+.about-row:last-child .about-label,
+.about-row:last-child .about-value {
+  border-bottom: none;
 }
 </style>

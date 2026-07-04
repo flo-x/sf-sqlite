@@ -385,6 +385,12 @@ const api = {
   installUpdate: (): Promise<void> => ipcRenderer.invoke('update:install'),
   openReleasesPage: (): Promise<void> => ipcRenderer.invoke('update:open-releases-page'),
 
+  getVersionInfo: (): Promise<{ appVersion: string; electronVersion: string; nodeVersion: string; platform: string }> =>
+    ipcRenderer.invoke('app:get-version-info'),
+
+  checkForUpdates: (): Promise<{ latestVersion: string; isNewer: boolean }> =>
+    ipcRenderer.invoke('app:check-for-updates'),
+
   onLlmConfirmRequest: (cb: (e: { conversationId: string; statement: string; reason: string; type?: 'ddl' | 'javascript' }) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; statement: string; reason: string; type?: 'ddl' | 'javascript' }): void => cb(data)
     ipcRenderer.on('llm:confirm-request', handler)
