@@ -4,7 +4,7 @@
     <div class="split-left" :style="{ width: splitW + 'px' }">
       <!-- Table tree -->
       <div class="left-top" :style="{ flexBasis: leftTopH + 'px' }">
-        <div class="section-title" style="padding: 10px 14px 4px; display:flex; align-items:center; justify-content:space-between;">
+        <div class="section-title left-top-header" style="padding: 10px 14px 4px; display:flex; align-items:center; justify-content:space-between;">
           <span>Tables ({{ tables.length }}) · Views ({{ views.length }})</span>
           <button
             class="btn btn-ghost btn-sm"
@@ -14,31 +14,33 @@
             style="padding: 2px 6px; font-size:13px;"
           >{{ refreshing ? '…' : '↻' }}</button>
         </div>
-        <div v-for="t in allItems" :key="t.name">
-          <div
-            class="tree-item"
-            :class="{ selected: selectedTable?.name === t.name }"
-            @click="selectTable(t)"
-            @dblclick.stop="startRenameInline(t)"
-            @contextmenu.prevent="showCtx($event, t)"
-          >
-            <span class="tree-icon">{{ t.type === 'view' ? '👁' : '▦' }}</span>
-            <input
-              v-if="renaming && selectedTableName === t.name"
-              ref="tableRenameInput"
-              v-model="renameValue"
-              class="tree-rename-input"
-              @keydown.enter.prevent="confirmRename"
-              @keydown.escape.prevent="abortTableRename"
-              @blur="confirmRename"
-              @click.stop
-            />
-            <span v-else class="tree-name">{{ t.name }}</span>
-            <span class="tree-count">{{ t.rowCount }}</span>
+        <div class="left-top-scroll">
+          <div v-for="t in allItems" :key="t.name">
+            <div
+              class="tree-item"
+              :class="{ selected: selectedTable?.name === t.name }"
+              @click="selectTable(t)"
+              @dblclick.stop="startRenameInline(t)"
+              @contextmenu.prevent="showCtx($event, t)"
+            >
+              <span class="tree-icon">{{ t.type === 'view' ? '👁' : '▦' }}</span>
+              <input
+                v-if="renaming && selectedTableName === t.name"
+                ref="tableRenameInput"
+                v-model="renameValue"
+                class="tree-rename-input"
+                @keydown.enter.prevent="confirmRename"
+                @keydown.escape.prevent="abortTableRename"
+                @blur="confirmRename"
+                @click.stop
+              />
+              <span v-else class="tree-name">{{ t.name }}</span>
+              <span class="tree-count">{{ t.rowCount }}</span>
+            </div>
           </div>
-        </div>
-        <div v-if="!allItems.length" class="empty-state" style="padding: 24px 12px; font-size:13px;">
-          No tables
+          <div v-if="!allItems.length" class="empty-state" style="padding: 24px 12px; font-size:13px;">
+            No tables
+          </div>
         </div>
       </div>
 
@@ -667,7 +669,9 @@ async function confirmColRename(): Promise<void> {
 .split-divider:hover::after, .split-divider:active::after { background: var(--primary); height: 64px; }
 
 /* Top/bottom split inside left panel */
-.left-top { flex-shrink: 1; flex-grow: 0; min-height: 80px; overflow-y: auto; }
+.left-top { flex-shrink: 1; flex-grow: 0; min-height: 80px; overflow: hidden; display: flex; flex-direction: column; }
+.left-top-header { flex-shrink: 0; }
+.left-top-scroll { flex: 1; overflow-y: auto; }
 .left-h-divider { height: 5px; flex-shrink: 0; cursor: row-resize; position: relative; z-index: 1; background: transparent; border-top: 1px solid var(--border); }
 .left-h-divider::after { content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); height: 3px; width: 36px; border-radius: 99px; background: var(--border); transition: background 0.15s, width 0.15s; }
 .left-h-divider:hover::after, .left-h-divider:active::after { background: var(--primary); width: 48px; }
