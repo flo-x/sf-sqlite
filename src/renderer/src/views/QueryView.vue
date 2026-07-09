@@ -357,7 +357,15 @@ function syncEditorHeight(): void {
   if (editorArea.value) editorHeight.value = editorArea.value.offsetHeight
 }
 
+function onGlobalKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault()
+    runQuery(executingMode.value)
+  }
+}
+
 onMounted(async () => {
+  window.addEventListener('keydown', onGlobalKeydown)
   if (!conn.dbConnected) return
   if (!queryStore.initialized) {
     const queries = await window.api.listSavedQueries()
@@ -701,7 +709,10 @@ function startAiPanelResize(e: MouseEvent): void {
   document.addEventListener('mouseup', onUp)
 }
 
-onUnmounted(() => { editor?.dispose() })
+onUnmounted(() => {
+  window.removeEventListener('keydown', onGlobalKeydown)
+  editor?.dispose()
+})
 </script>
 
 <style scoped>
