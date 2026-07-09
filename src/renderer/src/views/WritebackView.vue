@@ -415,7 +415,9 @@
                 <span class="spinner" style="width:14px;height:14px;border-width:2px; flex-shrink:0;"></span>
                 <template v-if="execBulkPhase === 'uploading'">
                   Uploading to Salesforce…
-                  <strong>{{ execBulkUploaded.toLocaleString() }}</strong> rows sent
+                  <strong>{{ execBulkUploaded.toLocaleString() }}</strong>
+                  <template v-if="execSourceRowCount !== null"> / {{ execSourceRowCount.toLocaleString() }}</template>
+                  rows sent
                 </template>
                 <template v-else-if="execBulkPhase === 'processing'">
                   Salesforce processing
@@ -437,6 +439,7 @@
             <!-- Done: summary + optional failed rows grid -->
             <template v-else-if="execJobDone">
               <div class="exec-stats">
+                <span v-if="execSourceRowCount !== null" style="color: var(--text-muted);">{{ execSourceRowCount.toLocaleString() }} total</span>
                 <span><strong>{{ totalRows.toLocaleString() }}</strong> rows</span>
                 <span style="color: var(--success);">✓ {{ succeededCount.toLocaleString() }} succeeded</span>
                 <span style="color: var(--danger);">✗ {{ failedCount.toLocaleString() }} failed</span>
@@ -486,6 +489,7 @@
             </div>
             <template v-else>
               <div class="exec-stats">
+                <span v-if="execSourceRowCount !== null" style="color: var(--text-muted);">{{ execSourceRowCount.toLocaleString() }} total</span>
                 <span><strong>{{ totalRows.toLocaleString() }}</strong> rows</span>
                 <span style="color: var(--success);">✓ {{ succeededCount.toLocaleString() }}</span>
                 <span style="color: var(--danger);">✗ {{ failedCount.toLocaleString() }}</span>
@@ -804,6 +808,7 @@ interface SavedExecState {
   operation: string
   columns: string[]
   totalRows: number
+  sourceRowCount: number | null
   succeeded: number
   failed: number
   runId: string | null
@@ -828,6 +833,7 @@ function captureExecState(jobId: number, force = false): void {
     operation: execOperation.value,
     columns: execColumns.value.slice(),
     totalRows: execTotalRows.value,
+    sourceRowCount: execSourceRowCount.value,
     succeeded: execSucceeded.value,
     failed: execFailed.value,
     runId: execRunId.value,
@@ -851,6 +857,7 @@ function restoreExecState(jobId: number): void {
   execOperation.value = s.operation
   execColumns.value = s.columns
   execTotalRows.value = s.totalRows
+  execSourceRowCount.value = s.sourceRowCount
   execSucceeded.value = s.succeeded
   execFailed.value = s.failed
   execRunId.value = s.runId
@@ -893,6 +900,7 @@ const execSql = ref('')
 const execOperation = ref('')
 const execColumns = ref<string[]>([])
 const execTotalRows = ref(0)
+const execSourceRowCount = ref<number | null>(null)
 const execSucceeded = ref(0)
 const execFailed = ref(0)
 const execInFlight = ref(0)
@@ -1360,6 +1368,7 @@ function clearExecState(): void {
   execOperation.value = ''
   execColumns.value = []
   execTotalRows.value = 0
+  execSourceRowCount.value = null
   execSucceeded.value = 0
   execFailed.value = 0
   execInFlight.value = 0
@@ -1468,6 +1477,7 @@ async function _startJobNow(id: number): Promise<void> {
     execError.value = null
     execWarn.value = null
     execTotalRows.value = 0
+    execSourceRowCount.value = null
     execSucceeded.value = 0
     execFailed.value = 0
     execInFlight.value = 0
@@ -1479,6 +1489,11 @@ async function _startJobNow(id: number): Promise<void> {
     execFailedPageOffset.value = 0
     execJobDone.value = false
     showOnlyFailed.value = false
+
+    // Fetch source row count in background — does not block job start
+    window.api.wbRowCount(sql).then((count) => {
+      if (execSql.value === sql) execSourceRowCount.value = count
+    }).catch(() => {})
 
     if (j.useBulkApi) {
       execColumns.value = []
