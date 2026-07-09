@@ -67,7 +67,8 @@
                 :contenteditable="editable ? 'true' : undefined"
                 @mousedown="onCellMousedown(vi, col.origIdx, $event)"
                 @blur="editable ? onCellEdit(vi + scrollOffset, col.origIdx, ($event.target as HTMLElement).innerText) : undefined"
-              >{{ formatCell(row[col.origIdx]) }}</td>
+              ><em v-if="row[col.origIdx] === null || row[col.origIdx] === undefined" class="cell-null">&lt;null&gt;</em
+              ><template v-else>{{ formatCell(row[col.origIdx]) }}</template></td>
             </tr>
           </tbody>
         </table>
@@ -577,6 +578,8 @@ function onCellEdit(row: number, col: number, value: string): void {
 </script>
 
 <style scoped>
+.cell-null { font-style: italic; color: var(--text-muted); }
+
 .datagrid-wrap {
   display: flex;
   flex-direction: column;
