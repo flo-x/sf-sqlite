@@ -300,18 +300,10 @@ export function executeQuery(sql: string): QueryResult {
   try {
     const stmt = d.prepare(sql)
     if (stmt.reader) {
-      const rows = stmt.all() as Record<string, unknown>[]
+      const columns = stmt.columns().map((c) => c.name)
+      const rows = stmt.raw(true).all() as unknown[][]
       const durationMs = Date.now() - start
-      if (rows.length === 0) {
-        const colNames = stmt.columns().map((c) => c.name)
-        return { columns: colNames, rows: [], durationMs }
-      }
-      const columns = Object.keys(rows[0])
-      return {
-        columns,
-        rows: rows.map((r) => columns.map((c) => r[c])),
-        durationMs
-      }
+      return { columns, rows, durationMs }
     } else {
       const info = stmt.run()
       return {
@@ -596,13 +588,10 @@ export function previewWritebackQuery(sql: string): { columns: string[]; rows: u
   assertSelectOnly(sql)
   const d = getDb()
   try {
-    const rows = d.prepare(sql + ' LIMIT 50').all() as Record<string, unknown>[]
-    if (rows.length === 0) {
-      const cols = d.prepare(sql + ' LIMIT 0').columns().map((c) => c.name)
-      return { columns: cols, rows: [] }
-    }
-    const columns = Object.keys(rows[0])
-    return { columns, rows: rows.map((r) => columns.map((c) => r[c])) }
+    const stmt = d.prepare(sql + ' LIMIT 50')
+    const columns = stmt.columns().map((c) => c.name)
+    const rows = stmt.raw(true).all() as unknown[][]
+    return { columns, rows }
   } catch (err) {
     throw new Error(err instanceof Error ? err.message : String(err))
   }
@@ -629,19 +618,13 @@ export function queryPage(
   assertSelectOnly(sql)
   const d = getDb()
   try {
+    const stmt = d.prepare(`SELECT * FROM (${sql}) LIMIT ? OFFSET ?`)
+    const columns = stmt.columns().map((c) => c.name)
     if (limit === 0) {
-      const cols = d.prepare(`${sql} LIMIT 0`).columns().map((c) => c.name)
-      return { columns: cols, rows: [] }
+      return { columns, rows: [] }
     }
-    const rows = d
-      .prepare(`SELECT * FROM (${sql}) LIMIT ? OFFSET ?`)
-      .all(limit, offset) as Record<string, unknown>[]
-    if (rows.length === 0) {
-      const cols = d.prepare(`${sql} LIMIT 0`).columns().map((c) => c.name)
-      return { columns: cols, rows: [] }
-    }
-    const columns = Object.keys(rows[0])
-    return { columns, rows: rows.map((r) => columns.map((c) => r[c])) }
+    const rows = stmt.raw(true).all(limit, offset) as unknown[][]
+    return { columns, rows }
   } catch (err) {
     throw new Error(err instanceof Error ? err.message : String(err))
   }
