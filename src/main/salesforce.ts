@@ -965,6 +965,8 @@ export interface WritebackOptions {
   distributionKey?: string[] | null
   customHeaders?: Record<string, string>
   useBulkApi?: boolean
+  /** Skip the probe phase (used for chunks after the first to avoid re-triggering the early-abort). */
+  disableProbe?: boolean
 }
 
 /** FNV-1a 32-bit hash — fast, pure-JS, no dependencies. */
@@ -1117,33 +1119,38 @@ export async function writebackBatch(
   }
 
   // ── Phase 1: probe ───────────────────────────────────────────────────────────
-  const PROBE_ZERO_LIMIT = 5
-  const PROBE_SUB50_LIMIT = 10
-  let zeroCount = 0
-  let subFiftyCount = 0
+  // Skipped for non-first chunks (disableProbe=true) — the probe is a one-time
+  // job-start canary; re-running it per chunk causes false aborts on later data.
   let probeIdx = 0
 
-  while (probeIdx < lane0.length && !signal.aborted) {
-    const { batch, startIndex, origIndices } = lane0[probeIdx]
-    const snapSucceeded = succeeded
-    await processBatch(batch, startIndex, origIndices)
-    const batchSucceeded = succeeded - snapSucceeded
-    const batchRate = batch.length > 0 ? batchSucceeded / batch.length : 1
-    probeIdx++
+  if (!opts.disableProbe) {
+    const PROBE_ZERO_LIMIT = 5
+    const PROBE_SUB50_LIMIT = 10
+    let zeroCount = 0
+    let subFiftyCount = 0
 
-    if (batchRate >= 0.5) {
-      break // probe passed → unleash full parallelism
-    }
-    if (batchSucceeded === 0) zeroCount++
-    subFiftyCount++
-    if (zeroCount >= PROBE_ZERO_LIMIT) {
-      throw new Error(
-        `Writeback aborted: ${zeroCount} consecutive probe batches had 0% success. ` +
-        `All rows are failing — please check your data, field mappings, and Salesforce validation rules.`
-      )
-    }
-    if (subFiftyCount >= PROBE_SUB50_LIMIT) {
-      break // gave up probing → go full parallel anyway
+    while (probeIdx < lane0.length && !signal.aborted) {
+      const { batch, startIndex, origIndices } = lane0[probeIdx]
+      const snapSucceeded = succeeded
+      await processBatch(batch, startIndex, origIndices)
+      const batchSucceeded = succeeded - snapSucceeded
+      const batchRate = batch.length > 0 ? batchSucceeded / batch.length : 1
+      probeIdx++
+
+      if (batchRate >= 0.5) {
+        break // probe passed → unleash full parallelism
+      }
+      if (batchSucceeded === 0) zeroCount++
+      subFiftyCount++
+      if (zeroCount >= PROBE_ZERO_LIMIT) {
+        throw new Error(
+          `Writeback aborted: ${zeroCount} consecutive probe batches had 0% success. ` +
+          `All rows are failing — please check your data, field mappings, and Salesforce validation rules.`
+        )
+      }
+      if (subFiftyCount >= PROBE_SUB50_LIMIT) {
+        break // gave up probing → go full parallel anyway
+      }
     }
   }
 

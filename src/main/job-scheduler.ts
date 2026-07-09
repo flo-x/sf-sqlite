@@ -29,7 +29,7 @@ class JobScheduler {
   private writebackQueued = new Set<number>()
   private extractPending: PendingJob[] = []
   private writebackPending: PendingJob[] = []
-  private completions = new Map<string, { resolve: (r: JobResult) => void; reject: (e: Error) => void }>()
+  private completions = new Map<string, { resolve: (r: JobResult) => void }>()
   private externalListeners: ExternalJobListener[] = []
 
   private getRunning(type: JobType): Map<number, string> {
@@ -66,11 +66,11 @@ class JobScheduler {
     this.getRunning(type).set(jobId, runId)
   }
 
-  // Returns a promise that resolves (or rejects) when notifyComplete is called for this runId.
+  // Returns a promise that resolves when notifyComplete is called for this runId.
   // Called by startExtractRun / startWritebackRun before starting the fire-and-forget IIFE.
   awaitCompletion(runId: string): Promise<JobResult> {
-    return new Promise((resolve, reject) => {
-      this.completions.set(runId, { resolve, reject })
+    return new Promise((resolve) => {
+      this.completions.set(runId, { resolve })
     })
   }
 
@@ -79,11 +79,7 @@ class JobScheduler {
     const c = this.completions.get(result.runId)
     if (c) {
       this.completions.delete(result.runId)
-      if (result.status === 'error') {
-        c.reject(new Error(result.errorMsg ?? 'Job failed'))
-      } else {
-        c.resolve(result)
-      }
+      c.resolve(result)
     }
     // Remove from the running map (search by runId since the map is keyed by jobId)
     const running = this.getRunning(result.type as JobType)

@@ -120,8 +120,9 @@ function mapRowToRecord(
   activeMappings: FieldMapping[]
 ): Record<string, unknown> {
   const rec: Record<string, unknown> = {}
+  const lowerColumns = columns.map((c) => c.toLowerCase())
   for (const m of activeMappings) {
-    const colIdx = columns.indexOf(m.sqlCol)
+    const colIdx = lowerColumns.indexOf(m.sqlCol.toLowerCase())
     if (colIdx >= 0) rec[m.sfField] = row[colIdx] ?? null
   }
   return rec
@@ -488,6 +489,7 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
       let failed = 0
       let processedRows = 0
       let inFlight = 0
+      let probeCompleted = false
       const startTime = Date.now()
       try {
         let chunkOffset = 0
@@ -500,7 +502,7 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
           chunkOffset += currentRows.length
 
           const sendPromise = sf.writebackBatch(
-            sfOpts,
+            { ...sfOpts, disableProbe: probeCompleted },
             records,
             (batchSize) => {
               inFlight += batchSize
@@ -558,6 +560,7 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
             : db.queryPage(sql, chunkOffset, CHUNK)
 
           await sendPromise
+          probeCompleted = true
 
           processedRows = chunkOffset
           rows = nextFetch.rows
@@ -571,8 +574,9 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
         scheduler.notifyComplete(jobResult)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        db.finishWritebackRunHistory(runHistId, 'error', 0, 0, 0, Date.now() - startTime, msg)
-        const jobResult: JobResult = { runId, type: 'writeback', status: 'error', errorMsg: msg }
+        const errStatus = succeeded > 0 ? 'partial' : 'error'
+        db.finishWritebackRunHistory(runHistId, errStatus, processedRows, succeeded, failed, Date.now() - startTime, msg)
+        const jobResult: JobResult = { runId, type: 'writeback', status: 'error', errorMsg: msg, rowsSucceeded: succeeded, rowsFailed: failed }
         send('job:complete', jobResult)
         scheduler.notifyComplete(jobResult)
       } finally {
