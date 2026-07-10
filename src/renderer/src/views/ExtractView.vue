@@ -669,7 +669,7 @@ function syncEditForm(j: ExtractJob): void {
     soqlQuery: j.soqlQuery ?? '',
     additionalIndexes: [...(j.additionalIndexes ?? [])]
   }
-  if (!j.soqlQuery && j.sfObject) onObjectChange(j.sfObject)
+  if (!j.soqlQuery && j.sfObject) onObjectChange(j.sfObject, false)
 }
 
 function resetForm(): void {
@@ -712,13 +712,14 @@ function cancelEdit(): void {
   }
 }
 
-async function onObjectChange(name: string): Promise<void> {
+async function onObjectChange(name: string, resetFields = true): Promise<void> {
   if (!name) return
   loadingFields.value = true
   try {
     fields.value = await window.api.describeObject(name)
-    if (!editForm.value.id) {
+    if (resetFields) {
       editForm.value.fields = fields.value.filter((f) => !f.name.includes('.')).map((f) => f.name)
+      editForm.value.customExpressions = []
       editForm.value.destTable = name
     }
   } finally {
