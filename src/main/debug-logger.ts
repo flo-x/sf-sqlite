@@ -22,6 +22,9 @@ export interface DebugFlags {
   llmDdl: boolean
   /** Logs LLM execute_javascript tool calls: code length, log lines, duration, errors. */
   llmJavascript: boolean
+  /** Logs the SQL query for SQLite→SF jobs and the SOQL query for SF→SQLite jobs
+   *  at the moment the job starts. */
+  jobQueries: boolean
 }
 
 const MAX_ENTRIES = 500
@@ -33,6 +36,7 @@ let flags: DebugFlags = {
   llmSql: false,
   llmDdl: false,
   llmJavascript: false,
+  jobQueries: false,
 }
 let rendererWindow: BrowserWindow | null = null
 

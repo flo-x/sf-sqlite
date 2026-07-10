@@ -539,6 +539,11 @@
             <span class="diag-flag-label">AI — JavaScript tool</span>
             <span class="diag-flag-hint">Logs every execute_javascript call: code length, worker log lines, duration, errors.</span>
           </label>
+          <label class="diag-flag-row">
+            <input type="checkbox" :checked="diagFlags.jobQueries" @change="toggleFlag('jobQueries', ($event.target as HTMLInputElement).checked)" />
+            <span class="diag-flag-label">Job queries</span>
+            <span class="diag-flag-hint">Logs the SQL query at the start of each SQLite→SF job and the SOQL query at the start of each SF→SQLite job.</span>
+          </label>
         </div>
 
         <div class="diag-toolbar">
@@ -745,12 +750,12 @@ async function checkForUpdatesManual(): Promise<void> {
 }
 
 // ── Diagnostics tab ────────────────────────────────────────────────────────
-const diagFlags = ref({ sfCliExec: false, sfCliAuth: false, oauthFlow: false, llmSql: false, llmDdl: false, llmJavascript: false })
+const diagFlags = ref({ sfCliExec: false, sfCliAuth: false, oauthFlow: false, llmSql: false, llmDdl: false, llmJavascript: false, jobQueries: false })
 const diagLogs = ref<string[]>([])
 const diagCopied = ref(false)
 const diagLogEl = ref<HTMLElement | null>(null)
 
-async function toggleFlag(flag: 'sfCliExec' | 'sfCliAuth' | 'oauthFlow' | 'llmSql' | 'llmDdl' | 'llmJavascript', value: boolean): Promise<void> {
+async function toggleFlag(flag: 'sfCliExec' | 'sfCliAuth' | 'oauthFlow' | 'llmSql' | 'llmDdl' | 'llmJavascript' | 'jobQueries', value: boolean): Promise<void> {
   diagFlags.value[flag] = value
   await window.api.setDebugFlags({ [flag]: value })
 }

@@ -215,6 +215,7 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
 
   if (job.soqlQuery) {
     // ── Raw SOQL mode with staging table ──────────────────────────────────
+    debugLog('jobQueries', `[SF→SQLite] job="${job.name}" (id=${jobId}) SOQL (raw):\n${job.soqlQuery}`)
     const stagingName = `_sf_bridge_soql_stage_${Date.now()}`
     const columnTypes = new Map<string, string>()
     const pendingCols = new Set<string>()
@@ -298,6 +299,12 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
     })()
   } else {
     // ── Structured mode ────────────────────────────────────────────────────
+    const soqlPreview = [
+      `SELECT ${[...job.fields, ...(job.customExpressions ?? [])].join(', ')} FROM ${job.sfObject}`,
+      job.whereClause?.trim() ? `WHERE ${job.whereClause}` : '',
+      job.rowLimit ? `LIMIT ${job.rowLimit}` : ''
+    ].filter(Boolean).join(' ')
+    debugLog('jobQueries', `[SF→SQLite] job="${job.name}" (id=${jobId}) SOQL (structured):\n${soqlPreview}`)
     const fields = await sf.describeObject(job.sfObject)
     const selectedFieldMeta = fields.filter((f) => job.fields.includes(f.name))
 
