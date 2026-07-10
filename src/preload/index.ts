@@ -62,8 +62,8 @@ const api = {
   csvImport: (filePath: string, tableName: string, ifExists: 'replace' | 'append'): Promise<number> =>
     ipcRenderer.invoke('csv:import', filePath, tableName, ifExists),
 
-  csvImportText: (csvContent: string, tableName: string, ifExists: 'replace' | 'append'): Promise<number> =>
-    ipcRenderer.invoke('csv:import-text', csvContent, tableName, ifExists),
+  csvImportText: (csvContent: string, tableName: string, ifExists: 'replace' | 'append', separator = ','): Promise<number> =>
+    ipcRenderer.invoke('csv:import-text', csvContent, tableName, ifExists, separator),
 
   listRecentDatabases: (): Promise<RecentDatabase[]> =>
     ipcRenderer.invoke('db:recent-list'),

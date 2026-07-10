@@ -62,11 +62,23 @@
           <span v-if="csvPreview?.source !== 'file'">Drop CSV or click to browse</span>
           <span v-else class="csv-drop-zone-filename">{{ csvPreview.filePath.split(/[\\/]/).pop() }}</span>
         </div>
+        <div class="csv-format-toggle">
+          <button
+            class="csv-fmt-btn"
+            :class="{ active: csvPasteFormat === 'csv' }"
+            @click="csvPasteFormat = 'csv'"
+          >CSV</button>
+          <button
+            class="csv-fmt-btn"
+            :class="{ active: csvPasteFormat === 'excel' }"
+            @click="csvPasteFormat = 'excel'"
+          >Excel / TSV</button>
+        </div>
         <textarea
           ref="csvPasteRef"
           class="csv-paste-area"
           :class="{ 'csv-paste-area-active': csvPreview?.source === 'paste' }"
-          placeholder="Or paste CSV text here…"
+          :placeholder="csvPasteFormat === 'excel' ? 'Or paste Excel / TSV text here…' : 'Or paste CSV text here…'"
           @paste.prevent="onCsvPaste"
         ></textarea>
       </div>
@@ -95,6 +107,9 @@
           :showRowNumbers="true"
           style="flex: 1; min-height: 0;"
         />
+        <div v-if="csvPreview.totalLines > csvDisplayRows.length" class="csv-preview-notice">
+          Showing first {{ csvDisplayRows.length.toLocaleString() }} of {{ csvPreview.totalLines.toLocaleString() }} rows — all rows will be imported.
+        </div>
 
         <!-- Form stays pinned at the bottom -->
         <div class="csv-right-body" style="flex: 0 0 auto;">
@@ -316,6 +331,17 @@ const csvImporting = ref(false)
 const csvError = ref('')
 const csvSuccess = ref('')
 const csvPasteRef = ref<HTMLTextAreaElement | null>(null)
+const csvPasteFormat = ref<'csv' | 'excel'>('csv')
+
+// When the format toggle changes while paste data is loaded, re-parse headers and
+// preview rows so the DataGrid column names and the import column names stay in sync.
+watch(csvPasteFormat, (fmt) => {
+  if (csvPreview.value?.source !== 'paste' || !csvPreview.value.rawText) return
+  const sep = fmt === 'excel' ? '\t' : ','
+  const parsed = parseCsvPreview(csvPreview.value.rawText, sep)
+  if (!parsed) return
+  csvPreview.value = { ...csvPreview.value, headers: parsed.headers, rows: parsed.rows, totalLines: parsed.totalLines }
+})
 
 async function pickCsvFile(): Promise<void> {
   const preview = await window.api.csvPickAndPreview()
@@ -348,7 +374,8 @@ function onCsvPaste(e: ClipboardEvent): void {
   if (!text.trim()) return
   // Clear the textarea so it doesn't accumulate text
   if (csvPasteRef.value) csvPasteRef.value.value = ''
-  const parsed = parseCsvPreview(text)
+  const sep = csvPasteFormat.value === 'excel' ? '\t' : ','
+  const parsed = parseCsvPreview(text, sep)
   if (!parsed) return
   loadCsvPreview(
     { filePath: '', headers: parsed.headers, rows: parsed.rows, totalLines: parsed.totalLines },
@@ -361,18 +388,16 @@ function onCsvPaste(e: ClipboardEvent): void {
 const csvDisplayRows = computed<unknown[][]>(() => {
   if (!csvPreview.value) return []
   if (csvPreview.value.source === 'paste' && csvPreview.value.rawText) {
-    const parsed = parseCsvAll(csvPreview.value.rawText)
+    const sep = csvPasteFormat.value === 'excel' ? '\t' : ','
+    const parsed = parseCsvAll(csvPreview.value.rawText, sep)
     return parsed ? parsed.rows : csvPreview.value.rows
   }
   return csvPreview.value.rows
 })
 
-/** Minimal RFC-4180 CSV parser for client-side preview (no file I/O needed). */
-function parseCsvPreview(text: string): { headers: string[]; rows: string[][]; totalLines: number } | null {
-  const lines = text.trim().split(/\r?\n/)
-  if (lines.length === 0) return null
-
-  function parseRow(line: string): string[] {
+/** Minimal RFC-4180/TSV parser for client-side preview. separator is ',' for CSV, '\t' for Excel/TSV. */
+function makeRowParser(sep: string): (line: string) => string[] {
+  return function parseRow(line: string): string[] {
     const result: string[] = []
     let cur = ''
     let inQ = false
@@ -381,7 +406,7 @@ function parseCsvPreview(text: string): { headers: string[]; rows: string[][]; t
       if (ch === '"') {
         if (inQ && line[i + 1] === '"') { cur += '"'; i++ }
         else inQ = !inQ
-      } else if (ch === ',' && !inQ) {
+      } else if (ch === sep && !inQ) {
         result.push(cur); cur = ''
       } else {
         cur += ch
@@ -390,36 +415,22 @@ function parseCsvPreview(text: string): { headers: string[]; rows: string[][]; t
     result.push(cur)
     return result
   }
+}
 
+function parseCsvPreview(text: string, sep = ','): { headers: string[]; rows: string[][]; totalLines: number } | null {
+  const lines = text.trim().split(/\r?\n/)
+  if (lines.length === 0) return null
+  const parseRow = makeRowParser(sep)
   const headers = parseRow(lines[0])
   const rows = lines.slice(1, 6).map(parseRow)
   return { headers, rows, totalLines: lines.length - 1 }
 }
 
-/** Same parser but returns ALL data rows (used for DataGrid display of pasted CSV). */
-function parseCsvAll(text: string): { headers: string[]; rows: string[][] } | null {
+/** Same parser but returns ALL data rows (used for DataGrid display of pasted CSV/TSV). */
+function parseCsvAll(text: string, sep = ','): { headers: string[]; rows: string[][] } | null {
   const lines = text.trim().split(/\r?\n/)
   if (lines.length === 0) return null
-
-  function parseRow(line: string): string[] {
-    const result: string[] = []
-    let cur = ''
-    let inQ = false
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i]
-      if (ch === '"') {
-        if (inQ && line[i + 1] === '"') { cur += '"'; i++ }
-        else inQ = !inQ
-      } else if (ch === ',' && !inQ) {
-        result.push(cur); cur = ''
-      } else {
-        cur += ch
-      }
-    }
-    result.push(cur)
-    return result
-  }
-
+  const parseRow = makeRowParser(sep)
   const headers = parseRow(lines[0])
   const rows = lines.slice(1).filter((l) => l.trim()).map(parseRow)
   return { headers, rows }
@@ -435,7 +446,8 @@ async function importCsv(): Promise<void> {
     const tableName = csvTableName.value.trim()
     let count: number
     if (csvPreview.value.source === 'paste' && csvPreview.value.rawText) {
-      count = await window.api.csvImportText(csvPreview.value.rawText, tableName, ifExists)
+      const sep = csvPasteFormat.value === 'excel' ? '\t' : ','
+      count = await window.api.csvImportText(csvPreview.value.rawText, tableName, ifExists, sep)
     } else {
       count = await window.api.csvImport(csvPreview.value.filePath, tableName, ifExists)
     }
@@ -683,6 +695,11 @@ async function confirmColRename(): Promise<void> {
 .csv-drop-zone-active { border-color: var(--primary); border-style: solid; background: color-mix(in srgb, var(--primary) 8%, transparent); color: var(--primary); }
 .csv-drop-zone-filename { font-weight: 600; font-size: 11px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+.csv-format-toggle { display: flex; margin: 0 8px 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.csv-fmt-btn { flex: 1; padding: 3px 0; font-size: 11px; border: none; background: transparent; color: var(--text-muted); cursor: pointer; transition: background 0.12s, color 0.12s; }
+.csv-fmt-btn:hover { background: var(--bg-hover, rgba(0,0,0,0.05)); color: var(--text); }
+.csv-fmt-btn.active { background: var(--primary); color: #fff; font-weight: 600; }
+
 .csv-paste-area {
   display: block;
   margin: 0 8px 8px;
@@ -709,6 +726,7 @@ async function confirmColRename(): Promise<void> {
 .csv-form { display: flex; flex-direction: column; gap: 6px; }
 .csv-error { font-size: 12px; color: var(--danger); }
 .csv-success { font-size: 12px; color: #166534; font-weight: 500; }
+.csv-preview-notice { font-size: 12px; color: var(--text-muted); background: var(--bg-subtle, #f5f5f5); padding: 4px 12px; border-top: 1px solid var(--border); flex: 0 0 auto; }
 .tree-item { display: flex; align-items: center; gap: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
 .tree-item:hover { background: var(--surface2); }
 .tree-item.selected { background: #eff6ff; font-weight: 600; }

@@ -795,8 +795,8 @@ export function registerIpcHandlers(): void {
     return db.importCsvFile(filePath, tableName, ifExists)
   })
 
-  ipcMain.handle('csv:import-text', (_e, csvContent: string, tableName: string, ifExists: 'replace' | 'append') =>
-    db.importCsvText(csvContent, tableName, ifExists)
+  ipcMain.handle('csv:import-text', (_e, csvContent: string, tableName: string, ifExists: 'replace' | 'append', separator: string) =>
+    db.importCsvText(csvContent, tableName, ifExists, separator)
   )
 
   // ── Saved Queries ────────────────────────────────────────────────────────────

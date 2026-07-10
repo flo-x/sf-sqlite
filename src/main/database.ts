@@ -816,7 +816,7 @@ function parseCsv(content: string, separator = ','): string[][] {
     } else {
       if (ch === '"') {
         inQuote = true
-      } else if (ch === ',') {
+      } else if (ch === separator) {
         row.push(field); field = ''
       } else if (ch === '\r') {
         // skip bare CR
@@ -841,7 +841,7 @@ export interface CsvPreview {
   totalLines: number
 }
 
-export function previewCsvFile(filePath: string, maxRows = 5): CsvPreview {
+export function previewCsvFile(filePath: string, maxRows = 200): CsvPreview {
   const content = readFileSync(filePath, 'utf-8')
   const all = parseCsv(content)
   const headers = all[0] ?? []
@@ -854,9 +854,9 @@ export function previewCsvFile(filePath: string, maxRows = 5): CsvPreview {
   }
 }
 
-/** Import CSV from raw text (e.g. clipboard paste). */
-export function importCsvText(csvContent: string, tableName: string, ifExists: 'replace' | 'append' = 'replace'): number {
-  return _importParsed(parseCsv(csvContent), tableName, ifExists)
+/** Import CSV/TSV from raw text (e.g. clipboard paste). separator defaults to comma; use '\t' for Excel/TSV. */
+export function importCsvText(csvContent: string, tableName: string, ifExists: 'replace' | 'append' = 'replace', separator = ','): number {
+  return _importParsed(parseCsv(csvContent, separator), tableName, ifExists)
 }
 
 function _importParsed(all: string[][], tableName: string, ifExists: 'replace' | 'append'): number {
