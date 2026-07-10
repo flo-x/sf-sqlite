@@ -231,7 +231,7 @@ import DataGrid from '../components/DataGrid.vue'
 import SchemaBrowser from '../components/SchemaBrowser.vue'
 import SFSchemaBrowser from '../components/SFSchemaBrowser.vue'
 import AiChatPanel from '../components/AiChatPanel.vue'
-import type { JobResult, SavedQuery } from '../../../shared/types'
+import type { JobResult, SavedQuery, QueryDraft } from '../../../shared/types'
 
 const conn = useConnectionStore()
 const queryStore = useQueryStore()
@@ -364,12 +364,50 @@ function onGlobalKeydown(e: KeyboardEvent): void {
   }
 }
 
+// ── Draft auto-save ────────────────────────────────────────────────────────────
+const IDLE_DRAFT_MS = 60_000
+let idleDraftTimer: ReturnType<typeof setTimeout> | null = null
+let cleanupBeforeQuit: (() => void) | null = null
+
+async function saveDraftAllTabs(): Promise<void> {
+  for (const [i, tab] of queryStore.tabs.entries()) {
+    await window.api.upsertQueryDraft({
+      tabKey: tab.key,
+      savedId: tab.savedId,
+      name: tab.name,
+      sqlText: tab.sqlText,
+      tabOrder: i
+    } satisfies Omit<QueryDraft, 'updatedAt'>)
+  }
+}
+
+function scheduleIdleDraft(): void {
+  if (idleDraftTimer !== null) clearTimeout(idleDraftTimer)
+  idleDraftTimer = setTimeout(() => { void saveDraftAllTabs() }, IDLE_DRAFT_MS)
+}
+
+function onWindowBlur(): void { void saveDraftAllTabs() }
+
 onMounted(async () => {
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('blur', onWindowBlur)
+
+  cleanupBeforeQuit = window.api.onBeforeQuit(async () => {
+    await saveDraftAllTabs()
+    await window.api.notifyDraftsQuitReady()
+  })
+
   if (!conn.dbConnected) return
   if (!queryStore.initialized) {
-    const queries = await window.api.listSavedQueries()
-    queryStore.loadFromSaved(queries)
+    const [drafts, savedQueries] = await Promise.all([
+      window.api.listQueryDrafts(),
+      window.api.listSavedQueries()
+    ])
+    if (drafts.length > 0) {
+      queryStore.loadFromDrafts(drafts, savedQueries)
+    } else {
+      queryStore.loadFromSaved(savedQueries)
+    }
   }
   await nextTick()
   syncEditorHeight()
@@ -404,6 +442,7 @@ function initEditor(): void {
   editor.onDidChangeModelContent(() => {
     const key = queryStore.activeTabKey
     if (key) queryStore.updateSql(key, editor!.getValue())
+    scheduleIdleDraft()
   })
 }
 
@@ -422,8 +461,15 @@ watch(executingMode, (mode) => {
 
 watch(() => conn.dbConnected, async (v) => {
   if (v) {
-    const queries = await window.api.listSavedQueries()
-    queryStore.loadFromSaved(queries)
+    const [drafts, savedQueries] = await Promise.all([
+      window.api.listQueryDrafts(),
+      window.api.listSavedQueries()
+    ])
+    if (drafts.length > 0) {
+      queryStore.loadFromDrafts(drafts, savedQueries)
+    } else {
+      queryStore.loadFromSaved(savedQueries)
+    }
     await nextTick()
     syncEditorHeight()
     if (!editor) initEditor()
@@ -516,6 +562,7 @@ async function runQuery(mode: 'sqlite' | 'soql'): Promise<void> {
   const queryText = getEffectiveQuery()
   if (!queryText.trim()) return
 
+  void saveDraftAllTabs()  // draft on execute (fire-and-forget)
   executingMode.value = mode
   queryStore.setExecuting(tab.key, true)
   try {
@@ -613,6 +660,7 @@ function closeTab(key: string): void {
     pendingClose.value = { key }
     return
   }
+  void window.api.deleteQueryDraft(key)
   queryStore.closeTab(key)
 }
 
@@ -628,6 +676,7 @@ async function saveAndClose(): Promise<void> {
 function discardAndClose(): void {
   if (!pendingClose.value) return
   const key = pendingClose.value.key
+  void window.api.deleteQueryDraft(key)
   queryStore.closeTab(key)
   unsavedDialog.value = null
   pendingClose.value = null
@@ -711,6 +760,9 @@ function startAiPanelResize(e: MouseEvent): void {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('blur', onWindowBlur)
+  if (idleDraftTimer !== null) clearTimeout(idleDraftTimer)
+  cleanupBeforeQuit?.()
   editor?.dispose()
 })
 </script>

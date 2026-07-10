@@ -806,6 +806,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('query:delete', (_e, id: number) => db.deleteQuery(id))
   ipcMain.handle('query:reorder', (_e, ids: number[]) => db.reorderQueries(ids))
 
+  // ── Query Drafts ─────────────────────────────────────────────────────────────
+
+  ipcMain.handle('query:drafts:list', () => db.listQueryDrafts())
+  ipcMain.handle('query:drafts:upsert', (_e, draft) => db.upsertQueryDraft(draft))
+  ipcMain.handle('query:drafts:delete', (_e, tabKey: string) => db.deleteQueryDraft(tabKey))
+
+
   // ── Salesforce ───────────────────────────────────────────────────────────────
 
   ipcMain.handle('sf:connect-password', (_e, creds: PasswordCreds) =>

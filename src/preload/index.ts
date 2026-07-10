@@ -15,6 +15,7 @@ import type {
   WritebackJobInput,
   WritebackRunEntry,
   SavedQuery,
+  QueryDraft,
   JobProgress,
   JobResult,
   PasswordCreds,
@@ -82,6 +83,27 @@ const api = {
 
   reorderQueries: (ids: number[]): Promise<void> =>
     ipcRenderer.invoke('query:reorder', ids),
+
+  // ── Query Drafts ──────────────────────────────────────────────────────────────
+  listQueryDrafts: (): Promise<QueryDraft[]> =>
+    ipcRenderer.invoke('query:drafts:list'),
+
+  upsertQueryDraft: (draft: Omit<QueryDraft, 'updatedAt'>): Promise<void> =>
+    ipcRenderer.invoke('query:drafts:upsert', draft),
+
+  deleteQueryDraft: (tabKey: string): Promise<void> =>
+    ipcRenderer.invoke('query:drafts:delete', tabKey),
+
+  /** Call after all drafts are saved during before-quit. Triggers the actual app exit. */
+  notifyDraftsQuitReady: (): Promise<void> =>
+    ipcRenderer.invoke('query:drafts:quit-ready'),
+
+  /** Register a one-time listener for the main-process before-quit signal. Returns a cleanup fn. */
+  onBeforeQuit: (cb: () => void): (() => void) => {
+    const handler = (): void => cb()
+    ipcRenderer.on('app:before-quit', handler)
+    return () => ipcRenderer.removeListener('app:before-quit', handler)
+  },
 
   // ── Salesforce ────────────────────────────────────────────────────────────────
   connectPassword: (creds: PasswordCreds): Promise<OrgInfo> =>

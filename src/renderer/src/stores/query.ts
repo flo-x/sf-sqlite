@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { SavedQuery, QueryResult } from '../../../shared/types'
+import type { SavedQuery, QueryDraft, QueryResult } from '../../../shared/types'
 
 export interface QueryTab {
   key: string
@@ -32,6 +32,37 @@ export const useQueryStore = defineStore('query', () => {
     tabs.value.push(tab)
     activeTabKey.value = key
     return tab
+  }
+
+  /**
+   * Restore tabs from auto-saved drafts on startup.
+   * `savedQueries` is provided so we can look up the last-manually-saved sql text
+   * for each tab that has a savedId (used to drive the dirty/unsaved indicator).
+   */
+  function loadFromDrafts(drafts: QueryDraft[], savedQueries: SavedQuery[]): void {
+    const savedMap = new Map(savedQueries.map((q) => [q.id, q]))
+    const draftTabs = drafts.map((d) => {
+      const saved = d.savedId != null ? savedMap.get(d.savedId) : undefined
+      return {
+        key: d.tabKey,
+        savedId: d.savedId,
+        name: d.name,
+        sqlText: d.sqlText,
+        // savedSqlText is the last *manually* saved text; lets the dirty indicator work.
+        // For unsaved tabs it stays '' so any content appears dirty.
+        savedSqlText: saved?.sqlText ?? '',
+        result: null,
+        executing: false
+      }
+    })
+    const pendingTabs = tabs.value.filter((t) => t.savedId === null)
+    tabs.value = [...draftTabs, ...pendingTabs]
+    if (tabs.value.length === 0) {
+      newTab()
+    } else if (!activeTabKey.value || !tabs.value.some((t) => t.key === activeTabKey.value)) {
+      activeTabKey.value = tabs.value[0]?.key ?? null
+    }
+    initialized.value = true
   }
 
   function loadFromSaved(queries: SavedQuery[]): void {
@@ -110,6 +141,7 @@ export const useQueryStore = defineStore('query', () => {
     expandedTables,
     initialized,
     newTab,
+    loadFromDrafts,
     loadFromSaved,
     getActiveTab,
     setActiveTab,

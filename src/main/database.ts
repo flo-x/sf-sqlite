@@ -13,6 +13,7 @@ import type {
   WritebackJobInput,
   WritebackRunEntry,
   SavedQuery,
+  QueryDraft,
   FieldDescriptor,
   SavedScript,
   SavedScriptInput
@@ -142,6 +143,15 @@ function initMetaTables(): void {
       sql_text   TEXT NOT NULL DEFAULT '',
       tab_order  INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS _sf_bridge_query_drafts (
+      tab_key    TEXT PRIMARY KEY,
+      saved_id   INTEGER,
+      name       TEXT NOT NULL DEFAULT '',
+      sql_text   TEXT NOT NULL DEFAULT '',
+      tab_order  INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL
     );
 
@@ -660,6 +670,40 @@ export function reorderQueries(orderedIds: number[]): void {
   update()
 }
 
+// ─── Query Drafts ─────────────────────────────────────────────────────────────
+
+export function listQueryDrafts(): QueryDraft[] {
+  return (
+    getDb()
+      .prepare('SELECT * FROM _sf_bridge_query_drafts ORDER BY tab_order, rowid')
+      .all() as Array<Record<string, unknown>>
+  ).map(rowToQueryDraft)
+}
+
+export function upsertQueryDraft(draft: Omit<QueryDraft, 'updatedAt'>): void {
+  const now = new Date().toISOString()
+  getDb()
+    .prepare(
+      `INSERT INTO _sf_bridge_query_drafts (tab_key, saved_id, name, sql_text, tab_order, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tab_key) DO UPDATE SET
+         saved_id   = excluded.saved_id,
+         name       = excluded.name,
+         sql_text   = excluded.sql_text,
+         tab_order  = excluded.tab_order,
+         updated_at = excluded.updated_at`
+    )
+    .run(draft.tabKey, draft.savedId ?? null, draft.name, draft.sqlText, draft.tabOrder, now)
+}
+
+export function deleteQueryDraft(tabKey: string): void {
+  getDb().prepare('DELETE FROM _sf_bridge_query_drafts WHERE tab_key = ?').run(tabKey)
+}
+
+export function clearQueryDrafts(): void {
+  getDb().prepare('DELETE FROM _sf_bridge_query_drafts').run()
+}
+
 // ─── Row mappers ─────────────────────────────────────────────────────────────
 
 function rowToExtractJob(r: Record<string, unknown>): ExtractJob {
@@ -739,10 +783,21 @@ function rowToSavedQuery(r: Record<string, unknown>): SavedQuery {
   }
 }
 
+function rowToQueryDraft(r: Record<string, unknown>): QueryDraft {
+  return {
+    tabKey: r.tab_key as string,
+    savedId: r.saved_id != null ? Number(r.saved_id) : null,
+    name: r.name as string,
+    sqlText: r.sql_text as string,
+    tabOrder: Number(r.tab_order),
+    updatedAt: r.updated_at as string
+  }
+}
+
 // ─── CSV Import ───────────────────────────────────────────────────────────────
 
 /** Minimal RFC-4180-compliant CSV parser. Returns an array of rows (each row is an array of strings). */
-function parseCsv(content: string): string[][] {
+function parseCsv(content: string, separator = ','): string[][] {
   const rows: string[][] = []
   let row: string[] = []
   let field = ''

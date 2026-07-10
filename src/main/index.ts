@@ -298,6 +298,37 @@ app.whenReady().then(() => {
   })
 
   registerIpcHandlers()
+
+  // ── Before-quit draft save handshake ────────────────────────────────────────
+  // Renderer saves all open tab drafts before the app closes, then calls
+  // query:drafts:quit-ready. We hold the quit for up to 2 s; if the renderer
+  // doesn't respond, we fall back to an immediate quit.
+  let quitAfterDraftSave = false
+  let draftQuitFallback: ReturnType<typeof setTimeout> | null = null
+
+  const doQuit = (): void => {
+    if (draftQuitFallback !== null) {
+      clearTimeout(draftQuitFallback)
+      draftQuitFallback = null
+    }
+    db.closeDatabase()
+    app.quit()
+  }
+
+  ipcMain.handle('query:drafts:quit-ready', () => { doQuit() })
+
+  app.on('before-quit', (e) => {
+    if (quitAfterDraftSave) return  // second pass — doQuit already called
+
+    const wins = BrowserWindow.getAllWindows()
+    if (!wins.length) { db.closeDatabase(); return }  // no window, close directly
+
+    e.preventDefault()
+    quitAfterDraftSave = true
+    wins[0].webContents.send('app:before-quit')
+    draftQuitFallback = setTimeout(() => { doQuit() }, 2000)
+  })
+
   createWindow()
 
   const win = BrowserWindow.getAllWindows()[0]
@@ -309,10 +340,6 @@ app.whenReady().then(() => {
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
-})
-
-app.on('before-quit', () => {
-  db.closeDatabase()
 })
 
 app.on('window-all-closed', () => {

@@ -165,6 +165,16 @@ export interface SavedQuery {
   updatedAt: string
 }
 
+/** Auto-saved snapshot of an open query tab (separate from the manually saved version). */
+export interface QueryDraft {
+  tabKey: string
+  savedId: number | null
+  name: string
+  sqlText: string
+  tabOrder: number
+  updatedAt: string
+}
+
 export type SavedQueryInput = Omit<SavedQuery, 'id' | 'createdAt' | 'updatedAt'>
 
 export interface JobProgress {
