@@ -7,7 +7,7 @@
     </div>
     <template v-else>
       <div class="datagrid-table-wrap" ref="tableWrap">
-        <table class="data-table datagrid-table" :class="{ 'datagrid-table-fixed': tableFixed }">
+        <table class="data-table datagrid-table" :class="{ 'datagrid-table-fixed': tableFixed }" :style="tableFixed ? { width: tableExplicitWidth + 'px' } : {}">
           <colgroup>
             <col v-if="showRowNumbers" style="width:40px;min-width:40px;">
             <col
@@ -78,6 +78,11 @@
         <span>{{ rows.length }} row{{ rows.length !== 1 ? 's' : '' }}</span>
         <span v-if="durationMs !== undefined" style="margin-left: 8px; color: var(--text-muted)">{{ durationMs }}ms</span>
         <button
+          v-if="onCopySubsetRows"
+          class="btn btn-ghost btn-sm copy-csv-btn"
+          @click="onCopySubsetRows"
+        >{{ copySubsetRowsLabel ?? 'Copy subset' }}</button>
+        <button
           v-if="onExportCsv"
           class="btn btn-ghost btn-sm copy-csv-btn"
           :disabled="exportingCsv"
@@ -121,6 +126,8 @@ const props = defineProps<{
   showRowNumbers?: boolean
   pageSize?: number
   rowClass?: (idx: number) => string
+  onCopySubsetRows?: () => void | Promise<void>
+  copySubsetRowsLabel?: string
   onExportCsv?: () => void | Promise<void>
   exportingCsv?: boolean
   exportCsvLabel?: string
@@ -486,6 +493,19 @@ const frozenLeftOffsets = computed<number[]>(() => {
   return offsets
 })
 
+// Explicit pixel width for the table in fixed-layout mode.
+// Summing all column widths (+ row-number col) and binding it to the <table>
+// element prevents the browser from redistributing space when the wrapper is
+// wider than the columns — only the dragged column grows, the rest stay put.
+const tableExplicitWidth = computed(() => {
+  const rnWidth = props.showRowNumbers ? RN_WIDTH : 0
+  const colSum = colWidths.value.reduce((acc, w) => acc + (w || 0), 0)
+  // Also factor in the wrapper width so the table fills the container when
+  // columns are narrower than the visible area (no unnecessary horizontal bar).
+  const containerWidth = tableWrap.value?.clientWidth ?? 0
+  return Math.max(rnWidth + colSum, containerWidth)
+})
+
 function colHeaderStyle(col: DisplayCol): Record<string, string> {
   if (!col.frozen) return {}
   return {
@@ -603,8 +623,9 @@ function onCellEdit(row: number, col: number, value: string): void {
 
 .datagrid-table-fixed {
   table-layout: fixed;
-  width: max-content; /* expand beyond container when columns are wider than viewport */
-  min-width: 100%;
+  /* Width is set explicitly via :style binding (sum of col widths ≥ container width).
+     This prevents the browser from redistributing space among columns when the wrapper
+     is wider — only the dragged column changes, others stay fixed. */
 }
 
 /* clip cell content so fixed columns don't blow out their widths */

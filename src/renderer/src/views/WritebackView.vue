@@ -83,10 +83,18 @@
           <div class="form-group">
             <label>SQL Query (source data)</label>
             <textarea v-model="editForm.sqlQuery" rows="5" style="font-family:monospace; font-size:12px;" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
-            <button class="btn btn-secondary btn-sm" style="margin-top:6px;" :disabled="previewLoading" @click="runPreview">
-              <span v-if="previewLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
-              Preview (first 50 rows)
-            </button>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap:wrap;">
+              <button class="btn btn-secondary btn-sm" :disabled="previewLoading" @click="runPreview">
+                <span v-if="previewLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
+                Preview (first 50 rows)
+              </button>
+              <button class="btn btn-secondary btn-sm" :disabled="rowCountLoading" @click="runRowCount">
+                <span v-if="rowCountLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
+                Row count
+              </button>
+              <span v-if="rowCountResult !== null" class="row-count-result">{{ rowCountResult.toLocaleString() }} rows</span>
+              <span v-if="rowCountError" class="row-count-error">{{ rowCountError }}</span>
+            </div>
           </div>
           <div v-if="previewResult" class="form-group">
             <div style="height: 180px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden;">
@@ -247,10 +255,18 @@
           <div class="form-group">
             <label>SQL Query (source data)</label>
             <textarea v-model="editForm.sqlQuery" rows="5" style="font-family:monospace; font-size:12px;" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
-            <button class="btn btn-secondary btn-sm" style="margin-top:6px;" :disabled="previewLoading" @click="runPreview">
-              <span v-if="previewLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
-              Preview (first 50 rows)
-            </button>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap:wrap;">
+              <button class="btn btn-secondary btn-sm" :disabled="previewLoading" @click="runPreview">
+                <span v-if="previewLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
+                Preview (first 50 rows)
+              </button>
+              <button class="btn btn-secondary btn-sm" :disabled="rowCountLoading" @click="runRowCount">
+                <span v-if="rowCountLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
+                Row count
+              </button>
+              <span v-if="rowCountResult !== null" class="row-count-result">{{ rowCountResult.toLocaleString() }} rows</span>
+              <span v-if="rowCountError" class="row-count-error">{{ rowCountError }}</span>
+            </div>
           </div>
           <div v-if="previewResult" class="form-group">
             <div style="height: 180px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden;">
@@ -471,9 +487,11 @@
                 </div>
                 <div style="flex:1; overflow:hidden;">
                   <DataGrid
-                    :columns="['_Error', ...execColumns]"
+                    :columns="['_Error', ...execDisplayColumns]"
                     :rows="filteredFailedRows.slice(execFailedPageOffset, execFailedPageOffset + EXEC_PAGE).map((fr) => [fr.message, ...fr.row])"
                     :showRowNumbers="true"
+                    :onCopySubsetRows="copyFailedCsv"
+                    copySubsetRowsLabel="Copy Failed CSV"
                     :onExportCsv="exportFailed"
                     exportCsvLabel="Export Failed CSV"
                   />
@@ -489,17 +507,45 @@
             </div>
             <template v-else>
               <div class="exec-stats">
-                <span v-if="execSourceRowCount !== null" style="color: var(--text-muted);">{{ execSourceRowCount.toLocaleString() }} total</span>
-                <span><strong>{{ totalRows.toLocaleString() }}</strong> rows</span>
-                <span style="color: var(--success);">✓ {{ succeededCount.toLocaleString() }}</span>
-                <span style="color: var(--danger);">✗ {{ failedCount.toLocaleString() }}</span>
+                <span v-if="execSourceRowCount !== null" style="color: var(--text-muted);">{{ execSourceRowCount.toLocaleString() }} source rows</span>
                 <span style="color: var(--text-muted);">{{ activeJobData?.rps ?? 0 }} rec/s</span>
                 <span v-if="thisJobIsRunning" style="color: var(--accent); font-size:12px;" title="Records submitted to Salesforce and awaiting a response">
                   ⟳ {{ execInFlight.toLocaleString() }} in flight
                 </span>
-                <label v-if="execJobDone && failedCount > 0" style="margin-left: auto; display:flex; align-items:center; gap:6px; font-weight:400;">
-                  <input type="checkbox" v-model="showOnlyFailed" @change="execPageOffset = 0; execFailedPageOffset = 0" /> Show only failed
-                </label>
+                <div v-if="totalRows > 0" class="exec-status-filter">
+                  <button
+                    class="exec-filter-pill"
+                    :class="{ active: allFiltersOn }"
+                    @click="execFilterSuccess = execFilterError = execFilterPending = true"
+                    title="Show all rows"
+                  >All <span class="exec-filter-count">{{ totalRows.toLocaleString() }}</span></button>
+                  <button
+                    class="exec-filter-pill"
+                    :class="{
+                      active: execFilterSuccess,
+                      'exec-filter-pill--ok': succeededCount > 0,
+                      'exec-filter-pill--ok-lit': succeededCount > 0
+                    }"
+                    @click="execFilterSuccess = !execFilterSuccess"
+                  >✓ OK <span class="exec-filter-count">{{ succeededCount.toLocaleString() }}</span></button>
+                  <button
+                    class="exec-filter-pill"
+                    :class="{
+                      active: execFilterError,
+                      'exec-filter-pill--error': failedCount > 0,
+                      'exec-filter-pill--error-lit': failedCount > 0
+                    }"
+                    @click="execFilterError = !execFilterError"
+                  >✗ Error <span class="exec-filter-count">{{ failedCount.toLocaleString() }}</span></button>
+                  <button
+                    class="exec-filter-pill"
+                    :class="{
+                      active: execFilterPending,
+                      'exec-filter-pill--pending': pendingCount > 0
+                    }"
+                    @click="execFilterPending = !execFilterPending"
+                  >— Pending <span class="exec-filter-count">{{ pendingCount.toLocaleString() }}</span></button>
+                </div>
                 <button v-if="failedCount > 0 && !thisJobIsRunning" class="btn btn-secondary btn-sm" @click="retryFailed">Retry Failed</button>
                 <button
                   v-if="execJobDone && isInsert && !execIsBulkApi && succeededCount > 0 && execRunId && !thisJobIsRunning"
@@ -509,7 +555,7 @@
                 >Update table with created record IDs</button>
                 <button v-if="!thisJobIsRunning" class="btn btn-ghost btn-sm" style="margin-left: auto;" @click="clearExecState" title="Clear all execution data from memory">Clear</button>
               </div>
-              <!-- Error filter (only when showing failed rows only) -->
+              <!-- Error message sub-filter (only when in error-only mode) -->
               <div v-if="showOnlyFailed && execJobDone && distinctErrors.length > 1" class="failed-rows-header" style="padding: 4px 12px;">
                 <div class="error-filter-bar">
                   <label class="error-filter-label">Filter by error:</label>
@@ -549,6 +595,8 @@
                   :columns="execVisibleCols"
                   :rows="visibleExecRows"
                   :showRowNumbers="true"
+                  :onCopySubsetRows="failedCount > 0 && !thisJobIsRunning ? copyFailedCsv : undefined"
+                  copySubsetRowsLabel="Copy Failed CSV"
                   :onExportCsv="failedCount > 0 && !thisJobIsRunning ? exportFailed : undefined"
                   exportCsvLabel="Export Failed CSV"
                   :onCopyAllRows="copyAllExecRows"
@@ -733,11 +781,20 @@ const saveError = ref('')
 const previewLoading = ref(false)
 const previewResult = ref<{ columns: string[]; rows: unknown[][] } | null>(null)
 const previewError = ref('')
+const rowCountLoading = ref(false)
+const rowCountResult = ref<number | null>(null)
+const rowCountError = ref('')
 const sfFields = ref<FieldDescriptor[]>([])
 const MAX_PARALLEL = 5
 const activeRuns = ref<Map<number, string>>(new Map())  // jobId → runId
 const jobQueue = ref<number[]>([])                       // jobIds waiting for a slot
-const showOnlyFailed = ref(false)
+const execFilterSuccess = ref(true)
+const execFilterError   = ref(true)
+const execFilterPending = ref(true)
+// True when all three individual filters are on (= "show everything").
+const allFiltersOn = computed(() => execFilterSuccess.value && execFilterError.value && execFilterPending.value)
+// Convenience: true when ONLY the error filter is on (uses the full execFailedRows dataset).
+const showOnlyFailed = computed(() => !execFilterSuccess.value && execFilterError.value && !execFilterPending.value)
 const operations = ['insert', 'update', 'upsert', 'delete', 'undelete']
 
 // ── Custom Headers suggestions ────────────────────────────────────────────────
@@ -820,7 +877,9 @@ interface SavedExecState {
   pageStatuses: Map<number, { status: 'success' | 'error'; message?: string }>
   pageIds: Map<number, string>
   failedRows: ExecFailedRow[]
-  showOnlyFailed: boolean
+  filterSuccess: boolean
+  filterError: boolean
+  filterPending: boolean
 }
 
 const execStateCache = ref<Map<number, SavedExecState>>(new Map())
@@ -845,7 +904,9 @@ function captureExecState(jobId: number, force = false): void {
     pageStatuses: new Map(execPageStatuses.value),
     pageIds: new Map(execPageIds.value),
     failedRows: execFailedRows.value.slice(),
-    showOnlyFailed: showOnlyFailed.value
+    filterSuccess: execFilterSuccess.value,
+    filterError: execFilterError.value,
+    filterPending: execFilterPending.value
   })
 }
 
@@ -869,7 +930,9 @@ function restoreExecState(jobId: number): void {
   execPageStatuses.value = s.pageStatuses
   execPageIds.value = s.pageIds
   execFailedRows.value = s.failedRows
-  showOnlyFailed.value = s.showOnlyFailed
+  execFilterSuccess.value = s.filterSuccess
+  execFilterError.value   = s.filterError
+  execFilterPending.value = s.filterPending
   // runtime-only state
   execInFlight.value = 0
   execBulkPhase.value = ''
@@ -956,8 +1019,12 @@ const filteredFailedRows = computed((): ExecFailedRow[] =>
     : execFailedRows.value
 )
 
-// Reset page when the filter changes.
+// Reset page when any filter changes.
 watch(failedErrorFilter, () => { execFailedPageOffset.value = 0 })
+watch([execFilterSuccess, execFilterError, execFilterPending], () => {
+  execPageOffset.value = 0
+  execFailedPageOffset.value = 0
+})
 
 const execFailedMap = computed(() =>
   new Map(execFailedRows.value.map((fr) => [fr.index, fr]))
@@ -966,6 +1033,9 @@ const execFailedMap = computed(() =>
 const totalRows = computed(() => execTotalRows.value)
 const succeededCount = computed(() => execSucceeded.value)
 const failedCount = computed(() => execFailed.value)
+const pendingCount = computed(() =>
+  Math.max(0, execTotalRows.value - execSucceeded.value - execFailed.value)
+)
 
 const isInsert = computed(() => execOperation.value === 'insert')
 
@@ -978,13 +1048,17 @@ const visibleExecRows = computed(() => {
         : [`✗ ${fr.message}`, ...fr.row]
       )
   }
-  return execPageRows.value.map((r, pageIdx) => {
+  const allRows = execPageRows.value.map((r, pageIdx) => {
     const absIdx = execPageOffset.value + pageIdx
     let statusCell: string
     let idCell = execPageIds.value.get(absIdx) ?? ''
     if (execJobDone.value) {
       const failed = execFailedMap.value.get(absIdx)
-      statusCell = failed ? `✗ ${failed.message}` : '✓'
+      if (absIdx >= execTotalRows.value) {
+        statusCell = '—'   // never reached (job cancelled / aborted before this row)
+      } else {
+        statusCell = failed ? `✗ ${failed.message}` : '✓'
+      }
       if (failed) idCell = ''
     } else {
       const st = execPageStatuses.value.get(absIdx)
@@ -994,12 +1068,38 @@ const visibleExecRows = computed(() => {
       ? [idCell, statusCell, ...(r as unknown[])]
       : [statusCell, ...(r as unknown[])]
   })
+  if (allFiltersOn.value) {
+    return allRows
+  }
+  const statusIdx = isInsert.value ? 1 : 0
+  return allRows.filter((row) => {
+    const cell = String(row[statusIdx])
+    if (cell.startsWith('✓')) return execFilterSuccess.value
+    if (cell.startsWith('✗')) return execFilterError.value
+    return execFilterPending.value // '—'
+  })
+})
+
+// Map each SQL column name to its Salesforce target field name for display.
+// Falls back to the original SQL name when no active mapping is found.
+const execDisplayColumns = computed((): string[] => {
+  const fm = selectedJob.value?.fieldMap
+  if (!fm?.length) {
+    return execColumns.value
+  }
+  const lookup = new Map<string, string>()
+  for (const m of fm) {
+    if (!m.excluded && m.sqlCol && m.sfField) {
+      lookup.set(m.sqlCol.toLowerCase(), m.sfField)
+    }
+  }
+  return execColumns.value.map((col) => lookup.get(col.toLowerCase()) ?? col)
 })
 
 const execVisibleCols = computed(() =>
   isInsert.value
-    ? ['_Id', '_Status', ...execColumns.value]
-    : ['_Status', ...execColumns.value]
+    ? ['_Id', '_Status', ...execDisplayColumns.value]
+    : ['_Status', ...execDisplayColumns.value]
 )
 
 interface EditForm {
@@ -1031,6 +1131,8 @@ function applyPendingSql(): void {
     editing.value = true
     previewResult.value = null
     previewError.value = ''
+    rowCountResult.value = null
+    rowCountError.value = ''
     saveError.value = ''
     sfFields.value = []
     editForm.value = {
@@ -1138,6 +1240,8 @@ function loadJobIntoForm(j: WritebackJob): void {
     customHeaders: j.customHeaders ?? ''
   }
   previewResult.value = null
+  rowCountResult.value = null
+  rowCountError.value = ''
   sfFields.value = []
   if (j.sfObject) {
     window.api.describeObject(j.sfObject).then((f) => { sfFields.value = f })
@@ -1209,6 +1313,19 @@ async function runPreview(): Promise<void> {
   }
 }
 
+async function runRowCount(): Promise<void> {
+  rowCountError.value = ''
+  rowCountResult.value = null
+  rowCountLoading.value = true
+  try {
+    rowCountResult.value = await window.api.wbRowCount(editForm.value.sqlQuery)
+  } catch (e) {
+    rowCountError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    rowCountLoading.value = false
+  }
+}
+
 async function onObjectChange(name: string): Promise<void> {
   if (!name) return
   sfFields.value = await window.api.describeObject(name)
@@ -1221,19 +1338,22 @@ async function onObjectChange(name: string): Promise<void> {
 
 function initFieldMap(): void {
   if (!previewResult.value) return
-  const existing = new Map(editForm.value.fieldMap.map((m) => [m.sqlCol, m]))
+  // Key by lowercase so a column name casing change (e.g. "Email" → "email") doesn't
+  // lose the user's existing mapping/excluded state.
+  const existing = new Map(editForm.value.fieldMap.map((m) => [m.sqlCol.toLowerCase(), m]))
   editForm.value.fieldMap = previewResult.value.columns.map((col) => {
-    const prev = existing.get(col)
+    const prev = existing.get(col.toLowerCase())
     if (prev) {
-      return { ...prev }
+      // Use the actual column name from the current query; preserve everything else (incl. excluded).
+      return { ...prev, sqlCol: col }
     }
     const match = sfFields.value.find((f) => f.name.toLowerCase() === col.toLowerCase())
     return { sqlCol: col, sfField: match?.name ?? '', isKey: false, excluded: !match }
   })
   // Drop any distribution key columns that no longer exist in the new field map.
   if (editForm.value.distributionKey?.length) {
-    const validCols = new Set(editForm.value.fieldMap.map((m) => m.sqlCol))
-    const filtered = editForm.value.distributionKey.filter((c) => validCols.has(c))
+    const validCols = new Set(editForm.value.fieldMap.map((m) => m.sqlCol.toLowerCase()))
+    const filtered = editForm.value.distributionKey.filter((c) => validCols.has(c.toLowerCase()))
     editForm.value.distributionKey = filtered.length ? filtered : null
   }
 }
@@ -1388,7 +1508,7 @@ function clearExecState(): void {
   execFailedRows.value = []
   execFailedPageOffset.value = 0
   failedErrorFilter.value = ''
-  showOnlyFailed.value = false
+  execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
 }
 
 async function save(andExecute: boolean): Promise<void> {
@@ -1466,7 +1586,7 @@ async function _startJobNow(id: number): Promise<void> {
   // If this job is selected, set up display state
   if (selectedJobId.value === id) {
     activeTab.value = 'execution'
-    const sql = j.sqlQuery.replace(/LIMIT\s+\d+/i, '')
+    const sql = j.sqlQuery
     execSql.value = sql
     execOperation.value = j.operation
     execIsBulkApi.value = j.useBulkApi
@@ -1488,7 +1608,7 @@ async function _startJobNow(id: number): Promise<void> {
     execFailedRows.value = []
     execFailedPageOffset.value = 0
     execJobDone.value = false
-    showOnlyFailed.value = false
+    execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
 
     // Fetch source row count in background — does not block job start
     window.api.wbRowCount(sql).then((count) => {
@@ -1711,7 +1831,7 @@ async function retryFailed(): Promise<void> {
   execFailed.value = 0
   execFailedRows.value = []
   execJobDone.value = false
-  showOnlyFailed.value = false
+  execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
 
   const id = selectedJobId.value
   const newRunId = await window.api.retryFailed(execRunId.value, id)
@@ -1721,8 +1841,8 @@ async function retryFailed(): Promise<void> {
   startRunMonitor(id, newRunId)
 }
 
-async function exportFailed(): Promise<void> {
-  const columns = ['_ErrorMessage', ...execColumns.value]
+function buildFailedCsv(): string {
+  const columns = ['_ErrorMessage', ...execDisplayColumns.value]
   const csvEscape = (v: unknown): string => {
     if (v === null || v === undefined) return ''
     const s = String(v)
@@ -1733,8 +1853,15 @@ async function exportFailed(): Promise<void> {
   const rows = execFailedRows.value.map((fr) =>
     [fr.message, ...fr.row].map(csvEscape).join(',')
   )
-  const csv = [columns.map(csvEscape).join(','), ...rows].join('\n')
-  await window.api.exportToCsv(csv)
+  return [columns.map(csvEscape).join(','), ...rows].join('\n')
+}
+
+async function copyFailedCsv(): Promise<void> {
+  await navigator.clipboard.writeText(buildFailedCsv())
+}
+
+async function exportFailed(): Promise<void> {
+  await window.api.exportToCsv(buildFailedCsv())
 }
 
 async function duplicateSelectedJob(): Promise<void> {
@@ -1857,7 +1984,24 @@ function formatDuration(ms: number | null): string {
 /* History & execution sections */
 .history-section { flex: 1; overflow-y: auto; }
 .execution-section { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
-.exec-stats { padding: 8px 12px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--border); font-size: 13px; flex-shrink: 0; }
+.row-count-result { font-size: 13px; font-weight: 600; color: var(--text); }
+.row-count-error  { font-size: 12px; color: var(--danger, #dc2626); }
+.exec-stats { padding: 8px 12px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); font-size: 13px; flex-shrink: 0; flex-wrap: wrap; }
+.exec-status-filter { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.exec-filter-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 12px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-muted); font-size: 12px; cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.exec-filter-pill:hover { background: var(--surface-hover, var(--border)); color: var(--text); }
+.exec-filter-pill.active { background: var(--surface-hover, var(--border)); color: var(--text); border-color: var(--text-muted); }
+.exec-filter-pill--ok-lit  { background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
+.exec-filter-pill--error-lit { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+.exec-filter-pill--ok.active, .exec-filter-pill--ok-lit.active  { background: color-mix(in srgb, var(--success) 25%, transparent); color: var(--success); border-color: var(--success); }
+.exec-filter-pill--error.active, .exec-filter-pill--error-lit.active { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); border-color: var(--danger); }
+.exec-filter-pill--pending.active { background: color-mix(in srgb, var(--text-muted) 15%, transparent); color: var(--text); border-color: var(--text-muted); }
+.exec-filter-count { font-variant-numeric: tabular-nums; }
 .exec-pager { padding: 4px 12px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
 .bulk-phase-card { padding: 24px; display: flex; flex-direction: column; align-items: flex-start; }
 .bulk-phase-row { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text); }
