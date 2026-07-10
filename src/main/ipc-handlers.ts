@@ -407,6 +407,12 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
       while (!abortCtrl.signal.aborted) {
         const { rows } = db.queryPage(sql, offset, CHUNK)
         if (rows.length === 0) break
+        // Yield to the macrotask queue after each synchronous SQLite read so that
+        // IPC calls from the renderer (queries, navigation, etc.) can be processed
+        // between chunks. Without this, the for-await loop in sfStreamingPut only
+        // creates microtask suspensions, starving the event loop for the entire
+        // upload duration.
+        await new Promise<void>((resolve) => setImmediate(resolve))
         yield rows.map((row) => mapRowToRecord(row as unknown[], columns, activeMappings))
         offset += rows.length
         if (rows.length < CHUNK) break
