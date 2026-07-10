@@ -302,9 +302,11 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, onDea
 import * as monaco from 'monaco-editor'
 import { EDITOR_BASE_OPTIONS } from '../utils/monaco'
 import { useConnectionStore } from '../stores/connection'
+import { useJobStore } from '../stores/job'
 import type { SavedScript, ScriptLog, ScriptComplete } from '../../../shared/types'
 
 const conn = useConnectionStore()
+const jobStore = useJobStore()
 
 // ── Script list ───────────────────────────────────────────────────────────────
 const scripts = ref<SavedScript[]>([])
@@ -449,6 +451,7 @@ async function runScript(): Promise<void> {
   const runId = crypto.randomUUID()
   currentRunId.value = runId
   running.value = true
+  jobStore.setScriptRunning(true)
   lastResult.value = null
   outputTab.value = 'logs'
   progressValue.value = null
@@ -485,6 +488,7 @@ async function runScript(): Promise<void> {
     teardownListeners()
     lastResult.value = e
     running.value = false
+    jobStore.setScriptRunning(false)
     currentRunId.value = null
     progressValue.value = null  // hide the bar on completion
     progressLabel.value = ''
@@ -503,6 +507,7 @@ async function cancelScript(): Promise<void> {
     await window.api.cancelScript(currentRunId.value)
     teardownListeners()
     running.value = false
+    jobStore.setScriptRunning(false)
     currentRunId.value = null
     progressValue.value = null
     progressLabel.value = ''

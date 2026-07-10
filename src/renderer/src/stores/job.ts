@@ -67,5 +67,11 @@ export const useJobStore = defineStore('job', () => {
     return activeJobs.value.get(runId)
   }
 
-  return { activeJobs, startJob, updateProgress, completeJob, removeJob, getJob }
+  // Tracks whether any JS script is currently executing (set by ScriptsView).
+  const scriptRunning = ref(false)
+  function setScriptRunning(val: boolean): void {
+    scriptRunning.value = val
+  }
+
+  return { activeJobs, startJob, updateProgress, completeJob, removeJob, getJob, scriptRunning, setScriptRunning }
 })
