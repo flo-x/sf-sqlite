@@ -25,7 +25,7 @@
         <tbody>
           <tr v-for="{ m, origIdx } in visibleMappings" :key="origIdx" :class="{ excluded: m.excluded }">
             <td>
-              <input type="checkbox" :checked="!m.excluded" @change="m.excluded = !($event.target as HTMLInputElement).checked" />
+              <input type="checkbox" :checked="!m.excluded" @change="toggleExcluded(origIdx, $event)" />
             </td>
             <td :class="{ 'text-muted': m.excluded }">
               <span class="mono">{{ m.sqlCol }}</span>
@@ -99,6 +99,11 @@ function skipUnknown(): void {
   for (const m of mappings.value) {
     if (!sfNames.has(m.sqlCol.toLowerCase())) m.excluded = true
   }
+}
+
+function toggleExcluded(idx: number, event: Event): void {
+  mappings.value[idx].excluded = !(event.target as HTMLInputElement).checked
+  emit('update:modelValue', [...mappings.value])
 }
 
 function setKey(idx: number): void {
