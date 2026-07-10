@@ -363,7 +363,8 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
   const job = db.listWritebackJobs().find((j) => j.id === jobId)
   if (!job) throw new Error(`Writeback job ${jobId} not found`)
 
-  const sql = job.sqlQuery.replace(/LIMIT\s+\d+/i, '')
+  const sql = job.sqlQuery
+  debugLog('jobQueries', `[SQLite→SF] job="${job.name}" (id=${jobId}) SQL:\n${sql}`)
   const { columns } = db.queryPage(sql, 0, 0)
 
   const abortCtrl = new AbortController()

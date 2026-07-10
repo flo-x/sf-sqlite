@@ -598,7 +598,7 @@ export function previewWritebackQuery(sql: string): { columns: string[]; rows: u
   assertSelectOnly(sql)
   const d = getDb()
   try {
-    const stmt = d.prepare(sql + ' LIMIT 50')
+    const stmt = d.prepare(`SELECT * FROM (${sql}) LIMIT 50`)
     const columns = stmt.columns().map((c) => c.name)
     const rows = stmt.raw(true).all() as unknown[][]
     return { columns, rows }
