@@ -18,7 +18,6 @@ import type {
   QueryDraft,
   JobProgress,
   JobResult,
-  PasswordCreds,
   RecentDatabase,
   SavedScript,
   SavedScriptInput,
@@ -106,9 +105,6 @@ const api = {
   },
 
   // ── Salesforce ────────────────────────────────────────────────────────────────
-  connectPassword: (creds: PasswordCreds): Promise<OrgInfo> =>
-    ipcRenderer.invoke('sf:connect-password', creds),
-
   connectOAuth: (clientId: string, loginUrl: string): Promise<OrgInfo> =>
     ipcRenderer.invoke('sf:connect-oauth', clientId, loginUrl),
 

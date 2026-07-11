@@ -26,7 +26,6 @@ import type {
   ExtractJobInput,
   WritebackJobInput,
   FieldMapping,
-  PasswordCreds,
   JobProgress,
   JobResult,
   FieldDescriptor,
@@ -846,9 +845,6 @@ export function registerIpcHandlers(): void {
 
   // ── Salesforce ───────────────────────────────────────────────────────────────
 
-  ipcMain.handle('sf:connect-password', (_e, creds: PasswordCreds) =>
-    sf.connectPassword(creds)
-  )
   ipcMain.handle('sf:connect-oauth', (_e, clientId: string, loginUrl: string) =>
     sf.connectOAuth(clientId, loginUrl)
   )

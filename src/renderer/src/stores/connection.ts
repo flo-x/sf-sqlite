@@ -16,16 +16,6 @@ export const useConnectionStore = defineStore('connection', () => {
   const dbConnected = computed(() => dbPath.value !== null)
   const bothConnected = computed(() => sfConnected.value && dbConnected.value)
 
-  async function connectSF(creds: Parameters<typeof window.api.connectPassword>[0]): Promise<void> {
-    sfConnecting.value = true
-    try {
-      sfOrg.value = await window.api.connectPassword(creds)
-      sfObjects.value = []
-    } finally {
-      sfConnecting.value = false
-    }
-  }
-
   async function connectOAuth(clientId: string, loginUrl: string): Promise<void> {
     sfConnecting.value = true
     try {
@@ -145,7 +135,6 @@ export const useConnectionStore = defineStore('connection', () => {
     sfConnected,
     dbConnected,
     bothConnected,
-    connectSF,
     connectOAuth,
     connectSFCli,
     disconnectSF,

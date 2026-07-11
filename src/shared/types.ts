@@ -205,13 +205,6 @@ export interface JobResult {
   columns?: string[]
 }
 
-export interface PasswordCreds {
-  instanceUrl: string
-  username: string
-  password: string
-  token: string
-}
-
 export interface RecentDatabase {
   path: string
   name: string
