@@ -133,13 +133,13 @@
         >Salesforce</button>
       </div>
       <SchemaBrowser
-        v-if="schemaTab === 'sqlite'"
+        v-show="schemaTab === 'sqlite'"
         :tables="conn.dbTables"
         @insert="insertAtCursor"
         @openExplorer="(name) => $router.push('/explorer')"
       />
       <SFSchemaBrowser
-        v-else-if="schemaTab === 'sf'"
+        v-show="schemaTab === 'sf'"
         :objects="conn.sfObjects"
         @insert="insertAtCursor"
       />
