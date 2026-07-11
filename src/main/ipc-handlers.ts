@@ -200,9 +200,19 @@ export interface WritebackFailedRowsResult {
 // script executor path (awaited for full result).  They register the run with
 // the scheduler so the MAX_PARALLEL limit is respected globally.
 
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === 'AbortError') ||
+    (err instanceof Error && (err.message === 'The operation was aborted' || err.message === 'Cancelled'))
+  )
+}
+
 async function startExtractRun(jobId: number, runId: string): Promise<JobResult> {
   const job = db.listExtractJobs().find((j) => j.id === jobId)
   if (!job) throw new Error(`Extract job ${jobId} not found`)
+
+  // Verify (and if necessary refresh) the Salesforce session before starting.
+  await sf.ensureConnected()
 
   const abortCtrl = new AbortController()
   activeJobs.set(runId, abortCtrl)
@@ -287,10 +297,11 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
         send('job:complete', result)
         scheduler.notifyComplete(result)
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
+        const cancelled = isAbortError(err)
+        const msg = cancelled ? 'Cancelled by user' : (err instanceof Error ? err.message : String(err))
         if (stagingCreated) db.dropTableIfExists(stagingName)
-        db.finishRunHistory(runHistId, 'error', lastFetched, Date.now() - startTime, msg)
-        const result: JobResult = { runId, type: 'extract', status: 'error', errorMsg: msg }
+        db.finishRunHistory(runHistId, cancelled ? 'cancelled' : 'error', lastFetched, Date.now() - startTime, cancelled ? undefined : msg)
+        const result: JobResult = { runId, type: 'extract', status: cancelled ? 'cancelled' : 'error', errorMsg: cancelled ? undefined : msg }
         send('job:complete', result)
         scheduler.notifyComplete(result)
       } finally {
@@ -345,9 +356,10 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
         send('job:complete', result)
         scheduler.notifyComplete(result)
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        db.finishRunHistory(runHistId, 'error', lastFetched, Date.now() - startTime, msg)
-        const result: JobResult = { runId, type: 'extract', status: 'error', errorMsg: msg }
+        const cancelled = isAbortError(err)
+        const msg = cancelled ? 'Cancelled by user' : (err instanceof Error ? err.message : String(err))
+        db.finishRunHistory(runHistId, cancelled ? 'cancelled' : 'error', lastFetched, Date.now() - startTime, cancelled ? undefined : msg)
+        const result: JobResult = { runId, type: 'extract', status: cancelled ? 'cancelled' : 'error', errorMsg: cancelled ? undefined : msg }
         send('job:complete', result)
         scheduler.notifyComplete(result)
       } finally {
@@ -362,6 +374,9 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
 async function startWritebackRun(jobId: number, runId: string): Promise<WritebackScriptResult> {
   const job = db.listWritebackJobs().find((j) => j.id === jobId)
   if (!job) throw new Error(`Writeback job ${jobId} not found`)
+
+  // Verify (and if necessary refresh) the Salesforce session before starting.
+  await sf.ensureConnected()
 
   const sql = job.sqlQuery
   debugLog('jobQueries', `[SQLite→SF] job="${job.name}" (id=${jobId}) SQL:\n${sql}`)
@@ -472,9 +487,10 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
         send('job:complete', jobResult)
         scheduler.notifyComplete(jobResult)
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        db.finishWritebackRunHistory(runHistId, 'error', 0, 0, 0, Date.now() - startTime, msg)
-        const jobResult: JobResult = { runId, type: 'writeback', status: 'error', errorMsg: msg }
+        const cancelled = isAbortError(err)
+        const msg = cancelled ? 'Cancelled by user' : (err instanceof Error ? err.message : String(err))
+        db.finishWritebackRunHistory(runHistId, cancelled ? 'cancelled' : 'error', 0, 0, 0, Date.now() - startTime, cancelled ? undefined : msg)
+        const jobResult: JobResult = { runId, type: 'writeback', status: cancelled ? 'cancelled' : 'error', errorMsg: cancelled ? undefined : msg }
         send('job:complete', jobResult)
         scheduler.notifyComplete(jobResult)
       } finally {
@@ -587,10 +603,11 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
         send('job:complete', jobResult)
         scheduler.notifyComplete(jobResult)
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        const errStatus = succeeded > 0 ? 'partial' : 'error'
-        db.finishWritebackRunHistory(runHistId, errStatus, processedRows, succeeded, failed, Date.now() - startTime, msg)
-        const jobResult: JobResult = { runId, type: 'writeback', status: 'error', errorMsg: msg, rowsSucceeded: succeeded, rowsFailed: failed }
+        const cancelled = isAbortError(err)
+        const msg = cancelled ? 'Cancelled by user' : (err instanceof Error ? err.message : String(err))
+        const errStatus = cancelled ? 'cancelled' : (succeeded > 0 ? 'partial' : 'error')
+        db.finishWritebackRunHistory(runHistId, errStatus, processedRows, succeeded, failed, Date.now() - startTime, cancelled ? undefined : msg)
+        const jobResult: JobResult = { runId, type: 'writeback', status: cancelled ? 'cancelled' : 'error', errorMsg: cancelled ? undefined : msg, rowsSucceeded: succeeded, rowsFailed: failed }
         send('job:complete', jobResult)
         scheduler.notifyComplete(jobResult)
       } finally {
@@ -1160,9 +1177,10 @@ export function registerIpcHandlers(): void {
         send('job:complete', retryResult)
         scheduler.notifyComplete(retryResult)
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        db.finishWritebackRunHistory(runHistId, 'error', 0, 0, 0, Date.now() - startTime, msg)
-        const retryResult: JobResult = { runId: newRunId, type: 'writeback', status: 'error', errorMsg: msg }
+        const cancelled = isAbortError(err)
+        const msg = cancelled ? 'Cancelled by user' : (err instanceof Error ? err.message : String(err))
+        db.finishWritebackRunHistory(runHistId, cancelled ? 'cancelled' : 'error', 0, 0, 0, Date.now() - startTime, cancelled ? undefined : msg)
+        const retryResult: JobResult = { runId: newRunId, type: 'writeback', status: cancelled ? 'cancelled' : 'error', errorMsg: cancelled ? undefined : msg }
         send('job:complete', retryResult)
         scheduler.notifyComplete(retryResult)
       } finally {

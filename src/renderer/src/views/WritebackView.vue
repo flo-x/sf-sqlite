@@ -1692,7 +1692,9 @@ function startRunMonitor(jobId: number, runId: string): void {
       execBulkPhase.value = ''
       execJobDone.value = true
 
-      if (e.status === 'error') {
+      if (e.status === 'cancelled') {
+        execWarn.value = 'Job was cancelled by the user.'
+      } else if (e.status === 'error') {
         execError.value = e.errorMsg ?? 'The job failed with an unknown error.'
       } else {
         execError.value = null
@@ -1717,7 +1719,8 @@ function startRunMonitor(jobId: number, runId: string): void {
       const cached = execStateCache.value.get(jobId)
       if (cached) {
         cached.jobDone = true
-        cached.error = e.status === 'error' ? (e.errorMsg ?? 'Unknown error') : null
+        cached.error = (e.status === 'error') ? (e.errorMsg ?? 'Unknown error') : null
+        if (e.status === 'cancelled') cached.warn = 'Job was cancelled by the user.'
         if (e.rowsSucceeded !== undefined) cached.succeeded = e.rowsSucceeded
         if (e.rowsFailed !== undefined) cached.failed = e.rowsFailed
         if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined)
@@ -1755,7 +1758,10 @@ async function cancelRun(): Promise<void> {
   }
 
   const runId = activeRuns.value.get(id)
-  if (runId) await window.api.cancelJob(runId)
+  if (runId) {
+    await window.api.cancelJob(runId)
+    jobs.removeJob(runId)   // immediately clear the Pinia store so nav indicator stops
+  }
   // activeRuns will be cleaned up by the onJobComplete handler
 }
 
@@ -1886,6 +1892,7 @@ function runStatusBadge(s: string): string {
   if (s === 'success') return 'badge-green'
   if (s === 'error') return 'badge-red'
   if (s === 'partial') return 'badge-amber'
+  if (s === 'cancelled') return 'badge-gray'
   return 'badge-blue'
 }
 function formatDate(d: string): string { return new Date(d).toLocaleString() }

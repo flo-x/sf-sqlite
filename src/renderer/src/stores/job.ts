@@ -11,7 +11,7 @@ export interface ActiveJob {
   succeeded: number
   failed: number
   rps: number
-  status: 'running' | 'success' | 'partial' | 'error'
+  status: 'running' | 'success' | 'partial' | 'error' | 'cancelled'
   errorMsg?: string
   rowStatuses: Map<number, { status: 'success' | 'error'; message?: string }>
 }

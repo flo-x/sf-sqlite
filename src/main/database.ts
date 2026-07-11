@@ -531,7 +531,7 @@ export function startRunHistory(jobId: number): number {
   return Number(info.lastInsertRowid)
 }
 
-export function finishRunHistory(runHistId: number, status: 'success' | 'error', rowsLoaded: number, durationMs: number, errorMsg?: string): void {
+export function finishRunHistory(runHistId: number, status: 'success' | 'error' | 'cancelled', rowsLoaded: number, durationMs: number, errorMsg?: string): void {
   getDb().prepare(
     `UPDATE _sf_bridge_run_history SET finished_at=?, status=?, rows_loaded=?, duration_ms=?, error_msg=? WHERE id=?`
   ).run(new Date().toISOString(), status, rowsLoaded, durationMs, errorMsg ?? null, runHistId)
@@ -581,7 +581,7 @@ export function startWritebackRunHistory(jobId: number, useBulkApi: boolean): nu
   return Number(info.lastInsertRowid)
 }
 
-export function finishWritebackRunHistory(runHistId: number, status: 'success' | 'partial' | 'error', rowsSent: number, rowsSucceeded: number, rowsFailed: number, durationMs: number, errorMsg?: string): void {
+export function finishWritebackRunHistory(runHistId: number, status: 'success' | 'partial' | 'error' | 'cancelled', rowsSent: number, rowsSucceeded: number, rowsFailed: number, durationMs: number, errorMsg?: string): void {
   getDb().prepare(
     `UPDATE _sf_bridge_writeback_run_history SET finished_at=?,status=?,rows_sent=?,rows_succeeded=?,rows_failed=?,duration_ms=?,error_msg=? WHERE id=?`
   ).run(new Date().toISOString(), status, rowsSent, rowsSucceeded, rowsFailed, durationMs, errorMsg ?? null, runHistId)
@@ -730,7 +730,7 @@ function rowToRunHistory(r: Record<string, unknown>): RunHistoryEntry {
     jobId: Number(r.job_id),
     startedAt: r.started_at as string,
     finishedAt: r.finished_at as string | null,
-    status: r.status as 'running' | 'success' | 'error',
+    status: r.status as 'running' | 'success' | 'error' | 'cancelled',
     rowsLoaded: r.rows_loaded != null ? Number(r.rows_loaded) : null,
     durationMs: r.duration_ms != null ? Number(r.duration_ms) : null,
     errorMsg: r.error_msg as string | null

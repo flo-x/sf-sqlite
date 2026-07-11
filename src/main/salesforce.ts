@@ -10,7 +10,7 @@ import { promisify } from 'util'
 import { readFile, access } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { OrgInfo, CliOrg, CliDiagnosticStep, CliOrgsResult, SObjectSummary, FieldDescriptor, PasswordCreds, QueryResult } from '../shared/types'
+import type { OrgInfo, CliOrg, CliDiagnosticStep, CliOrgsResult, SObjectSummary, FieldDescriptor, QueryResult } from '../shared/types'
 import { debugLog } from './debug-logger'
 
 const execFileAsync = promisify(execFile)
@@ -124,7 +124,6 @@ let currentOrgInfo: OrgInfo | null = null
 // automatically when INVALID_SESSION_ID is returned by Salesforce.
 type ConnectionSource =
   | { type: 'cli'; username: string }
-  | { type: 'password' }
   | { type: 'oauth' }
 let connectionSource: ConnectionSource | null = null
 
@@ -164,25 +163,6 @@ async function detectAndSetApiVersion(conn: SfConnection): Promise<void> {
   }
 }
 
-export async function connectPassword(creds: PasswordCreds): Promise<OrgInfo> {
-  // compress: true is valid at runtime but absent from @types/jsforce typings
-  const conn = new jsforce.Connection({
-    loginUrl: creds.instanceUrl || 'https://login.salesforce.com',
-    compress: true
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as any)
-  await conn.login(creds.username, creds.password + creds.token)
-  await detectAndSetApiVersion(conn)
-  connection = conn
-  connectionSource = { type: 'password' }
-  const identity = await conn.identity()
-  currentOrgInfo = {
-    instanceUrl: conn.instanceUrl,
-    username: identity.username,
-    orgId: identity.organization_id
-  }
-  return currentOrgInfo
-}
 
 // ── PKCE helpers ──────────────────────────────────────────────────────────────
 
@@ -463,8 +443,8 @@ async function refreshSession(): Promise<void> {
     await connectCliOrg(connectionSource.username)
     return
   }
-  // Password and OAuth connections cannot be refreshed automatically —
-  // the user must reconnect manually.
+  // OAuth connections have jsforce-level auto-refresh via refresh_token.
+  // If we still reach here, the refresh_token itself has expired.
   throw new Error('Session expired. Please reconnect to Salesforce.')
 }
 
@@ -483,6 +463,17 @@ async function withSessionRefresh<T>(fn: () => Promise<T>): Promise<T> {
     await refreshSession()
     return await fn()
   }
+}
+
+/**
+ * Verifies that the current Salesforce session is alive before a job starts.
+ * If the token is expired and the connection type supports refresh (CLI orgs),
+ * the token is renewed automatically.  Throws if the session cannot be recovered.
+ */
+export async function ensureConnected(): Promise<void> {
+  await withSessionRefresh(async () => {
+    await getConnection().identity()
+  })
 }
 
 /**
@@ -817,6 +808,26 @@ export interface ExtractOptions {
 
 export type ProgressCallback = (fetched: number, total: number | null) => void
 
+/**
+ * Race a promise against an AbortSignal.  If the signal fires before the
+ * promise settles, the returned promise rejects with an AbortError immediately,
+ * without waiting for the underlying operation to complete.  This is necessary
+ * because jsforce requests don't natively support AbortSignal.
+ */
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new DOMException('The operation was aborted', 'AbortError'))
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new DOMException('The operation was aborted', 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value) },
+      (err)   => { signal.removeEventListener('abort', onAbort); reject(err) }
+    )
+  })
+}
+
 export async function extractRecords(
   opts: ExtractOptions,
   onProgress: ProgressCallback,
@@ -832,7 +843,7 @@ export async function extractRecords(
   let fetched = 0
   let total: number | null = null
 
-  const result = await conn.query(soql)
+  const result = await raceWithAbort(conn.query(soql), signal)
   total = result.totalSize
   onProgress(0, total)
 
@@ -883,10 +894,13 @@ export async function extractRecords(
 
   let next = result
   while (!next.done && !signal.aborted) {
-    next = await conn.queryMore(next.nextRecordsUrl!)
+    next = await raceWithAbort(conn.queryMore(next.nextRecordsUrl!), signal)
     processRecords(next.records)
   }
 
+  if (signal.aborted) {
+    throw new DOMException('The operation was aborted', 'AbortError')
+  }
   return fetched
 }
 
@@ -933,7 +947,7 @@ export async function extractSoql(
     return flat
   }
 
-  const result = await conn.query(soql)
+  const result = await raceWithAbort(conn.query(soql), signal)
   total = result.totalSize
   onProgress(0, total)
 
@@ -949,10 +963,13 @@ export async function extractSoql(
 
   let next = result
   while (!next.done && !signal.aborted) {
-    next = await conn.queryMore(next.nextRecordsUrl!)
+    next = await raceWithAbort(conn.queryMore(next.nextRecordsUrl!), signal)
     processRecords(next.records)
   }
 
+  if (signal.aborted) {
+    throw new DOMException('The operation was aborted', 'AbortError')
+  }
   return fetched
 }
 

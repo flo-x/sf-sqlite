@@ -841,7 +841,10 @@ async function cancelRun(): Promise<void> {
   }
 
   const runId = activeRuns.value.get(id)
-  if (runId) await window.api.cancelJob(runId)
+  if (runId) {
+    await window.api.cancelJob(runId)
+    jobs.removeJob(runId)   // immediately clear the Pinia store so nav indicator stops
+  }
   activeRuns.value.delete(id)
   // Also clear last-run display so the cancelled state doesn't linger
   lastRunIds.value.delete(id)

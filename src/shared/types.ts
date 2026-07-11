@@ -110,7 +110,7 @@ export interface RunHistoryEntry {
   jobId: number
   startedAt: string
   finishedAt: string | null
-  status: 'running' | 'success' | 'error'
+  status: 'running' | 'success' | 'error' | 'cancelled'
   rowsLoaded: number | null
   durationMs: number | null
   errorMsg: string | null
@@ -147,7 +147,7 @@ export interface WritebackRunEntry {
   jobId: number
   startedAt: string
   finishedAt: string | null
-  status: 'running' | 'success' | 'partial' | 'error'
+  status: 'running' | 'success' | 'partial' | 'error' | 'cancelled'
   rowsSent: number | null
   rowsSucceeded: number | null
   rowsFailed: number | null
@@ -196,7 +196,7 @@ export interface JobProgress {
 export interface JobResult {
   runId: string
   type: 'extract' | 'writeback'
-  status: 'success' | 'partial' | 'error'
+  status: 'success' | 'partial' | 'error' | 'cancelled'
   rowsLoaded?: number
   rowsSucceeded?: number
   rowsFailed?: number
