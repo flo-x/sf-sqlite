@@ -45,13 +45,6 @@
           <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
         </svg>
       </NavButton>
-      <NavButton to="/scripts" tooltip="JS Scripts" :disabled="!conn.dbConnected" :running="scriptRunning">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="3" width="18" height="18" rx="2"/>
-          <path d="M9 9l-3 3 3 3"/><path d="M15 9l3 3-3 3"/>
-          <line x1="12" y1="7" x2="12" y2="17" stroke-dasharray="2 2"/>
-        </svg>
-      </NavButton>
       <NavButton to="/extract" tooltip="SF → SQLite" :disabled="!conn.bothConnected" :running="extractRunning">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
@@ -70,6 +63,13 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
           <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+        </svg>
+      </NavButton>
+      <NavButton to="/scripts" tooltip="JS Scripts" :disabled="!conn.dbConnected" :running="scriptRunning">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <path d="M9 9l-3 3 3 3"/><path d="M15 9l3 3-3 3"/>
+          <line x1="12" y1="7" x2="12" y2="17" stroke-dasharray="2 2"/>
         </svg>
       </NavButton>
       <NavButton to="/connections" tooltip="Connections">
