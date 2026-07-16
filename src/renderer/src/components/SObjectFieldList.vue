@@ -5,6 +5,7 @@
       <input v-model="search" type="text" placeholder="Filter fields…" style="flex:1;" />
       <button class="btn btn-ghost btn-sm" @click="toggleAll(true)">All</button>
       <button class="btn btn-ghost btn-sm" @click="toggleAll(false)">None</button>
+      <button class="btn btn-ghost btn-sm" :class="{ 'sfl-btn-active': systemFieldsActive }" @click="toggleSystemFields">System fields</button>
     </div>
     <div class="sfl-list">
       <label v-for="f in filtered" :key="f.name" class="sfl-item">
@@ -75,8 +76,35 @@ const filtered = computed(() => {
   return q ? props.fields.filter((f) => f.name.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)) : props.fields
 })
 
+const SYSTEM_FIELD_LABELS = new Set([
+  'deleted', 'created date', 'created by id', 'last modified date',
+  'last modified by id', 'system modstamp', 'may edit', 'is locked'
+])
+
+const systemFields = computed(() =>
+  props.fields.filter((f) => SYSTEM_FIELD_LABELS.has(f.label.toLowerCase()))
+)
+
+const systemFieldsActive = computed(() =>
+  systemFields.value.some((f) => selected.value.includes(f.name))
+)
+
 function toggleAll(on: boolean): void {
   selected.value = on ? props.fields.map((f) => f.name) : []
+}
+
+function toggleSystemFields(): void {
+  const sysNames = systemFields.value.map((f) => f.name)
+  if (systemFieldsActive.value) {
+    const remove = new Set(sysNames)
+    selected.value = selected.value.filter((n) => !remove.has(n))
+  } else {
+    const current = new Set(selected.value)
+    for (const name of sysNames) {
+      current.add(name)
+    }
+    selected.value = [...current]
+  }
 }
 
 function addExpr(): void {
@@ -118,6 +146,7 @@ function typeBadgeClass(t: string): string {
 <style scoped>
 .sfl { display: flex; flex-direction: column; gap: 8px; }
 .sfl-toolbar { display: flex; align-items: center; gap: 6px; }
+.sfl-btn-active { background: color-mix(in srgb, var(--primary) 12%, transparent) !important; color: var(--primary) !important; }
 .sfl-list { max-height: 240px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .sfl-item { display: flex; align-items: center; gap: 5px; padding: 2px 8px; cursor: pointer; font-size: 12px; }
 .sfl-item:hover { background: var(--surface2); }

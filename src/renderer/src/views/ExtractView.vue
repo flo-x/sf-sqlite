@@ -980,10 +980,10 @@ const offExternalStarted = window.api.onExternalJobStarted((e) => {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 5px 12px;
+  padding: 3px 12px;
   cursor: pointer;
   border-bottom: 1px solid color-mix(in srgb, #0176d3 25%, var(--border));
-  gap: 1px;
+  gap: 0;
 }
 .job-row { border-left: 3px solid #0176d3; }
 .job-row:hover { background: var(--surface2); }

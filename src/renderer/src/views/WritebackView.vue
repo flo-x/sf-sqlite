@@ -82,7 +82,7 @@
           </div>
           <div class="form-group">
             <label>SQL Query (source data)</label>
-            <textarea v-model="editForm.sqlQuery" rows="5" style="font-family:monospace; font-size:12px;" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
+            <textarea v-model="editForm.sqlQuery" class="sql-query-textarea" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
             <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap:wrap;">
               <button class="btn btn-secondary btn-sm" :disabled="previewLoading" @click="runPreview">
                 <span v-if="previewLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
@@ -254,7 +254,7 @@
           </div>
           <div class="form-group">
             <label>SQL Query (source data)</label>
-            <textarea v-model="editForm.sqlQuery" rows="5" style="font-family:monospace; font-size:12px;" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
+            <textarea v-model="editForm.sqlQuery" class="sql-query-textarea" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
             <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap:wrap;">
               <button class="btn btn-secondary btn-sm" :disabled="previewLoading" @click="runPreview">
                 <span v-if="previewLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
@@ -1928,7 +1928,7 @@ function formatDuration(ms: number | null): string {
 /* Job rows */
 .job-row {
   display: flex; flex-direction: column; justify-content: center;
-  padding: 5px 12px; cursor: pointer; border-bottom: 1px solid color-mix(in srgb, #166534 25%, var(--border)); gap: 1px;
+  padding: 3px 12px; cursor: pointer; border-bottom: 1px solid color-mix(in srgb, #166534 25%, var(--border)); gap: 0;
 }
 .job-row { border-left: 3px solid #166534; }
 .job-row:hover { background: var(--surface2); }
@@ -2202,5 +2202,15 @@ function formatDuration(ms: number | null): string {
   border: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border));
   border-radius: 3px;
   padding: 0 4px;
+}
+
+/* SQL query textarea — expands vertically to fit its content */
+.sql-query-textarea {
+  font-family: monospace;
+  font-size: 12px;
+  field-sizing: content;
+  min-height: 96px;
+  resize: vertical;
+  width: 100%;
 }
 </style>
