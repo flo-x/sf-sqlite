@@ -39,7 +39,7 @@
     <div class="app-body">
     <!-- Sidebar -->
     <nav class="sidebar">
-      <div class="sidebar-logo">SF</div>
+      <img class="sidebar-logo" :src="appLogoUrl" alt="App logo" />
       <NavButton to="/query" tooltip="Query Editor" :disabled="!conn.dbConnected">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
@@ -108,6 +108,7 @@ import { onMounted, ref, computed } from 'vue'
 import { useConnectionStore } from './stores/connection'
 import { useJobStore } from './stores/job'
 import NavButton from './components/NavButton.vue'
+import appLogoUrl from './assets/icon.png'
 
 const conn = useConnectionStore()
 const jobs = useJobStore()
