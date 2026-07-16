@@ -761,42 +761,46 @@ export async function connectCliOrg(username: string): Promise<OrgInfo> {
 }
 
 export async function listObjects(): Promise<SObjectSummary[]> {
-  const conn = getConnection()
-  const result = await conn.describeGlobal()
-  return result.sobjects
-    .filter((o) => o.queryable)
-    .map(
-      (o): SObjectSummary => ({
-        name: o.name,
-        label: o.label,
-        labelPlural: o.labelPlural,
-        queryable: o.queryable,
-        updateable: o.updateable,
-        createable: o.createable,
-        deletable: o.deletable
-      })
-    )
+  return withSessionRefresh(async () => {
+    const conn = getConnection()
+    const result = await conn.describeGlobal()
+    return result.sobjects
+      .filter((o) => o.queryable)
+      .map(
+        (o): SObjectSummary => ({
+          name: o.name,
+          label: o.label,
+          labelPlural: o.labelPlural,
+          queryable: o.queryable,
+          updateable: o.updateable,
+          createable: o.createable,
+          deletable: o.deletable
+        })
+      )
+  })
 }
 
 export async function describeObject(name: string): Promise<FieldDescriptor[]> {
-  const conn = getConnection()
-  const meta = await conn.describe(name)
-  return meta.fields.map(
-    (f: SfField): FieldDescriptor => ({
-      name: f.name,
-      label: f.label,
-      type: f.type,
-      length: f.length,
-      precision: f.precision,
-      scale: f.scale,
-      nillable: f.nillable,
-      createable: f.createable,
-      updateable: f.updateable,
-      externalId: f.externalId,
-      unique: f.unique,
-      idLookup: f.idLookup
-    })
-  )
+  return withSessionRefresh(async () => {
+    const conn = getConnection()
+    const meta = await conn.describe(name)
+    return meta.fields.map(
+      (f: SfField): FieldDescriptor => ({
+        name: f.name,
+        label: f.label,
+        type: f.type,
+        length: f.length,
+        precision: f.precision,
+        scale: f.scale,
+        nillable: f.nillable,
+        createable: f.createable,
+        updateable: f.updateable,
+        externalId: f.externalId,
+        unique: f.unique,
+        idLookup: f.idLookup
+      })
+    )
+  })
 }
 
 export interface ExtractOptions {
