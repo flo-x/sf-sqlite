@@ -16,6 +16,7 @@ import type {
   WritebackRunEntry,
   SavedQuery,
   QueryDraft,
+  ScriptDraft,
   JobProgress,
   JobResult,
   RecentDatabase,
@@ -23,7 +24,8 @@ import type {
   SavedScriptInput,
   ScriptLog,
   ScriptComplete,
-  ScriptProgress
+  ScriptProgress,
+  DatabaseWasteInfo
 } from '../shared/types'
 
 const api = {
@@ -40,6 +42,16 @@ const api = {
   executeQuery: (sql: string): Promise<QueryResult> =>
     ipcRenderer.invoke('db:query', sql),
 
+  // ── Server-side paginated query access ────────────────────────────────────
+  queryInit: (sql: string, pageSize: number): Promise<{ columns: string[]; rows: unknown[][]; totalCount: number; durationMs: number; error?: string }> =>
+    ipcRenderer.invoke('db:query-init', sql, pageSize),
+
+  queryPage: (sql: string, offset: number, limit: number, orderBy?: { column: string; dir: 'asc' | 'desc' }[]): Promise<{ columns: string[]; rows: unknown[][] }> =>
+    ipcRenderer.invoke('db:query-page', sql, offset, limit, orderBy),
+
+  exportQueryCsv: (sql: string): Promise<string | null> =>
+    ipcRenderer.invoke('db:export-query-csv', sql),
+
   exportToCsv: (csvContent: string): Promise<string | null> =>
     ipcRenderer.invoke('db:export-csv', csvContent),
 
@@ -51,6 +63,12 @@ const api = {
 
   dropTable: (name: string): Promise<void> =>
     ipcRenderer.invoke('db:drop-table', name),
+
+  getDatabaseWasteInfo: (): Promise<DatabaseWasteInfo> =>
+    ipcRenderer.invoke('db:waste-info'),
+
+  vacuumDatabase: (): Promise<void> =>
+    ipcRenderer.invoke('db:vacuum'),
 
   csvPickAndPreview: (): Promise<CsvPreview | null> =>
     ipcRenderer.invoke('csv:pick-and-preview'),
@@ -64,6 +82,21 @@ const api = {
   csvImportText: (csvContent: string, tableName: string, ifExists: 'replace' | 'append', separator = ','): Promise<number> =>
     ipcRenderer.invoke('csv:import-text', csvContent, tableName, ifExists, separator),
 
+  csvPickDirect: (): Promise<string | null> =>
+    ipcRenderer.invoke('csv:pick-direct'),
+
+  csvDirectImport: (filePath: string, tableName: string, ifExists: 'replace' | 'append'): Promise<number> =>
+    ipcRenderer.invoke('csv:direct-import', filePath, tableName, ifExists),
+
+  onCsvDirectImportProgress: (cb: (rowsLoaded: number) => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, rowsLoaded: number): void => cb(rowsLoaded)
+    ipcRenderer.on('csv:direct-import:progress', handler)
+    return () => ipcRenderer.removeListener('csv:direct-import:progress', handler)
+  },
+
+  cancelCsvDirectImport: (): Promise<void> =>
+    ipcRenderer.invoke('csv:direct-import:cancel'),
+
   listRecentDatabases: (): Promise<RecentDatabase[]> =>
     ipcRenderer.invoke('db:recent-list'),
 
@@ -74,7 +107,7 @@ const api = {
   listSavedQueries: (): Promise<SavedQuery[]> =>
     ipcRenderer.invoke('query:list'),
 
-  saveQuery: (q: { id?: number; name: string; sqlText: string; tabOrder: number }): Promise<SavedQuery> =>
+  saveQuery: (q: { id?: number; name: string; sqlText: string; tabOrder: number; viewState?: string | null }): Promise<SavedQuery> =>
     ipcRenderer.invoke('query:save', q),
 
   deleteQuery: (id: number): Promise<void> =>
@@ -96,6 +129,16 @@ const api = {
   /** Call after all drafts are saved during before-quit. Triggers the actual app exit. */
   notifyDraftsQuitReady: (): Promise<void> =>
     ipcRenderer.invoke('query:drafts:quit-ready'),
+
+  // ── Script Drafts ─────────────────────────────────────────────────────────────
+  listScriptDrafts: (): Promise<ScriptDraft[]> =>
+    ipcRenderer.invoke('script:drafts:list'),
+
+  upsertScriptDraft: (draft: Omit<ScriptDraft, 'updatedAt'>): Promise<void> =>
+    ipcRenderer.invoke('script:drafts:upsert', draft),
+
+  deleteScriptDraft: (draftKey: string): Promise<void> =>
+    ipcRenderer.invoke('script:drafts:delete', draftKey),
 
   /** Register a one-time listener for the main-process before-quit signal. Returns a cleanup fn. */
   onBeforeQuit: (cb: () => void): (() => void) => {
@@ -192,11 +235,21 @@ const api = {
   wbRowCount: (sql: string): Promise<number> =>
     ipcRenderer.invoke('writeback:row-count', sql),
 
-  wbPage: (sql: string, offset: number, limit: number): Promise<{ columns: string[]; rows: unknown[][] }> =>
-    ipcRenderer.invoke('writeback:page', sql, offset, limit),
+  wbPage: (sql: string, offset: number, limit: number, orderBy?: { column: string; dir: 'asc' | 'desc' }[]): Promise<{ columns: string[]; rows: unknown[][] }> =>
+    ipcRenderer.invoke('writeback:page', sql, offset, limit, orderBy),
 
   wbGetFailedRows: (runId: string): Promise<{ index: number; message: string; row: unknown[] }[]> =>
     ipcRenderer.invoke('writeback:failed-rows', runId),
+
+  // ── Paginated failed-row access ────────────────────────────────────────────
+  wbGetFailedRowsMeta: (runId: string): Promise<{ totalCount: number; distinctErrors: { message: string; count: number }[] }> =>
+    ipcRenderer.invoke('writeback:failed-rows-meta', runId),
+
+  wbGetFailedRowsPage: (runId: string, offset: number, limit: number, errorFilter?: string, sortCriteria?: { colIdx: number; dir: 'asc' | 'desc' }[]): Promise<{ index: number; message: string; row: unknown[] }[]> =>
+    ipcRenderer.invoke('writeback:failed-rows-page', runId, offset, limit, errorFilter, sortCriteria),
+
+  wbGetFailedRowsInRange: (runId: string, fromIndex: number, toIndex: number): Promise<Record<number, { message: string; row: unknown[] }>> =>
+    ipcRenderer.invoke('writeback:failed-rows-in-range', runId, fromIndex, toIndex),
 
   // Returns { [absoluteRowIndex]: sfId } for one page — populated for insert operations only.
   wbGetPageIds: (runId: string, offset: number, limit: number): Promise<Record<number, string>> =>

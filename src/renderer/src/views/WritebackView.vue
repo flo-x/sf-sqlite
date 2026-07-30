@@ -53,8 +53,9 @@
     <!-- Draggable divider -->
     <div class="split-divider" @mousedown.prevent="startDrag"></div>
 
-    <!-- Right panel -->
-    <div class="split-right" style="padding: 0;">
+    <!-- Right panel + schema panel -->
+    <div style="display:flex; flex:1; overflow:hidden; min-width:0;">
+    <div class="split-right" style="padding: 0; flex:1; overflow:hidden; min-width:0;">
 
       <!-- Empty state: nothing selected, not creating -->
       <div v-if="!selectedJobId && !editing" class="empty-state" style="height:100%;">
@@ -116,11 +117,11 @@
           </div>
           <template v-if="sfFields.length">
             <div class="form-group">
-              <FieldMapper v-model="editForm.fieldMap" :sfFields="sfFields" :showKey="['update','upsert'].includes(editForm.operation)" />
+              <FieldMapper v-model="editForm.fieldMap" :sfFields="sfFields" />
             </div>
             <div v-if="editForm.operation === 'upsert'" class="form-group">
               <label>External ID Field (SF)</label>
-              <input v-model="editForm.externalIdField" type="text" placeholder="External_Id__c" />
+              <input v-model="editForm.externalIdField" type="text" placeholder="Id" />
             </div>
           </template>
           <div v-else-if="editForm.sfObject" style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">
@@ -288,11 +289,11 @@
           </div>
           <template v-if="sfFields.length">
             <div class="form-group">
-              <FieldMapper v-model="editForm.fieldMap" :sfFields="sfFields" :showKey="['update','upsert'].includes(editForm.operation)" />
+              <FieldMapper v-model="editForm.fieldMap" :sfFields="sfFields" />
             </div>
             <div v-if="editForm.operation === 'upsert'" class="form-group">
               <label>External ID Field (SF)</label>
-              <input v-model="editForm.externalIdField" type="text" placeholder="External_Id__c" />
+              <input v-model="editForm.externalIdField" type="text" placeholder="Id" />
             </div>
           </template>
           <div v-else-if="editForm.sfObject" style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">
@@ -461,35 +462,30 @@
                 <span style="color: var(--danger);">✗ {{ failedCount.toLocaleString() }} failed</span>
                 <button class="btn btn-ghost btn-sm" style="margin-left: auto;" @click="clearExecState" title="Clear all execution data from memory">Clear</button>
               </div>
-              <div v-if="failedCount > 0 && execFailedRows.length > 0" style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
+              <div v-if="failedCount > 0 && execFailedTotal > 0" style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
                 <div class="failed-rows-header">
                   <span style="font-size:12px; color:var(--text-muted);">Failed records (echoed from Salesforce)</span>
                   <div v-if="distinctErrors.length > 1" class="error-filter-bar">
                     <label class="error-filter-label">Filter by error:</label>
                     <select v-model="failedErrorFilter" class="error-filter-select">
-                      <option value="">All errors ({{ execFailedRows.length.toLocaleString() }})</option>
+                      <option value="">All errors ({{ execFailedTotal.toLocaleString() }})</option>
                       <option v-for="err in distinctErrors" :key="err" :value="err">
                         {{ err.length > 80 ? err.slice(0, 80) + '…' : err }} ({{ errorCounts.get(err) ?? 0 }})
                       </option>
                     </select>
                   </div>
                 </div>
-                <div v-if="filteredFailedRows.length > EXEC_PAGE" class="exec-pager">
-                  <button class="btn btn-ghost btn-sm"
-                    :disabled="execFailedPageOffset === 0"
-                    @click="execFailedPageOffset = Math.max(0, execFailedPageOffset - EXEC_PAGE)">‹ Prev</button>
-                  <span style="font-size:12px;">
-                    {{ execFailedPageOffset + 1 }}–{{ Math.min(execFailedPageOffset + EXEC_PAGE, filteredFailedRows.length) }} / {{ filteredFailedRows.length.toLocaleString() }}
-                  </span>
-                  <button class="btn btn-ghost btn-sm"
-                    :disabled="execFailedPageOffset + EXEC_PAGE >= filteredFailedRows.length"
-                    @click="execFailedPageOffset = execFailedPageOffset + EXEC_PAGE">Next ›</button>
-                </div>
                 <div style="flex:1; overflow:hidden;">
                   <DataGrid
                     :columns="['_Error', ...execDisplayColumns]"
-                    :rows="filteredFailedRows.slice(execFailedPageOffset, execFailedPageOffset + EXEC_PAGE).map((fr) => [fr.message, ...fr.row])"
+                    :rows="execFailedPanelRows.map((fr) => [fr.message, ...fr.row])"
                     :showRowNumbers="true"
+                    :totalRowCount="filteredFailedTotal"
+                    :onPageChange="filteredFailedTotal > EXEC_PAGE ? (off) => loadExecPage(off) : undefined"
+                    :externalOffset="execFailedPageOffset"
+                    :pageSize="EXEC_PAGE"
+                    :onSortChange="filteredFailedTotal > EXEC_PAGE ? handleFailedSortChange : undefined"
+                    :externalSortCriteria="filteredFailedTotal > EXEC_PAGE ? execFailedSort : undefined"
                     :onCopySubsetRows="copyFailedCsv"
                     copySubsetRowsLabel="Copy Failed CSV"
                     :onExportCsv="exportFailed"
@@ -502,7 +498,7 @@
 
           <!-- ── REST Collections API view (existing) ─────────────────────── -->
           <template v-else-if="!thisJobIsQueued">
-            <div v-if="!thisJobIsRunning && !execPageRows.length && !execFailedRows.length && !execError" class="empty-state" style="padding: 32px 16px;">
+            <div v-if="!thisJobIsRunning && !execPageRows.length && !execFailedTotal && !execError" class="empty-state" style="padding: 32px 16px;">
               No execution data yet — click ▶ Execute to run this job.
             </div>
             <template v-else>
@@ -560,47 +556,35 @@
                 <div class="error-filter-bar">
                   <label class="error-filter-label">Filter by error:</label>
                   <select v-model="failedErrorFilter" class="error-filter-select">
-                    <option value="">All errors ({{ execFailedRows.length.toLocaleString() }})</option>
+                    <option value="">All errors ({{ execFailedTotal.toLocaleString() }})</option>
                     <option v-for="err in distinctErrors" :key="err" :value="err">
                       {{ err.length > 80 ? err.slice(0, 80) + '…' : err }} ({{ errorCounts.get(err) ?? 0 }})
                     </option>
                   </select>
                 </div>
               </div>
-              <!-- Page navigation -->
-              <div class="exec-pager" v-if="showOnlyFailed ? filteredFailedRows.length > EXEC_PAGE : execTotalRows > EXEC_PAGE">
-                <button class="btn btn-ghost btn-sm"
-                  :disabled="(showOnlyFailed ? execFailedPageOffset : execPageOffset) === 0"
-                  @click="loadExecPage(Math.max(0, (showOnlyFailed ? execFailedPageOffset : execPageOffset) - EXEC_PAGE))">
-                  ‹ Prev
-                </button>
-                <span style="font-size:12px;">
-                  {{ (showOnlyFailed ? execFailedPageOffset : execPageOffset) + 1 }}–{{
-                    showOnlyFailed
-                      ? Math.min(execFailedPageOffset + EXEC_PAGE, filteredFailedRows.length)
-                      : Math.min(execPageOffset + EXEC_PAGE, execTotalRows)
-                  }} /
-                  {{ showOnlyFailed ? filteredFailedRows.length.toLocaleString() : execTotalRows.toLocaleString() }}
-                </span>
-                <button class="btn btn-ghost btn-sm"
-                  :disabled="showOnlyFailed
-                    ? execFailedPageOffset + EXEC_PAGE >= filteredFailedRows.length
-                    : execPageOffset + EXEC_PAGE >= execTotalRows"
-                  @click="loadExecPage((showOnlyFailed ? execFailedPageOffset : execPageOffset) + EXEC_PAGE)">
-                  Next ›
-                </button>
-              </div>
               <div style="flex: 1; overflow: hidden;">
                 <DataGrid
                   :columns="execVisibleCols"
                   :rows="visibleExecRows"
                   :showRowNumbers="true"
+                  :totalRowCount="showOnlyFailed && execJobDone ? filteredFailedTotal : execTotalRows"
+                  :onPageChange="(showOnlyFailed ? filteredFailedTotal : execTotalRows) > EXEC_PAGE
+                    ? (off) => loadExecPage(off)
+                    : undefined"
+                  :externalOffset="showOnlyFailed ? execFailedPageOffset : execPageOffset"
+                  :pageSize="EXEC_PAGE"
+                  :onSortChange="!showOnlyFailed && execTotalRows > EXEC_PAGE ? handleExecSortChange
+                    : showOnlyFailed && filteredFailedTotal > EXEC_PAGE ? handleFailedSortChange
+                    : undefined"
+                  :externalSortCriteria="!showOnlyFailed && execTotalRows > EXEC_PAGE ? execSort
+                    : showOnlyFailed && filteredFailedTotal > EXEC_PAGE ? execFailedSort
+                    : undefined"
                   :onCopySubsetRows="failedCount > 0 && !thisJobIsRunning ? copyFailedCsv : undefined"
                   copySubsetRowsLabel="Copy Failed CSV"
                   :onExportCsv="failedCount > 0 && !thisJobIsRunning ? exportFailed : undefined"
                   exportCsvLabel="Export Failed CSV"
                   :onCopyAllRows="copyAllExecRows"
-                  :totalRowCount="showOnlyFailed && execJobDone ? filteredFailedRows.length : execTotalRows"
                 />
               </div>
             </template>
@@ -608,7 +592,37 @@
 
         </div>
       </div>
+    </div><!-- /.split-right -->
+
+    <!-- Schema panel -->
+    <div class="wb-schema-panel" ref="schemaPanel">
+      <div class="schema-resize-handle" @mousedown="startSchemaResize"></div>
+      <div class="schema-tabs">
+        <button
+          class="schema-tab"
+          :class="{ active: schemaTab === 'sqlite' }"
+          @click="schemaTab = 'sqlite'"
+        >SQLite</button>
+        <button
+          class="schema-tab"
+          :class="{ active: schemaTab === 'sf' }"
+          @click="schemaTab = 'sf'"
+        >Salesforce</button>
+      </div>
+      <SchemaBrowser
+        v-show="schemaTab === 'sqlite'"
+        :tables="conn.dbTables"
+        @insert="() => {}"
+        @openExplorer="() => $router.push('/explorer')"
+      />
+      <SFSchemaBrowser
+        v-show="schemaTab === 'sf'"
+        :objects="conn.sfObjects"
+        @insert="() => {}"
+      />
     </div>
+
+    </div><!-- /.split-right + schema wrapper -->
   </div>
 
   <div v-else class="empty-state" style="height:100%;">
@@ -740,7 +754,9 @@ import { useJobStore } from '../stores/job'
 import ObjectPicker from '../components/ObjectPicker.vue'
 import FieldMapper from '../components/FieldMapper.vue'
 import DataGrid from '../components/DataGrid.vue'
-import type { WritebackJob, WritebackRunEntry, FieldDescriptor, FieldMapping } from '../../../shared/types'
+import SchemaBrowser from '../components/SchemaBrowser.vue'
+import SFSchemaBrowser from '../components/SFSchemaBrowser.vue'
+import type { WritebackJob, WritebackRunEntry, FieldDescriptor, FieldMapping, SortCriterion } from '../../../shared/types'
 
 const conn = useConnectionStore()
 const jobs = useJobStore()
@@ -754,6 +770,27 @@ async function refreshObjects(): Promise<void> {
 const SPLIT_KEY = 'writeback-split-pct'
 const splitPct = ref<number>(Number(localStorage.getItem(SPLIT_KEY)) || 50)
 const splitContainer = ref<HTMLElement | null>(null)
+
+// ── Schema panel ──────────────────────────────────────────────────────────────
+const schemaPanel = ref<HTMLElement | null>(null)
+const schemaTab = ref<'sqlite' | 'sf'>('sqlite')
+
+function startSchemaResize(e: MouseEvent): void {
+  let resizing = true
+  const startX = e.clientX
+  const startW = schemaPanel.value?.offsetWidth ?? 220
+  const onMove = (ev: MouseEvent): void => {
+    if (!resizing || !schemaPanel.value) return
+    schemaPanel.value.style.width = Math.max(120, startW - (ev.clientX - startX)) + 'px'
+  }
+  const onUp = (): void => {
+    resizing = false
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
 
 function startDrag(e: MouseEvent): void {
   const container = splitContainer.value
@@ -793,7 +830,7 @@ const execFilterError   = ref(true)
 const execFilterPending = ref(true)
 // True when all three individual filters are on (= "show everything").
 const allFiltersOn = computed(() => execFilterSuccess.value && execFilterError.value && execFilterPending.value)
-// Convenience: true when ONLY the error filter is on (uses the full execFailedRows dataset).
+// Convenience: true when ONLY the error filter is on (failed-panel shows filtered view).
 const showOnlyFailed = computed(() => !execFilterSuccess.value && execFilterError.value && !execFilterPending.value)
 const operations = ['insert', 'update', 'upsert', 'delete', 'undelete']
 
@@ -876,10 +913,13 @@ interface SavedExecState {
   pageRows: unknown[][]
   pageStatuses: Map<number, { status: 'success' | 'error'; message?: string }>
   pageIds: Map<number, string>
-  failedRows: ExecFailedRow[]
+  failedTotal: number
+  distinctErrors: { message: string; count: number }[]
   filterSuccess: boolean
   filterError: boolean
   filterPending: boolean
+  execSort: SortCriterion[]
+  execFailedSort: SortCriterion[]
 }
 
 const execStateCache = ref<Map<number, SavedExecState>>(new Map())
@@ -903,14 +943,17 @@ function captureExecState(jobId: number, force = false): void {
     pageRows: execPageRows.value.slice(),
     pageStatuses: new Map(execPageStatuses.value),
     pageIds: new Map(execPageIds.value),
-    failedRows: execFailedRows.value.slice(),
+    failedTotal: execFailedTotal.value,
+    distinctErrors: execFailedDistinctErrors.value.slice(),
     filterSuccess: execFilterSuccess.value,
     filterError: execFilterError.value,
-    filterPending: execFilterPending.value
+    filterPending: execFilterPending.value,
+    execSort: execSort.value.slice(),
+    execFailedSort: execFailedSort.value.slice()
   })
 }
 
-function restoreExecState(jobId: number): void {
+async function restoreExecState(jobId: number): Promise<void> {
   const s = execStateCache.value.get(jobId)
   if (!s) { clearExecState(); return }
   s.cachedAt = Date.now()  // refresh LRU
@@ -929,7 +972,8 @@ function restoreExecState(jobId: number): void {
   execPageRows.value = s.pageRows
   execPageStatuses.value = s.pageStatuses
   execPageIds.value = s.pageIds
-  execFailedRows.value = s.failedRows
+  execFailedTotal.value = s.failedTotal
+  execFailedDistinctErrors.value = s.distinctErrors
   execFilterSuccess.value = s.filterSuccess
   execFilterError.value   = s.filterError
   execFilterPending.value = s.filterPending
@@ -942,6 +986,21 @@ function restoreExecState(jobId: number): void {
   execPageOffset.value = 0
   execFailedPageOffset.value = 0
   failedErrorFilter.value = ''
+  execFailedPanelRows.value = []
+  execFailedRangeMap.value = new Map()
+  execSort.value = s.execSort ?? []
+  execFailedSort.value = s.execFailedSort ?? []
+  // If the job is done and has failures, load the first page and populate the range map
+  if (s.jobDone && s.failedTotal > 0 && s.runId) {
+    const [panelRows, rangeEntries] = await Promise.all([
+      window.api.wbGetFailedRowsPage(s.runId, 0, EXEC_PAGE),
+      window.api.wbGetFailedRowsInRange(s.runId, 0, EXEC_PAGE)
+    ])
+    execFailedPanelRows.value = panelRows
+    execFailedRangeMap.value = new Map(
+      Object.entries(rangeEntries).map(([k, v]) => [Number(k), { index: Number(k), ...v }])
+    )
+  }
 }
 
 function evictOldExecStates(keepJobId: number): void {
@@ -985,50 +1044,53 @@ const execPageStatuses = ref<Map<number, { status: 'success' | 'error'; message?
 const execPageIds = ref<Map<number, string>>(new Map())
 
 interface ExecFailedRow { index: number; message: string; row: unknown[] }
-const execFailedRows = ref<ExecFailedRow[]>([])
+
+// Total count of failed rows (matches execFailed once the job is done).
+const execFailedTotal = ref(0)
+// Distinct error messages + per-message counts (for the filter dropdown).
+const execFailedDistinctErrors = ref<{ message: string; count: number }[]>([])
+// Current page of the "failed rows only" panel.
+const execFailedPanelRows = ref<ExecFailedRow[]>([])
+// Map of absolute row index → failed row for the currently visible exec page (all-rows view).
+const execFailedRangeMap = ref<Map<number, ExecFailedRow>>(new Map())
+
 const execFailedPageOffset = ref(0)
 const failedErrorFilter = ref('')
+/** Server-side sort for the exec all-rows panel (SQL data columns only). */
+const execSort = ref<SortCriterion[]>([])
+/** Server-side sort for the exec failed-rows panel (col 0 = error, col 1+ = data). */
+const execFailedSort = ref<SortCriterion[]>([])
 
-// Up to 100 distinct error messages from the failed rows list.
-const distinctErrors = computed((): string[] => {
-  const seen = new Set<string>()
-  const result: string[] = []
-  for (const fr of execFailedRows.value) {
-    if (!seen.has(fr.message)) {
-      seen.add(fr.message)
-      result.push(fr.message)
-      if (result.length >= 100) break
-    }
-  }
-  return result
-})
-
-// Count of rows per distinct error message.
-const errorCounts = computed((): Map<string, number> => {
-  const counts = new Map<string, number>()
-  for (const fr of execFailedRows.value) {
-    counts.set(fr.message, (counts.get(fr.message) ?? 0) + 1)
-  }
-  return counts
-})
-
-// Failed rows after applying the error-message filter (all rows if no filter).
-const filteredFailedRows = computed((): ExecFailedRow[] =>
-  failedErrorFilter.value
-    ? execFailedRows.value.filter((fr) => fr.message === failedErrorFilter.value)
-    : execFailedRows.value
+// Up to 100 distinct error messages derived from the server-side meta.
+const distinctErrors = computed((): string[] =>
+  execFailedDistinctErrors.value.map((e) => e.message).slice(0, 100)
 )
 
-// Reset page when any filter changes.
-watch(failedErrorFilter, () => { execFailedPageOffset.value = 0 })
+// Count of rows per distinct error message.
+const errorCounts = computed((): Map<string, number> =>
+  new Map(execFailedDistinctErrors.value.map((e) => [e.message, e.count]))
+)
+
+// Total count for the currently active filter (used for pagination).
+const filteredFailedTotal = computed((): number => {
+  if (!failedErrorFilter.value) return execFailedTotal.value
+  return execFailedDistinctErrors.value.find((e) => e.message === failedErrorFilter.value)?.count ?? 0
+})
+
+// Reset page and re-fetch when the error filter changes.
+watch(failedErrorFilter, async () => {
+  execFailedPageOffset.value = 0
+  if (execRunId.value && execJobDone.value) {
+    execFailedPanelRows.value = await window.api.wbGetFailedRowsPage(
+      execRunId.value, 0, EXEC_PAGE, failedErrorFilter.value || undefined,
+      execFailedSort.value.length ? execFailedSort.value : undefined
+    )
+  }
+})
 watch([execFilterSuccess, execFilterError, execFilterPending], () => {
   execPageOffset.value = 0
   execFailedPageOffset.value = 0
 })
-
-const execFailedMap = computed(() =>
-  new Map(execFailedRows.value.map((fr) => [fr.index, fr]))
-)
 
 const totalRows = computed(() => execTotalRows.value)
 const succeededCount = computed(() => execSucceeded.value)
@@ -1041,25 +1103,26 @@ const isInsert = computed(() => execOperation.value === 'insert')
 
 const visibleExecRows = computed(() => {
   if (showOnlyFailed.value && execJobDone.value) {
-    return filteredFailedRows.value
-      .slice(execFailedPageOffset.value, execFailedPageOffset.value + EXEC_PAGE)
-      .map((fr) => isInsert.value
-        ? ['', `✗ ${fr.message}`, ...fr.row]
-        : [`✗ ${fr.message}`, ...fr.row]
-      )
+    // execFailedPanelRows already holds the current page — no slicing needed.
+    return execFailedPanelRows.value.map((fr) => isInsert.value
+      ? ['', `✗ ${fr.message}`, ...fr.row]
+      : [`✗ ${fr.message}`, ...fr.row]
+    )
   }
   const allRows = execPageRows.value.map((r, pageIdx) => {
     const absIdx = execPageOffset.value + pageIdx
     let statusCell: string
     let idCell = execPageIds.value.get(absIdx) ?? ''
     if (execJobDone.value) {
-      const failed = execFailedMap.value.get(absIdx)
+      const failed = execFailedRangeMap.value.get(absIdx)
       if (absIdx >= execTotalRows.value) {
         statusCell = '—'   // never reached (job cancelled / aborted before this row)
       } else {
         statusCell = failed ? `✗ ${failed.message}` : '✓'
       }
-      if (failed) idCell = ''
+      if (failed) {
+        idCell = ''
+      }
     } else {
       const st = execPageStatuses.value.get(absIdx)
       statusCell = st ? (st.status === 'success' ? '✓' : `✗ ${st.message ?? ''}`) : '—'
@@ -1119,7 +1182,7 @@ interface EditForm {
 
 const editForm = ref<EditForm>({
   name: '', sqlQuery: '', sfObject: '', operation: 'insert', fieldMap: [],
-  externalIdField: '', batchSize: null, threads: null, distributionKey: null,
+  externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null,
   useBulkApi: false, customHeaders: ''
 })
 
@@ -1137,7 +1200,7 @@ function applyPendingSql(): void {
     sfFields.value = []
     editForm.value = {
       name: '', sqlQuery: sql, sfObject: '', operation: 'insert', fieldMap: [],
-      externalIdField: '', batchSize: null, threads: null, distributionKey: null,
+      externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null,
       useBulkApi: false, customHeaders: ''
     }
   }
@@ -1234,7 +1297,7 @@ function loadJobIntoForm(j: WritebackJob): void {
   editForm.value = {
     id: j.id, name: j.name, sqlQuery: j.sqlQuery, sfObject: j.sfObject,
     operation: j.operation, fieldMap: [...j.fieldMap.map((m) => ({ ...m }))],
-    externalIdField: j.externalIdField ?? '', batchSize: j.batchSize, threads: j.threads,
+    externalIdField: j.externalIdField || 'Id', batchSize: j.batchSize, threads: j.threads,
     distributionKey: j.distributionKey ? [...j.distributionKey] : null,
     useBulkApi: j.useBulkApi,
     customHeaders: j.customHeaders ?? ''
@@ -1267,7 +1330,7 @@ async function selectJob(id: number): Promise<void> {
   selectedJobId.value = id
   editing.value = false
   activeTab.value = 'definition'
-  restoreExecState(id)
+  await restoreExecState(id)
   const j = allJobs.value.find((x) => x.id === id)
   if (j) {
     loadJobIntoForm(j)
@@ -1284,7 +1347,7 @@ function newJob(): void {
   sfFields.value = []
   editForm.value = {
     name: '', sqlQuery: '', sfObject: '', operation: 'insert', fieldMap: [],
-    externalIdField: '', batchSize: null, threads: null, distributionKey: null,
+    externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null,
     useBulkApi: false, customHeaders: ''
   }
 }
@@ -1348,7 +1411,7 @@ function initFieldMap(): void {
       return { ...prev, sqlCol: col }
     }
     const match = sfFields.value.find((f) => f.name.toLowerCase() === col.toLowerCase())
-    return { sqlCol: col, sfField: match?.name ?? '', isKey: false, excluded: !match }
+    return { sqlCol: col, sfField: match?.name ?? '', excluded: !match }
   })
   // Drop any distribution key columns that no longer exist in the new field map.
   if (editForm.value.distributionKey?.length) {
@@ -1505,10 +1568,15 @@ function clearExecState(): void {
   execPageRows.value = []
   execPageStatuses.value = new Map()
   execPageIds.value = new Map()
-  execFailedRows.value = []
+  execFailedTotal.value = 0
+  execFailedDistinctErrors.value = []
+  execFailedPanelRows.value = []
+  execFailedRangeMap.value = new Map()
   execFailedPageOffset.value = 0
   failedErrorFilter.value = ''
   execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
+  execSort.value = []
+  execFailedSort.value = []
 }
 
 async function save(andExecute: boolean): Promise<void> {
@@ -1605,10 +1673,15 @@ async function _startJobNow(id: number): Promise<void> {
     execPageRows.value = []
     execPageStatuses.value = new Map()
     execPageIds.value = new Map()
-    execFailedRows.value = []
+    execFailedTotal.value = 0
+    execFailedDistinctErrors.value = []
+    execFailedPanelRows.value = []
+    execFailedRangeMap.value = new Map()
     execFailedPageOffset.value = 0
     execJobDone.value = false
     execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
+    execSort.value = []
+    execFailedSort.value = []
 
     // Fetch source row count in background — does not block job start
     window.api.wbRowCount(sql).then((count) => {
@@ -1698,6 +1771,7 @@ function startRunMonitor(jobId: number, runId: string): void {
         execError.value = e.errorMsg ?? 'The job failed with an unknown error.'
       } else {
         execError.value = null
+        execWarn.value = null
         if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined) {
           execTotalRows.value = e.rowsSucceeded + e.rowsFailed
           execSucceeded.value = e.rowsSucceeded
@@ -1711,7 +1785,17 @@ function startRunMonitor(jobId: number, runId: string): void {
       }
       if (e.columns && e.columns.length > 0) { execColumns.value = e.columns }
       if (e.rowsFailed && e.rowsFailed > 0) {
-        execFailedRows.value = await window.api.wbGetFailedRows(runId)
+        const [meta, panelRows, rangeEntries] = await Promise.all([
+          window.api.wbGetFailedRowsMeta(runId),
+          window.api.wbGetFailedRowsPage(runId, 0, EXEC_PAGE),
+          window.api.wbGetFailedRowsInRange(runId, execPageOffset.value, execPageOffset.value + EXEC_PAGE)
+        ])
+        execFailedTotal.value = meta.totalCount
+        execFailedDistinctErrors.value = meta.distinctErrors
+        execFailedPanelRows.value = panelRows
+        execFailedRangeMap.value = new Map(
+          Object.entries(rangeEntries).map(([k, v]) => [Number(k), { index: Number(k), ...v }])
+        )
       }
       captureExecState(jobId)
     } else {
@@ -1720,14 +1804,22 @@ function startRunMonitor(jobId: number, runId: string): void {
       if (cached) {
         cached.jobDone = true
         cached.error = (e.status === 'error') ? (e.errorMsg ?? 'Unknown error') : null
-        if (e.status === 'cancelled') cached.warn = 'Job was cancelled by the user.'
+        if (e.status === 'cancelled') {
+          cached.warn = 'Job was cancelled by the user.'
+        } else if (e.status !== 'error') {
+          cached.warn = null   // clear any stale cancel warning from a prior run
+        }
         if (e.rowsSucceeded !== undefined) cached.succeeded = e.rowsSucceeded
         if (e.rowsFailed !== undefined) cached.failed = e.rowsFailed
-        if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined)
+        if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined) {
           cached.totalRows = e.rowsSucceeded + e.rowsFailed
+        }
         if (e.columns && e.columns.length > 0) cached.columns = e.columns
         if (e.rowsFailed && e.rowsFailed > 0) {
-          window.api.wbGetFailedRows(runId).then((rows) => { cached.failedRows = rows })
+          window.api.wbGetFailedRowsMeta(runId).then((meta) => {
+            cached.failedTotal = meta.totalCount
+            cached.distinctErrors = meta.distinctErrors
+          })
         }
         cached.cachedAt = Date.now()
       }
@@ -1771,13 +1863,61 @@ async function loadExecPage(offset: number): Promise<void> {
   execPageIds.value = new Map()
   if (showOnlyFailed.value) {
     execFailedPageOffset.value = offset
+    if (execRunId.value) {
+      execFailedPanelRows.value = await window.api.wbGetFailedRowsPage(
+        execRunId.value, offset, EXEC_PAGE, failedErrorFilter.value || undefined,
+        execFailedSort.value.length ? execFailedSort.value : undefined
+      )
+    }
     return
   }
-  const { rows } = await window.api.wbPage(execSql.value, offset, EXEC_PAGE)
+  const sortOrderBy = execSortToOrderBy()
+  const { rows } = await window.api.wbPage(execSql.value, offset, EXEC_PAGE, sortOrderBy)
   execPageRows.value = rows
-  if (execJobDone.value && isInsert.value && execRunId.value) {
-    const ids = await window.api.wbGetPageIds(execRunId.value, offset, EXEC_PAGE)
-    execPageIds.value = new Map(Object.entries(ids).map(([k, v]) => [Number(k), v]))
+  if (execJobDone.value && execRunId.value) {
+    const [rangeEntries, ids] = await Promise.all([
+      window.api.wbGetFailedRowsInRange(execRunId.value, offset, offset + EXEC_PAGE),
+      isInsert.value ? window.api.wbGetPageIds(execRunId.value, offset, EXEC_PAGE) : Promise.resolve({} as Record<number, string>)
+    ])
+    execFailedRangeMap.value = new Map(
+      Object.entries(rangeEntries).map(([k, v]) => [Number(k), { index: Number(k), ...v }])
+    )
+    if (isInsert.value) {
+      execPageIds.value = new Map(Object.entries(ids).map(([k, v]) => [Number(k), v]))
+    }
+  }
+}
+
+/**
+ * Converts `execSort` criteria (which reference `execVisibleCols` indices)
+ * to an ORDER BY list for `wbPage`.
+ * Skips synthetic columns (_Status at index 0 for non-insert, _Id+_Status at 0/1 for insert).
+ */
+function execSortToOrderBy(): { column: string; dir: 'asc' | 'desc' }[] | undefined {
+  if (!execSort.value.length) return undefined
+  const syntheticCount = isInsert.value ? 2 : 1  // _Status or [_Id, _Status]
+  const result = execSort.value
+    .filter((c) => c.colIdx >= syntheticCount)
+    .map((c) => ({
+      column: execColumns.value[c.colIdx - syntheticCount],
+      dir: c.dir
+    }))
+  return result.length ? result : undefined
+}
+
+async function handleExecSortChange(criteria: SortCriterion[]): Promise<void> {
+  execSort.value = criteria
+  await loadExecPage(0)
+}
+
+async function handleFailedSortChange(criteria: SortCriterion[]): Promise<void> {
+  execFailedSort.value = criteria
+  execFailedPageOffset.value = 0
+  if (execRunId.value) {
+    execFailedPanelRows.value = await window.api.wbGetFailedRowsPage(
+      execRunId.value, 0, EXEC_PAGE, failedErrorFilter.value || undefined,
+      criteria.length ? criteria : undefined
+    )
   }
 }
 
@@ -1794,11 +1934,19 @@ async function copyAllExecRows(): Promise<void> {
   const lines: string[] = [cols.map(csvEscape).join(',')]
 
   if (showOnlyFailed.value && execJobDone.value) {
-    for (const fr of filteredFailedRows.value) {
-      const row: unknown[] = isInsert.value
-        ? ['', `✗ ${fr.message}`, ...fr.row]
-        : [`✗ ${fr.message}`, ...fr.row]
-      lines.push(row.map(csvEscape).join(','))
+    if (execRunId.value) {
+      const total = filteredFailedTotal.value
+      for (let offset = 0; offset < total; offset += EXEC_PAGE) {
+        const page = await window.api.wbGetFailedRowsPage(
+          execRunId.value, offset, EXEC_PAGE, failedErrorFilter.value || undefined
+        )
+        for (const fr of page) {
+          const row: unknown[] = isInsert.value
+            ? ['', `✗ ${fr.message}`, ...fr.row]
+            : [`✗ ${fr.message}`, ...fr.row]
+          lines.push(row.map(csvEscape).join(','))
+        }
+      }
     }
   } else {
     const total = execTotalRows.value
@@ -1808,9 +1956,13 @@ async function copyAllExecRows(): Promise<void> {
       if (isInsert.value && execRunId.value) {
         ids = await window.api.wbGetPageIds(execRunId.value, offset, EXEC_PAGE)
       }
+      let failures: Record<number, { message: string; row: unknown[] }> = {}
+      if (execJobDone.value && execRunId.value) {
+        failures = await window.api.wbGetFailedRowsInRange(execRunId.value, offset, offset + EXEC_PAGE)
+      }
       for (let i = 0; i < rows.length; i++) {
         const absIdx = offset + i
-        const failed = execFailedMap.value.get(absIdx)
+        const failed = failures[absIdx]
         const statusCell = failed ? `✗ ${failed.message}` : '✓'
         const idCell = failed ? '' : (ids[absIdx] ?? '')
         const rawRow = rows[i] as unknown[]
@@ -1828,14 +1980,17 @@ async function copyAllExecRows(): Promise<void> {
 async function retryFailed(): Promise<void> {
   if (!selectedJobId.value || !execRunId.value) return
 
-  execTotalRows.value = execFailedRows.value.length
+  execTotalRows.value = execFailed.value   // use the already-known failed count
   execPageOffset.value = 0
-  execPageRows.value = execFailedRows.value.slice(0, EXEC_PAGE).map((fr) => fr.row)
+  execPageRows.value = execFailedPanelRows.value.slice(0, EXEC_PAGE).map((fr) => fr.row)
   execPageStatuses.value = new Map()
   execPageIds.value = new Map()
   execSucceeded.value = 0
   execFailed.value = 0
-  execFailedRows.value = []
+  execFailedTotal.value = 0
+  execFailedDistinctErrors.value = []
+  execFailedPanelRows.value = []
+  execFailedRangeMap.value = new Map()
   execJobDone.value = false
   execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
 
@@ -1847,7 +2002,11 @@ async function retryFailed(): Promise<void> {
   startRunMonitor(id, newRunId)
 }
 
-function buildFailedCsv(): string {
+async function buildFailedCsv(): Promise<string> {
+  if (!execRunId.value) return ''
+  const runId = execRunId.value
+  const filter = failedErrorFilter.value || undefined
+  const total = filteredFailedTotal.value
   const columns = ['_ErrorMessage', ...execDisplayColumns.value]
   const csvEscape = (v: unknown): string => {
     if (v === null || v === undefined) return ''
@@ -1856,18 +2015,22 @@ function buildFailedCsv(): string {
       ? '"' + s.replace(/"/g, '""') + '"'
       : s
   }
-  const rows = execFailedRows.value.map((fr) =>
-    [fr.message, ...fr.row].map(csvEscape).join(',')
-  )
-  return [columns.map(csvEscape).join(','), ...rows].join('\n')
+  const lines = [columns.map(csvEscape).join(',')]
+  for (let offset = 0; offset < total; offset += EXEC_PAGE) {
+    const page = await window.api.wbGetFailedRowsPage(runId, offset, EXEC_PAGE, filter)
+    for (const fr of page) {
+      lines.push([fr.message, ...fr.row].map(csvEscape).join(','))
+    }
+  }
+  return lines.join('\n')
 }
 
 async function copyFailedCsv(): Promise<void> {
-  await navigator.clipboard.writeText(buildFailedCsv())
+  await navigator.clipboard.writeText(await buildFailedCsv())
 }
 
 async function exportFailed(): Promise<void> {
-  await window.api.exportToCsv(buildFailedCsv())
+  await window.api.exportToCsv(await buildFailedCsv())
 }
 
 async function duplicateSelectedJob(): Promise<void> {
@@ -1914,6 +2077,16 @@ function formatDuration(ms: number | null): string {
 /* Resizable split */
 .split-left { flex-shrink: 0; flex-grow: 0; min-width: 0; overflow-y: auto; }
 .split-right { flex: 1; overflow: hidden; min-width: 0; }
+
+/* Schema panel (same as QueryView) */
+.wb-schema-panel { width: 220px; flex-shrink: 0; border-left: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; position: relative; overflow: hidden; }
+.schema-resize-handle { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; cursor: col-resize; z-index: 10; background: transparent; }
+.schema-resize-handle::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 3px; height: 48px; border-radius: 99px; background: var(--border); transition: background 0.15s, height 0.15s; }
+.schema-resize-handle:hover::after, .schema-resize-handle:active::after { background: var(--primary); height: 64px; }
+.schema-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.schema-tab { flex: 1; padding: 6px 4px; font-size: 12px; font-weight: 500; background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; color: var(--text-muted); transition: color 0.15s; }
+.schema-tab:hover { color: var(--text); }
+.schema-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
 .split-divider {
   width: 5px; flex-shrink: 0; cursor: col-resize; position: relative; z-index: 1; background: transparent;
 }

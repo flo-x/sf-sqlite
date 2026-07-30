@@ -78,7 +78,7 @@
           @click="sendToExtract"
         >⬇ Download</button>
         <div class="toolbar-right">
-          <span v-if="activeTab.result" style="font-size:12px; color:var(--text-muted);">{{ activeTab.result.rows.length }} rows · {{ activeTab.result.durationMs }}ms</span>
+          <span v-if="activeTab.result" style="font-size:12px; color:var(--text-muted);">{{ activeTab.result.totalCount.toLocaleString() }} rows · {{ activeTab.result.durationMs }}ms</span>
           <button
             class="btn btn-secondary btn-sm ai-toggle-btn"
             :class="{ active: aiDrawerOpen }"
@@ -111,7 +111,13 @@
           :rows="activeTab.result.rows"
           :durationMs="activeTab.result.durationMs"
           :showRowNumbers="true"
+          :totalRowCount="activeTab.result.totalCount"
+          :onPageChange="activeTab.result.sql ? navigateResultPage : undefined"
+          :externalOffset="activeTab.result.offset"
+          :pageSize="QUERY_PAGE_SIZE"
           :onExportCsv="exportCsv"
+          :onSortChange="activeTab.result.sql ? handleSortChange : undefined"
+          :externalSortCriteria="activeTab.result.sql ? activeTab.sortCriteria : undefined"
           style="height: 100%;"
         />
       </div>
@@ -219,7 +225,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onActivated, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onActivated, onDeactivated, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import * as monaco from 'monaco-editor'
 import { EDITOR_BASE_OPTIONS } from '../utils/monaco'
@@ -231,7 +237,9 @@ import DataGrid from '../components/DataGrid.vue'
 import SchemaBrowser from '../components/SchemaBrowser.vue'
 import SFSchemaBrowser from '../components/SFSchemaBrowser.vue'
 import AiChatPanel from '../components/AiChatPanel.vue'
-import type { JobResult, SavedQuery, QueryDraft } from '../../../shared/types'
+import type { JobResult, SavedQuery, QueryDraft, PagedQueryResult, SortCriterion } from '../../../shared/types'
+
+const QUERY_PAGE_SIZE = 100000
 
 const conn = useConnectionStore()
 const queryStore = useQueryStore()
@@ -240,6 +248,7 @@ const monacoContainer = ref<HTMLElement | null>(null)
 const editorArea = ref<HTMLElement | null>(null)
 const schemaPanel = ref<HTMLElement | null>(null)
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
+const tabViewStates = new Map<string, monaco.editor.ICodeEditorViewState>()
 
 const executingMode = ref<'sqlite' | 'soql'>('sqlite')
 const schemaTab = ref<'sqlite' | 'sf'>('sqlite')
@@ -370,13 +379,22 @@ let idleDraftTimer: ReturnType<typeof setTimeout> | null = null
 let cleanupBeforeQuit: (() => void) | null = null
 
 async function saveDraftAllTabs(): Promise<void> {
+  // Ensure the active tab's current view state is captured before iterating
+  if (editor && queryStore.activeTabKey) {
+    const vs = editor.saveViewState()
+    if (vs) {
+      tabViewStates.set(queryStore.activeTabKey, vs)
+    }
+  }
   for (const [i, tab] of queryStore.tabs.entries()) {
+    const vs = tabViewStates.get(tab.key)
     await window.api.upsertQueryDraft({
       tabKey: tab.key,
       savedId: tab.savedId,
       name: tab.name,
       sqlText: tab.sqlText,
-      tabOrder: i
+      tabOrder: i,
+      viewState: vs ? JSON.stringify(vs) : null
     } satisfies Omit<QueryDraft, 'updatedAt'>)
   }
 }
@@ -414,14 +432,40 @@ onMounted(async () => {
   initEditor()
 })
 
+onDeactivated(() => {
+  if (editor && queryStore.activeTabKey) {
+    const vs = editor.saveViewState()
+    if (vs) {
+      tabViewStates.set(queryStore.activeTabKey, vs)
+    }
+  }
+})
+
 onActivated(() => {
   if (!editor || !activeTab.value) return
   const model = editor.getModel()
   if (model && model.getValue() !== activeTab.value.sqlText) {
     model.setValue(activeTab.value.sqlText)
   }
-  nextTick(() => syncEditorHeight())
+  const savedKey = queryStore.activeTabKey
+  nextTick(() => {
+    syncEditorHeight()
+    if (savedKey) {
+      const vs = tabViewStates.get(savedKey)
+      editor!.restoreViewState(vs ?? null)
+    }
+  })
 })
+
+function seedViewStatesFromStore(): void {
+  for (const tab of queryStore.tabs) {
+    if (tab.viewState) {
+      try {
+        tabViewStates.set(tab.key, JSON.parse(tab.viewState))
+      } catch { /* ignore corrupt data */ }
+    }
+  }
+}
 
 function initEditor(): void {
   if (!monacoContainer.value) return
@@ -444,12 +488,32 @@ function initEditor(): void {
     if (key) queryStore.updateSql(key, editor!.getValue())
     scheduleIdleDraft()
   })
+
+  // Seed the view-state map from whatever was loaded from the database, then
+  // immediately apply the active tab's position so the first render is correct.
+  seedViewStatesFromStore()
+  if (queryStore.activeTabKey) {
+    const vs = tabViewStates.get(queryStore.activeTabKey)
+    if (vs) {
+      editor.restoreViewState(vs)
+    }
+  }
 }
 
-watch(() => queryStore.activeTabKey, () => {
+watch(() => queryStore.activeTabKey, (newKey, oldKey) => {
   if (editor && activeTab.value) {
+    if (oldKey) {
+      const vs = editor.saveViewState()
+      if (vs) {
+        tabViewStates.set(oldKey, vs)
+      }
+    }
     const model = editor.getModel()
-    if (model) model.setValue(activeTab.value.sqlText)
+    if (model) {
+      model.setValue(activeTab.value.sqlText)
+    }
+    const vs = newKey ? tabViewStates.get(newKey) : undefined
+    editor.restoreViewState(vs ?? null)
   }
 })
 
@@ -565,16 +629,68 @@ async function runQuery(mode: 'sqlite' | 'soql'): Promise<void> {
   void saveDraftAllTabs()  // draft on execute (fire-and-forget)
   executingMode.value = mode
   queryStore.setExecuting(tab.key, true)
+  queryStore.updateSortCriteria(tab.key, [])
   try {
-    const result = mode === 'soql'
-      ? await window.api.runSoqlQuery(queryText)
-      : await window.api.executeQuery(queryText)
+    let result: PagedQueryResult
+    if (mode === 'soql') {
+      const raw = await window.api.runSoqlQuery(queryText)
+      result = {
+        ...raw,
+        totalCount: raw.rows.length,
+        offset: 0,
+        pageSize: raw.rows.length || QUERY_PAGE_SIZE,
+        sql: ''  // empty sql = no server-side page navigation (SOQL is already fully loaded)
+      }
+    } else {
+      const raw = await window.api.queryInit(queryText, QUERY_PAGE_SIZE)
+      result = { ...raw, offset: 0, pageSize: QUERY_PAGE_SIZE, sql: raw.error ? '' : queryText }
+    }
     queryStore.setResult(tab.key, result)
   } catch (err) {
-    queryStore.setResult(tab.key, { columns: [], rows: [], error: err instanceof Error ? err.message : String(err) })
+    queryStore.setResult(tab.key, {
+      columns: [], rows: [], durationMs: 0,
+      error: err instanceof Error ? err.message : String(err),
+      totalCount: 0, offset: 0, pageSize: QUERY_PAGE_SIZE, sql: ''
+    })
   } finally {
     queryStore.setExecuting(tab.key, false)
   }
+}
+
+async function navigateResultPage(newOffset: number): Promise<void> {
+  const tab = activeTab.value
+  if (!tab?.result?.sql) return
+  try {
+    const orderBy = sortCriteriaToOrderBy(tab)
+    const { rows } = await window.api.queryPage(tab.result.sql, newOffset, QUERY_PAGE_SIZE, orderBy)
+    queryStore.updateResultPage(tab.key, rows, newOffset)
+  } catch {
+    // Silently ignore — the current page stays displayed
+  }
+}
+
+async function handleSortChange(criteria: SortCriterion[]): Promise<void> {
+  const tab = activeTab.value
+  if (!tab?.result?.sql) return
+  queryStore.updateSortCriteria(tab.key, criteria)
+  try {
+    const orderBy = criteria.map((c) => ({
+      column: tab.result!.columns[c.colIdx],
+      dir: c.dir
+    }))
+    const { rows } = await window.api.queryPage(tab.result.sql, 0, QUERY_PAGE_SIZE, orderBy)
+    queryStore.updateResultPage(tab.key, rows, 0)
+  } catch {
+    // Silently ignore — the current page stays displayed
+  }
+}
+
+function sortCriteriaToOrderBy(tab: { result: PagedQueryResult | null; sortCriteria: SortCriterion[] }): { column: string; dir: 'asc' | 'desc' }[] | undefined {
+  if (!tab.sortCriteria.length || !tab.result) return undefined
+  return tab.sortCriteria.map((c) => ({
+    column: tab.result!.columns[c.colIdx],
+    dir: c.dir
+  }))
 }
 
 function sendToExtract(): void {
@@ -592,11 +708,22 @@ function sendToWriteback(): void {
 async function saveTab(key: string): Promise<void> {
   const tab = queryStore.tabs.find((t) => t.key === key)
   if (!tab) return
+  // Capture the current view state: use the live editor state for the active tab,
+  // or whatever is already stored for background tabs.
+  let viewState: string | null = null
+  if (editor && key === queryStore.activeTabKey) {
+    const vs = editor.saveViewState()
+    viewState = vs ? JSON.stringify(vs) : null
+  } else {
+    const vs = tabViewStates.get(key)
+    viewState = vs ? JSON.stringify(vs) : null
+  }
   const saved = await window.api.saveQuery({
     id: tab.savedId ?? undefined,
     name: tab.name,
     sqlText: tab.sqlText,
-    tabOrder: queryStore.tabs.indexOf(tab)
+    tabOrder: queryStore.tabs.indexOf(tab),
+    viewState
   })
   queryStore.markSaved(tab.key, saved.id, saved.name, saved.sqlText)
 }
@@ -617,6 +744,11 @@ function openSavedQuery(q: SavedQuery): void {
   } else {
     const tab = queryStore.newTab(q.name, q.sqlText)
     queryStore.markSaved(tab.key, q.id, q.name, q.sqlText)
+    if (q.viewState) {
+      try {
+        tabViewStates.set(tab.key, JSON.parse(q.viewState))
+      } catch { /* ignore corrupt data */ }
+    }
   }
   openSavedDialog.value = false
 }
@@ -649,7 +781,13 @@ function buildCsv(columns: string[], rows: unknown[][]): string {
 async function exportCsv(): Promise<void> {
   const tab = activeTab.value
   if (!tab?.result) return
-  await window.api.exportToCsv(buildCsv(tab.result.columns, tab.result.rows))
+  if (tab.result.sql) {
+    // Server-side export: main process runs the full query and writes the CSV directly
+    await window.api.exportQueryCsv(tab.result.sql)
+  } else {
+    // SOQL or error result: all rows are already in the renderer
+    await window.api.exportToCsv(buildCsv(tab.result.columns, tab.result.rows))
+  }
 }
 
 function closeTab(key: string): void {
@@ -660,6 +798,7 @@ function closeTab(key: string): void {
     pendingClose.value = { key }
     return
   }
+  tabViewStates.delete(key)
   void window.api.deleteQueryDraft(key)
   queryStore.closeTab(key)
 }

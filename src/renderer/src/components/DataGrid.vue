@@ -6,13 +6,14 @@
       <div>No results</div>
     </div>
     <template v-else>
-      <div class="datagrid-table-wrap" ref="tableWrap">
+      <div class="datagrid-table-wrap" ref="tableWrap" :style="frozenCssVars">
         <table class="data-table datagrid-table" :class="{ 'datagrid-table-fixed': tableFixed }" :style="tableFixed ? { width: tableExplicitWidth + 'px' } : {}">
           <colgroup>
-            <col v-if="showRowNumbers" style="width:40px;min-width:40px;">
+            <col v-if="showRowNumbers" data-rn-col :style="{ width: rnWidth + 'px', minWidth: '30px' }">
             <col
               v-for="col in displayCols"
               :key="col.origIdx"
+              :data-orig-idx="col.origIdx"
               :style="colWidths[col.origIdx] ? { width: colWidths[col.origIdx] + 'px' } : {}"
             >
           </colgroup>
@@ -20,6 +21,7 @@
             <tr>
               <th v-if="showRowNumbers" class="rn-col rn-th">
                 <span>#</span>
+                <div class="col-resize-handle" @mousedown.stop.prevent="startRnResize($event)" @click.stop></div>
               </th>
               <th
                 v-for="col in displayCols"
@@ -31,8 +33,8 @@
               >
                 <span class="dg-th-inner">
                   <span class="sort-indicator" v-if="sortRankOf(col.origIdx) >= 0">
-                    {{ sortCriteria[sortRankOf(col.origIdx)].dir === 'asc' ? '↑' : '↓' }}
-                    <sup v-if="sortCriteria.length > 1" class="sort-rank">{{ sortRankOf(col.origIdx) + 1 }}</sup>
+                    {{ activeSortCriteria[sortRankOf(col.origIdx)].dir === 'asc' ? '↑' : '↓' }}
+                    <sup v-if="activeSortCriteria.length > 1" class="sort-rank">{{ sortRankOf(col.origIdx) + 1 }}</sup>
                   </span>
                   <span class="col-name">{{ columns[col.origIdx] }}</span>
                   <button
@@ -47,14 +49,23 @@
             </tr>
           </thead>
           <tbody>
+            <!--
+              Virtual scroll spacer — maintains the correct scrollable height so the
+              scrollbar thumb represents the full dataset, even though only a window
+              of rows is rendered.  Gated on tableFixed so it never shows during the
+              brief auto-layout snapshot phase.
+            -->
+            <tr v-if="paddingTopPx > 0" class="vspacer" aria-hidden="true" :style="{ height: paddingTopPx + 'px' }">
+              <td :colspan="totalCols"></td>
+            </tr>
             <tr
               v-for="(row, vi) in visibleRows"
-              :key="vi"
-              :data-row-idx="vi + scrollOffset"
+              :key="scrollOffset + vi"
+              :data-row-idx="scrollOffset + vi"
               :class="trClass(vi)"
               @mousedown="onRowMousedown(vi, $event)"
             >
-              <td v-if="showRowNumbers" class="rn-col rn-td">{{ vi + scrollOffset + 1 }}</td>
+              <td v-if="showRowNumbers" class="rn-col rn-td">{{ scrollOffset + vi + (externalOffset ?? 0) + 1 }}</td>
               <td
                 v-for="col in displayCols"
                 :key="col.origIdx"
@@ -66,16 +77,32 @@
                 :style="col.frozen ? frozenTdStyle(col) : undefined"
                 :contenteditable="editable ? 'true' : undefined"
                 @mousedown="onCellMousedown(vi, col.origIdx, $event)"
-                @blur="editable ? onCellEdit(vi + scrollOffset, col.origIdx, ($event.target as HTMLElement).innerText) : undefined"
+                @blur="editable ? onCellEdit(scrollOffset + vi + (externalOffset ?? 0), col.origIdx, ($event.target as HTMLElement).innerText) : undefined"
               ><em v-if="row[col.origIdx] === null || row[col.origIdx] === undefined" class="cell-null">&lt;null&gt;</em
               ><template v-else>{{ formatCell(row[col.origIdx]) }}</template></td>
+            </tr>
+            <!-- Virtual scroll bottom spacer -->
+            <tr v-if="paddingBottomPx > 0" class="vspacer" aria-hidden="true" :style="{ height: paddingBottomPx + 'px' }">
+              <td :colspan="totalCols"></td>
+            </tr>
+            <!-- "More rows" sentinel row shown when the grid has additional pages -->
+            <tr v-if="hasMorePages" class="more-rows-row">
+              <td :colspan="(showRowNumbers ? 1 : 0) + displayCols.length" class="more-rows-td">
+                ↓ {{ (displayRowCount - ((externalOffset ?? 0) + rows.length)).toLocaleString() }} more rows — press <strong>Next</strong> to continue
+              </td>
+            </tr>
+            <!-- Data-size truncation warning -->
+            <tr v-if="isTruncated" class="truncated-rows-row">
+              <td :colspan="(showRowNumbers ? 1 : 0) + displayCols.length" class="truncated-rows-td">
+                ⚠ Display limit reached ({{ ((maxDataBytes ?? 104857600) / 1048576).toLocaleString(undefined, { maximumFractionDigits: 0 }) }} MB) — showing first {{ effectiveRows.length.toLocaleString() }} of {{ rows.length.toLocaleString() }} rows. Reduce page size or export to CSV to access the full data.
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
       <div class="datagrid-footer">
-        <span v-if="selectedRows.size > 0" class="footer-sel">{{ selectedRows.size }} selected &middot;&nbsp;</span>
-        <span>{{ rows.length }} row{{ rows.length !== 1 ? 's' : '' }}</span>
+        <span v-if="selectedRowsMap.size > 0" class="footer-sel">{{ selectedRowsMap.size }} selected &middot;&nbsp;</span>
+        <span>{{ displayRowCount.toLocaleString() }} row{{ displayRowCount !== 1 ? 's' : '' }}</span>
         <span v-if="durationMs !== undefined" style="margin-left: 8px; color: var(--text-muted)">{{ durationMs }}ms</span>
         <button
           v-if="onCopySubsetRows"
@@ -95,16 +122,23 @@
           class="btn btn-ghost btn-sm copy-csv-btn"
           :class="{ 'copy-csv-copied': copyAllFeedback }"
           :disabled="copyAllInProgress"
-          :title="`Copy all ${(totalRowCount ?? rows.length).toLocaleString()} row${(totalRowCount ?? rows.length) !== 1 ? 's' : ''} as CSV to clipboard`"
+          :title="`Copy all ${displayRowCount.toLocaleString()} row${displayRowCount !== 1 ? 's' : ''} as CSV to clipboard`"
           @click="copyAllAsCsv"
         >
           <span v-if="copyAllFeedback">✓ Copied!</span>
           <span v-else-if="copyAllInProgress">
             <span class="spinner" style="width:10px;height:10px;border-width:1.5px;margin-right:4px;"></span>Copying…
           </span>
-          <span v-else>Copy {{ (totalRowCount ?? rows.length).toLocaleString() }} row{{ (totalRowCount ?? rows.length) !== 1 ? 's' : '' }}</span>
+          <span v-else>Copy {{ displayRowCount.toLocaleString() }} row{{ displayRowCount !== 1 ? 's' : '' }}</span>
         </button>
-        <div v-if="rows.length > PAGE" style="margin-left: auto; display:flex; gap:6px; align-items:center;">
+        <!-- External pagination (server-side): parent owns the page state -->
+        <div v-if="onPageChange && displayRowCount > rows.length" style="margin-left: auto; display:flex; gap:6px; align-items:center;">
+          <button class="btn btn-ghost btn-sm" :disabled="(externalOffset ?? 0) === 0" @click="onPageChange(Math.max(0, (externalOffset ?? 0) - PAGE))">‹ Prev</button>
+          <span style="font-size:12px;">{{ (externalOffset ?? 0) + 1 }}–{{ Math.min((externalOffset ?? 0) + rows.length, displayRowCount) }} / {{ displayRowCount.toLocaleString() }}</span>
+          <button class="btn btn-ghost btn-sm" :disabled="(externalOffset ?? 0) + rows.length >= displayRowCount" @click="onPageChange((externalOffset ?? 0) + PAGE)">Next ›</button>
+        </div>
+        <!-- Internal pagination (client-side): DataGrid slices rows locally -->
+        <div v-else-if="!onPageChange && rows.length > PAGE" style="margin-left: auto; display:flex; gap:6px; align-items:center;">
           <button class="btn btn-ghost btn-sm" :disabled="scrollOffset === 0" @click="scrollOffset = Math.max(0, scrollOffset - PAGE)">‹ Prev</button>
           <span style="font-size:12px;">{{ scrollOffset + 1 }}–{{ Math.min(scrollOffset + PAGE, rows.length) }}</span>
           <button class="btn btn-ghost btn-sm" :disabled="scrollOffset + PAGE >= rows.length" @click="scrollOffset = Math.min(rows.length - PAGE, scrollOffset + PAGE)">Next ›</button>
@@ -115,7 +149,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, reactive, onMounted, onUnmounted } from 'vue'
+import type { SortCriterion } from '../../../shared/types'
 
 const props = defineProps<{
   columns: string[]
@@ -133,6 +168,26 @@ const props = defineProps<{
   exportCsvLabel?: string
   onCopyAllRows?: () => Promise<void>
   totalRowCount?: number
+  /** When set, enables external (server-side) pagination mode.
+   *  The parent owns the page state and passes the current page in `rows`. */
+  onPageChange?: (newOffset: number) => void
+  /** The row index of the first row in the current page (0-based). */
+  externalOffset?: number
+  /**
+   * When set together with `onSortChange`, enables server-side sort mode.
+   * The parent owns the sort state; DataGrid shows indicators from this prop
+   * and calls `onSortChange` instead of sorting locally.
+   */
+  externalSortCriteria?: SortCriterion[]
+  /** Called when the user clicks a column header in server-side sort mode. */
+  onSortChange?: (criteria: SortCriterion[]) => void
+  /**
+   * Maximum estimated byte size of the rows data allowed to render.
+   * When the rows received exceed this limit, only the rows that fit are rendered
+   * and a warning row is shown at the bottom.
+   * Defaults to 100 MB (100 * 1024 * 1024).
+   */
+  maxDataBytes?: number
 }>()
 
 const emit = defineEmits<{ cellEdit: [row: number, col: number, value: string] }>()
@@ -141,12 +196,50 @@ const emit = defineEmits<{ cellEdit: [row: number, col: number, value: string] }
 const colOrder = ref<number[]>([])
 const frozenCount = ref(0)
 const colWidths = ref<number[]>([])
+const rnWidth = ref(40)         // row-number column width, resizable
 const tableFixed = ref(false)   // switches to fixed layout after first width snapshot
 
-interface SortCriterion { colIdx: number; dir: 'asc' | 'desc' }
-const sortCriteria = ref<SortCriterion[]>([])
+const internalSortCriteria = ref<SortCriterion[]>([])
+/**
+ * In internal pagination mode: the first row index of the current page within sortedRows.
+ * In external pagination mode: the first row index of the current virtual window within
+ * the delivered page (i.e. the virtual-scroll position within the page).
+ * All selection, focus, and display logic uses `scrollOffset + vi` as the
+ * page-relative row index, which is consistent across both modes.
+ */
 const scrollOffset = ref(0)
-const selectedRows = ref<Set<number>>(new Set())
+
+// ── Virtual scroll ─────────────────────────────────────────────────────────────
+/** Max rows to render during the auto-layout snapshot (column auto-sizing) phase. */
+const VSAMPLE = 200
+/** Extra rows rendered above and below the visible viewport. */
+const VBUFFER = 30
+/** Measured height of a single data row in px.  Updated after first render. */
+const vRowHeight = ref(28)
+/** Measured client height of the table-wrap div.  Updated by ResizeObserver. */
+const vWrapHeight = ref(500)
+/** Number of rows that fit in the viewport. */
+const vViewCount = computed(() => Math.ceil(vWrapHeight.value / Math.max(1, vRowHeight.value)) + 1)
+/** Total column count (rn + data), used for spacer-row colspan. */
+const totalCols = computed(() => (props.showRowNumbers ? 1 : 0) + displayCols.value.length)
+/** Pixel height of the top spacer row (rows above the virtual window). */
+const paddingTopPx = computed(() =>
+  props.onPageChange && tableFixed.value ? scrollOffset.value * vRowHeight.value : 0
+)
+/** Pixel height of the bottom spacer row (rows below the virtual window). */
+const paddingBottomPx = computed(() => {
+  if (!props.onPageChange || !tableFixed.value) return 0
+  const windowEnd = scrollOffset.value + vViewCount.value + 2 * VBUFFER
+  return Math.max(0, (sortedRows.value.length - windowEnd) * vRowHeight.value)
+})
+
+/**
+ * Row selection is stored in a reactive Map rather than a ref<Set> so that
+ * each row's class binding depends only on its own key.  When one row is
+ * selected/deselected, Vue only re-renders the rows whose key changed — O(1)
+ * DOM updates instead of O(n) for the common single-row-click case.
+ */
+const selectedRowsMap = reactive(new Map<number, boolean>())
 interface FocusedCell { rowIdx: number; origIdx: number }
 const focusedCell = ref<FocusedCell | null>(null)
 const tableWrap = ref<HTMLElement | null>(null)
@@ -158,6 +251,41 @@ interface DisplayCol {
   displayIdx: number
 }
 
+// ── Selection helpers ──────────────────────────────────────────────────────────
+function clearSelection(): void {
+  selectedRowsMap.clear()
+}
+
+function selectOnly(rowIdx: number): void {
+  // Only set/clear the two rows that actually change, avoiding O(n) map clears
+  // when the previous selection was a single row too.
+  if (selectedRowsMap.size === 1 && selectedRowsMap.has(rowIdx)) return
+  selectedRowsMap.clear()
+  selectedRowsMap.set(rowIdx, true)
+}
+
+function addRangeToSelection(from: number, to: number): void {
+  for (let i = from; i <= to; i++) {
+    if (!selectedRowsMap.has(i)) selectedRowsMap.set(i, true)
+  }
+}
+
+function setSelectionToRange(from: number, to: number): void {
+  // Remove keys outside the new range
+  for (const k of selectedRowsMap.keys()) {
+    if (k < from || k > to) selectedRowsMap.delete(k)
+  }
+  // Add keys inside the new range
+  for (let i = from; i <= to; i++) {
+    if (!selectedRowsMap.has(i)) selectedRowsMap.set(i, true)
+  }
+}
+
+function selectAll(indices: number[]): void {
+  selectedRowsMap.clear()
+  for (const i of indices) selectedRowsMap.set(i, true)
+}
+
 // ── Column ordering & freezing ─────────────────────────────────────────────────
 watch(
   () => props.columns,
@@ -165,9 +293,10 @@ watch(
     colOrder.value = cols.map((_, i) => i)
     frozenCount.value = 0
     colWidths.value = []          // clear so <col> has no explicit widths
+    rnWidth.value = 40            // reset to default before auto-size
     tableFixed.value = false      // use auto layout for first render
-    sortCriteria.value = []
-    selectedRows.value = new Set()
+    internalSortCriteria.value = []
+    clearSelection()
     focusedCell.value = null
     scrollOffset.value = 0
     lastClickedRow = null
@@ -181,6 +310,12 @@ watch(
 
 function snapshotColWidths(): void {
   if (!tableWrap.value) return
+  // Capture row-number column width
+  const rnTh = tableWrap.value.querySelector<HTMLElement>('thead th.rn-th')
+  if (rnTh) {
+    rnWidth.value = rnTh.offsetWidth
+  }
+  // Capture data column widths
   const ths = tableWrap.value.querySelectorAll<HTMLElement>('thead th.dg-th')
   const widths: number[] = new Array(props.columns.length).fill(0)
   ths.forEach((th) => {
@@ -188,6 +323,12 @@ function snapshotColWidths(): void {
     if (!isNaN(idx)) widths[idx] = th.offsetWidth
   })
   colWidths.value = widths
+  // Measure actual row height from the first data row (skip spacer rows).
+  // All data rows are uniform height since cells use white-space: nowrap.
+  const firstDataTr = tableWrap.value.querySelector<HTMLElement>('tbody tr:not(.vspacer)')
+  if (firstDataTr && firstDataTr.offsetHeight > 0) {
+    vRowHeight.value = firstDataTr.offsetHeight
+  }
   // Now that widths are locked, switch to fixed layout so drag can shrink too
   tableFixed.value = true
 }
@@ -196,7 +337,20 @@ watch(
   () => props.rows,
   () => {
     scrollOffset.value = 0
-    selectedRows.value = new Set()
+    clearSelection()
+    focusedCell.value = null
+    lastClickedRow = null
+    // Reset DOM scroll position so the virtual window starts at the top.
+    if (tableWrap.value) {
+      tableWrap.value.scrollTop = 0
+    }
+  }
+)
+
+watch(
+  () => props.externalOffset,
+  () => {
+    clearSelection()
     focusedCell.value = null
     lastClickedRow = null
   }
@@ -212,17 +366,29 @@ const displayCols = computed<DisplayCol[]>(() =>
 
 // ── Sorting ────────────────────────────────────────────────────────────────────
 
+/**
+ * In server-side sort mode (`onSortChange` is set) the parent drives sort state
+ * via `externalSortCriteria`.  Otherwise internal state is used.
+ */
+const activeSortCriteria = computed<SortCriterion[]>(() =>
+  props.onSortChange ? (props.externalSortCriteria ?? []) : internalSortCriteria.value
+)
+
 function sortRankOf(origIdx: number): number {
-  return sortCriteria.value.findIndex((c) => c.colIdx === origIdx)
+  return activeSortCriteria.value.findIndex((c) => c.colIdx === origIdx)
 }
 
 const sortedRowIndices = computed<number[]>(() => {
-  const indices = props.rows.map((_, i) => i)
-  if (sortCriteria.value.length === 0) return indices
+  const rows = effectiveRows.value
+  const indices = rows.map((_, i) => i)
+  // In external sort mode the server already sorted; don't re-sort locally.
+  if (props.onSortChange || internalSortCriteria.value.length === 0) {
+    return indices
+  }
   return [...indices].sort((a, b) => {
-    for (const { colIdx, dir } of sortCriteria.value) {
-      const va = props.rows[a][colIdx]
-      const vb = props.rows[b][colIdx]
+    for (const { colIdx, dir } of internalSortCriteria.value) {
+      const va = rows[a][colIdx]
+      const vb = rows[b][colIdx]
       if (va === null || va === undefined) { if (vb !== null && vb !== undefined) return 1; continue }
       if (vb === null || vb === undefined) return -1
       const na = Number(va), nb = Number(vb)
@@ -233,38 +399,101 @@ const sortedRowIndices = computed<number[]>(() => {
   })
 })
 
-const sortedRows = computed(() => sortedRowIndices.value.map((i) => props.rows[i]))
+const sortedRows = computed(() => sortedRowIndices.value.map((i) => effectiveRows.value[i]))
 
-function onHeaderClick(origIdx: number, e: MouseEvent): void {
-  const rank = sortRankOf(origIdx)
-  if (e.shiftKey) {
-    // Add as additional sort criterion, or toggle its direction if already present
+function buildNewCriteria(current: SortCriterion[], origIdx: number, shift: boolean): SortCriterion[] {
+  const rank = current.findIndex((c) => c.colIdx === origIdx)
+  if (shift) {
     if (rank >= 0) {
-      const updated = sortCriteria.value.map((c, i) =>
+      return current.map((c, i) =>
         i === rank ? { ...c, dir: c.dir === 'asc' ? 'desc' as const : 'asc' as const } : c
       )
-      sortCriteria.value = updated
-    } else {
-      sortCriteria.value = [...sortCriteria.value, { colIdx: origIdx, dir: 'asc' }]
     }
+    return [...current, { colIdx: origIdx, dir: 'asc' }]
+  }
+  if (rank >= 0 && current.length === 1) {
+    return [{ colIdx: origIdx, dir: current[0].dir === 'asc' ? 'desc' : 'asc' }]
+  }
+  return [{ colIdx: origIdx, dir: 'asc' }]
+}
+
+function onHeaderClick(origIdx: number, e: MouseEvent): void {
+  const newCriteria = buildNewCriteria(activeSortCriteria.value, origIdx, e.shiftKey)
+  if (props.onSortChange) {
+    props.onSortChange(newCriteria)
   } else {
-    // Primary click: replace all criteria with just this column
-    if (rank >= 0 && sortCriteria.value.length === 1) {
-      // Toggle direction if it's already the sole sort column
-      sortCriteria.value = [{ colIdx: origIdx, dir: sortCriteria.value[0].dir === 'asc' ? 'desc' : 'asc' }]
-    } else {
-      sortCriteria.value = [{ colIdx: origIdx, dir: 'asc' }]
-    }
+    internalSortCriteria.value = newCriteria
   }
   scrollOffset.value = 0
-  selectedRows.value = new Set()
+  clearSelection()
   lastClickedRow = null
 }
 
+// ── Data-size guard ────────────────────────────────────────────────────────────
+const DEFAULT_MAX_BYTES = 100 * 1024 * 1024  // 100 MB
+
+/**
+ * Finds the first row index at which the cumulative estimated byte size of the
+ * rows data exceeds `maxDataBytes`.  Returns null when the data is within limits.
+ * Estimate: 2 bytes per character (UTF-16) for each cell stringified.
+ */
+const truncatedAt = computed<number | null>(() => {
+  const limit = props.maxDataBytes ?? DEFAULT_MAX_BYTES
+  let total = 0
+  for (let i = 0; i < props.rows.length; i++) {
+    for (const cell of props.rows[i]) {
+      if (cell !== null && cell !== undefined) {
+        total += String(cell).length * 2
+      }
+    }
+    if (total > limit) {
+      return i  // keep rows 0..i-1; row i pushed us over
+    }
+  }
+  return null
+})
+
+/** Rows actually rendered — potentially a subset of `props.rows` when size limit is exceeded. */
+const effectiveRows = computed(() =>
+  truncatedAt.value !== null ? props.rows.slice(0, truncatedAt.value) : props.rows
+)
+
+const isTruncated = computed(() => truncatedAt.value !== null)
+
 // ── Pagination ─────────────────────────────────────────────────────────────────
 const PAGE = computed(() => props.pageSize ?? 200)
-const visibleRows = computed(() =>
-  sortedRows.value.slice(scrollOffset.value, scrollOffset.value + PAGE.value)
+
+/**
+ * The rows actually rendered in the DOM.
+ *
+ * External mode (onPageChange set):
+ *   - Auto-layout phase (!tableFixed): render only the first VSAMPLE rows so
+ *     the browser can auto-size column widths without mounting 100k nodes.
+ *   - Fixed layout: render a virtual window of rows centred around scrollOffset,
+ *     padded by VBUFFER rows on each side.  Top and bottom spacer <tr> rows
+ *     maintain the full scroll height for everything outside the window.
+ *
+ * Internal mode: slice a single page locally (unchanged behaviour).
+ */
+const visibleRows = computed(() => {
+  if (props.onPageChange) {
+    if (!tableFixed.value) {
+      // Auto-layout sample: limit DOM size during the column-width snapshot phase.
+      return sortedRows.value.slice(0, VSAMPLE)
+    }
+    const end = Math.min(sortedRows.value.length, scrollOffset.value + vViewCount.value + 2 * VBUFFER)
+    return sortedRows.value.slice(scrollOffset.value, end)
+  }
+  return sortedRows.value.slice(scrollOffset.value, scrollOffset.value + PAGE.value)
+})
+
+// Total row count shown in the footer and "Copy N rows" button.
+const displayRowCount = computed(() => props.totalRowCount ?? effectiveRows.value.length)
+
+// True when the grid is in external pagination mode and there are pages beyond the current one.
+// Uses props.rows.length (untruncated) so truncation alone does not suppress the Next indicator.
+const hasMorePages = computed(() =>
+  !!props.onPageChange && (props.externalOffset ?? 0) + props.rows.length < (props.totalRowCount ?? props.rows.length)
 )
 
 // ── Cell text selection ────────────────────────────────────────────────────────
@@ -288,7 +517,7 @@ function onCellMousedown(vi: number, colOrigIdx: number, e: MouseEvent): void {
   if (props.editable) return  // leave editable cells alone
   const rowIdx = vi + scrollOffset.value
 
-  if (!selectedRows.value.has(rowIdx)) {
+  if (!selectedRowsMap.has(rowIdx)) {
     // Row not yet selected — clear cell focus and let row selection proceed
     focusedCell.value = null
     window.getSelection()?.removeAllRanges()
@@ -332,18 +561,14 @@ function onRowMousedown(vi: number, e: MouseEvent): void {
 
   // Shift-click: extend range, no drag needed
   if (e.shiftKey && lastClickedRow !== null) {
-    const from = Math.min(lastClickedRow, rowIdx)
-    const to = Math.max(lastClickedRow, rowIdx)
-    const next = new Set(selectedRows.value)
-    for (let i = from; i <= to; i++) next.add(i)
-    selectedRows.value = next
+    addRangeToSelection(Math.min(lastClickedRow, rowIdx), Math.max(lastClickedRow, rowIdx))
     e.preventDefault()
     return
   }
 
   // Normal mousedown: select anchor row and start drag
   focusedCell.value = null
-  selectedRows.value = new Set([rowIdx])
+  selectOnly(rowIdx)
   lastClickedRow = rowIdx
   // Prevent browser text-selection highlight while dragging
   e.preventDefault()
@@ -357,11 +582,7 @@ function onRowMousedown(vi: number, e: MouseEvent): void {
     if (!tr) return
     const hoverIdx = Number(tr.dataset.rowIdx)
     if (isNaN(hoverIdx)) return
-    const from = Math.min(rowIdx, hoverIdx)
-    const to = Math.max(rowIdx, hoverIdx)
-    const next = new Set<number>()
-    for (let i = from; i <= to; i++) next.add(i)
-    selectedRows.value = next
+    setSelectionToRange(Math.min(rowIdx, hoverIdx), Math.max(rowIdx, hoverIdx))
   }
 
   const onMouseup = (): void => {
@@ -379,12 +600,12 @@ function onKeydown(e: KeyboardEvent): void {
     if (target.isContentEditable) return
     e.preventDefault()
     focusedCell.value = null
-    selectedRows.value = new Set(sortedRows.value.map((_, i) => i))
+    selectAll(sortedRows.value.map((_, i) => i))
     lastClickedRow = null
   } else if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
     if (target.isContentEditable) return
     if (focusedCell.value) return  // let browser copy the cell's selected text
-    if (selectedRows.value.size === 0) return
+    if (selectedRowsMap.size === 0) return
     e.preventDefault()
     copySelectionAsCsv()
   } else if (e.key === 'Escape') {
@@ -393,7 +614,7 @@ function onKeydown(e: KeyboardEvent): void {
       focusedCell.value = null
       window.getSelection()?.removeAllRanges()
     } else {
-      selectedRows.value = new Set()
+      clearSelection()
       lastClickedRow = null
     }
   }
@@ -410,7 +631,7 @@ function csvEscape(v: unknown): string {
 function copySelectionAsCsv(): void {
   const cols = displayCols.value
   const header = cols.map((c) => csvEscape(props.columns[c.origIdx])).join(',')
-  const bodyLines = [...selectedRows.value]
+  const bodyLines = [...selectedRowsMap.keys()]
     .sort((a, b) => a - b)
     .map((rowIdx) => {
       const row = sortedRows.value[rowIdx]
@@ -459,7 +680,9 @@ function trClass(vi: number): Record<string, boolean> {
   const origIdx = sortedRowIndices.value[rowIdx] ?? rowIdx
   const extra = props.rowClass?.(origIdx) ?? ''
   return {
-    'selected-row': selectedRows.value.has(rowIdx),
+    // selectedRowsMap.get(rowIdx) creates a per-key Vue dependency, so only the
+    // specific rows whose selection state changes will re-render on click.
+    'selected-row': selectedRowsMap.get(rowIdx) === true,
     [extra]: !!extra
   }
 }
@@ -481,11 +704,10 @@ function toggleFreeze(col: DisplayCol): void {
 }
 
 // ── Frozen column sticky positioning ─────────────────────────────────────────
-const RN_WIDTH = 40
 
 const frozenLeftOffsets = computed<number[]>(() => {
   const offsets: number[] = []
-  let left = props.showRowNumbers ? RN_WIDTH : 0
+  let left = props.showRowNumbers ? rnWidth.value : 0
   for (let di = 0; di < frozenCount.value; di++) {
     offsets.push(left)
     left += colWidths.value[colOrder.value[di]] ?? 120
@@ -493,17 +715,31 @@ const frozenLeftOffsets = computed<number[]>(() => {
   return offsets
 })
 
+/**
+ * CSS custom properties applied to the table-wrap div.
+ * Frozen cell `left` values are expressed as `var(--dg-fl-N)` so that updating
+ * one CSS variable propagates to ALL cells via the CSS cascade — O(1) instead
+ * of O(rows × frozenCount) individual style patches on every resize mousemove.
+ */
+const frozenCssVars = computed<Record<string, string>>(() => {
+  const vars: Record<string, string> = {}
+  frozenLeftOffsets.value.forEach((left, i) => {
+    vars[`--dg-fl-${i}`] = left + 'px'
+  })
+  return vars
+})
+
 // Explicit pixel width for the table in fixed-layout mode.
 // Summing all column widths (+ row-number col) and binding it to the <table>
 // element prevents the browser from redistributing space when the wrapper is
 // wider than the columns — only the dragged column grows, the rest stay put.
 const tableExplicitWidth = computed(() => {
-  const rnWidth = props.showRowNumbers ? RN_WIDTH : 0
+  const rnPxWidth = props.showRowNumbers ? rnWidth.value : 0
   const colSum = colWidths.value.reduce((acc, w) => acc + (w || 0), 0)
   // Also factor in the wrapper width so the table fills the container when
   // columns are narrower than the visible area (no unnecessary horizontal bar).
   const containerWidth = tableWrap.value?.clientWidth ?? 0
-  return Math.max(rnWidth + colSum, containerWidth)
+  return Math.max(rnPxWidth + colSum, containerWidth)
 })
 
 function colHeaderStyle(col: DisplayCol): Record<string, string> {
@@ -511,7 +747,7 @@ function colHeaderStyle(col: DisplayCol): Record<string, string> {
   return {
     position: 'sticky',
     top: '0',
-    left: (frozenLeftOffsets.value[col.displayIdx] ?? 0) + 'px',
+    left: `var(--dg-fl-${col.displayIdx})`,
     zIndex: '4',  /* above regular sticky headers (z-index: 2) and frozen body cells (z-index: 1) */
     background: 'var(--surface2)'
   }
@@ -520,19 +756,75 @@ function colHeaderStyle(col: DisplayCol): Record<string, string> {
 function frozenTdStyle(col: DisplayCol): Record<string, string> {
   return {
     position: 'sticky',
-    left: (frozenLeftOffsets.value[col.displayIdx] ?? 0) + 'px',
+    left: `var(--dg-fl-${col.displayIdx})`,
     zIndex: '1',
     background: 'var(--surface)'
   }
 }
 
+// ── Virtual scroll event handling ─────────────────────────────────────────────
+
+function onTableWrapScroll(): void {
+  if (!props.onPageChange || !tableWrap.value) return
+  const rawTop = Math.floor(tableWrap.value.scrollTop / Math.max(1, vRowHeight.value))
+  const newOffset = Math.max(0, rawTop - VBUFFER)
+  if (newOffset === scrollOffset.value) return
+  scrollOffset.value = newOffset
+  // Note: focusedCell is intentionally NOT cleared here.  Keeping it set means
+  // the focused (expanded) row stays expanded while it remains in the virtual
+  // window.  When it scrolls completely out of the window its <tr> is removed
+  // from the DOM so it naturally collapses, and re-expands when scrolled back.
+  // In non-editable mode @blur is bound to undefined so there is no risk of a
+  // spurious onCellEdit being triggered when the element leaves the DOM.
+}
+
+let _resizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+  if (!tableWrap.value) return
+  tableWrap.value.addEventListener('scroll', onTableWrapScroll, { passive: true })
+  _resizeObserver = new ResizeObserver((entries) => {
+    vWrapHeight.value = entries[0]?.contentRect.height ?? 500
+  })
+  _resizeObserver.observe(tableWrap.value)
+  vWrapHeight.value = tableWrap.value.clientHeight
+})
+
+onUnmounted(() => {
+  if (tableWrap.value) {
+    tableWrap.value.removeEventListener('scroll', onTableWrapScroll)
+  }
+  _resizeObserver?.disconnect()
+  _resizeObserver = null
+})
+
 // ── Column resize ──────────────────────────────────────────────────────────────
+
+/**
+ * Directly update the CSS custom properties that drive frozen-cell `left`
+ * positions, overriding `origIdx`'s width with `overrideWidth`.
+ * Called during drag to avoid Vue reactive updates entirely — O(frozenCount).
+ */
+function applyFrozenOffsetsDOM(wrap: HTMLElement, overrideOrigIdx: number, overrideWidth: number): void {
+  let left = props.showRowNumbers ? rnWidth.value : 0
+  for (let di = 0; di < frozenCount.value; di++) {
+    wrap.style.setProperty(`--dg-fl-${di}`, left + 'px')
+    const origIdx = colOrder.value[di]
+    left += origIdx === overrideOrigIdx ? overrideWidth : (colWidths.value[origIdx] ?? 120)
+  }
+}
+
 function startResize(e: MouseEvent, origIdx: number): void {
-  // Always read the actual rendered width so drag delta starts from reality
+  // Always read the actual rendered width so drag delta starts from reality.
   const th = tableWrap.value?.querySelector<HTMLElement>(`thead th[data-orig-idx="${origIdx}"]`)
   const startW = th ? th.offsetWidth : (colWidths.value[origIdx] ?? 120)
-  colWidths.value[origIdx] = startW
   const startX = e.clientX
+
+  // Pre-locate DOM elements we'll patch directly during drag.
+  const colEl = tableWrap.value?.querySelector<HTMLElement>(`col[data-orig-idx="${origIdx}"]`)
+  const tableEl = tableWrap.value?.querySelector<HTMLTableElement>('table.datagrid-table')
+  const diOfDragged = displayCols.value.findIndex(c => c.origIdx === origIdx)
+  const isFrozen = diOfDragged >= 0 && diOfDragged < frozenCount.value
 
   // Inject a temporary <style> with !important so no child element can override
   // the cursor or trigger text-selection highlights during the drag.
@@ -540,11 +832,69 @@ function startResize(e: MouseEvent, origIdx: number): void {
   dragStyle.textContent = '*, *::before, *::after { cursor: col-resize !important; user-select: none !important; }'
   document.head.appendChild(dragStyle)
 
+  let currentW = startW
+
   const onMove = (ev: MouseEvent): void => {
-    colWidths.value[origIdx] = Math.max(40, startW + ev.clientX - startX)
+    currentW = Math.max(40, startW + ev.clientX - startX)
+
+    // Direct DOM updates — zero Vue reactive overhead during the drag.
+    if (colEl) colEl.style.width = currentW + 'px'
+    if (tableEl && tableFixed.value && tableWrap.value) {
+      const rnPx = props.showRowNumbers ? rnWidth.value : 0
+      const colSum = colWidths.value.reduce((acc, w, i) => acc + (i === origIdx ? currentW : (w || 0)), 0)
+      tableEl.style.width = Math.max(rnPx + colSum, tableWrap.value.clientWidth) + 'px'
+    }
+    if (isFrozen && tableWrap.value) {
+      applyFrozenOffsetsDOM(tableWrap.value, origIdx, currentW)
+    }
   }
+
   const onUp = (): void => {
     document.head.removeChild(dragStyle)
+    // Single reactive commit — triggers exactly one Vue re-render to sync state.
+    colWidths.value[origIdx] = currentW
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
+function startRnResize(e: MouseEvent): void {
+  const th = tableWrap.value?.querySelector<HTMLElement>('thead th.rn-th')
+  const startW = th ? th.offsetWidth : rnWidth.value
+
+  const rnColEl = tableWrap.value?.querySelector<HTMLElement>('col[data-rn-col]')
+  const tableEl = tableWrap.value?.querySelector<HTMLTableElement>('table.datagrid-table')
+
+  const dragStyle = document.createElement('style')
+  dragStyle.textContent = '*, *::before, *::after { cursor: col-resize !important; user-select: none !important; }'
+  document.head.appendChild(dragStyle)
+
+  let currentW = startW
+
+  const onMove = (ev: MouseEvent): void => {
+    currentW = Math.max(30, startW + ev.clientX - e.clientX)
+
+    if (rnColEl) rnColEl.style.width = currentW + 'px'
+    if (tableEl && tableFixed.value && tableWrap.value) {
+      const colSum = colWidths.value.reduce((acc, w) => acc + (w || 0), 0)
+      tableEl.style.width = Math.max(currentW + colSum, tableWrap.value.clientWidth) + 'px'
+    }
+    // rnWidth shift moves ALL frozen column offsets — update CSS vars directly.
+    if (frozenCount.value > 0 && tableWrap.value) {
+      let left = currentW
+      for (let di = 0; di < frozenCount.value; di++) {
+        tableWrap.value.style.setProperty(`--dg-fl-${di}`, left + 'px')
+        left += colWidths.value[colOrder.value[di]] ?? 120
+      }
+    }
+  }
+
+  const onUp = (): void => {
+    document.head.removeChild(dragStyle)
+    // Single reactive commit — triggers exactly one Vue re-render to sync state.
+    rnWidth.value = currentW
     window.removeEventListener('mousemove', onMove)
     window.removeEventListener('mouseup', onUp)
   }
@@ -575,7 +925,7 @@ function autoFitColumn(origIdx: number): void {
   let maxW = measureText(props.columns[origIdx], cellFont) + HEADER_EXTRA
 
   // Measure every data row (canvas measureText is ~5M calls/s, so even 50k rows is fast)
-  for (const row of props.rows) {
+  for (const row of effectiveRows.value) {
     const w = measureText(formatCell(row[origIdx]), cellFont) + CELL_PADDING
     if (w > maxW) maxW = w
   }
@@ -771,12 +1121,11 @@ function onCellEdit(row: number, col: number, value: string): void {
 
 /* row number column */
 .rn-col {
-  width: 40px;
-  min-width: 40px;
   text-align: right;
   padding-right: 8px;
   color: var(--text-muted);
   flex-shrink: 0;
+  overflow: hidden;
 }
 
 .rn-th,
@@ -825,6 +1174,48 @@ tbody tr:hover .frozen-td {
 
 .frozen-th:hover {
   background: color-mix(in srgb, var(--primary) 12%, var(--surface2));
+}
+
+/* ── Virtual scroll spacer rows ── */
+.vspacer {
+  pointer-events: none;
+}
+
+.vspacer td {
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+/* ── More rows sentinel row ── */
+.more-rows-row {
+  cursor: default;
+  pointer-events: none;
+}
+
+.more-rows-td {
+  text-align: center;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  border-top: 1px dashed var(--border);
+  background: color-mix(in srgb, var(--primary) 4%, var(--surface));
+}
+
+/* ── Data-size truncation warning row ── */
+.truncated-rows-row {
+  cursor: default;
+  pointer-events: none;
+}
+
+.truncated-rows-td {
+  text-align: center;
+  padding: 7px 12px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--warning, #b45309) 90%, var(--text));
+  border-top: 2px solid color-mix(in srgb, var(--warning, #b45309) 40%, var(--border));
+  background: color-mix(in srgb, var(--warning, #b45309) 6%, var(--surface));
 }
 
 /* ── Footer ── */

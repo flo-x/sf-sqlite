@@ -27,6 +27,28 @@ export interface QueryResult {
   error?: string
 }
 
+/** A column sort criterion used for server-side sorting in multi-page grids. */
+export interface SortCriterion {
+  colIdx: number
+  dir: 'asc' | 'desc'
+}
+
+/**
+ * A single page of query results used for server-side pagination.
+ * `rows` contains only the current page; `totalCount` is the full result-set size.
+ * When `sql` is non-empty the caller can request additional pages via db:query-page.
+ */
+export interface PagedQueryResult {
+  columns: string[]
+  rows: unknown[][]
+  durationMs: number
+  error?: string
+  totalCount: number
+  offset: number
+  pageSize: number
+  sql: string
+}
+
 export interface CsvPreview {
   filePath: string
   headers: string[]
@@ -119,7 +141,6 @@ export interface RunHistoryEntry {
 export interface FieldMapping {
   sqlCol: string
   sfField: string
-  isKey: boolean
   excluded: boolean
 }
 
@@ -161,6 +182,7 @@ export interface SavedQuery {
   name: string
   sqlText: string
   tabOrder: number
+  viewState: string | null
   createdAt: string
   updatedAt: string
 }
@@ -172,6 +194,7 @@ export interface QueryDraft {
   name: string
   sqlText: string
   tabOrder: number
+  viewState: string | null
   updatedAt: string
 }
 
@@ -224,6 +247,15 @@ export interface SavedScript {
 
 export type SavedScriptInput = Omit<SavedScript, 'id' | 'createdAt' | 'updatedAt'>
 
+export interface ScriptDraft {
+  draftKey: string         // 'new' for unsaved slot, String(savedId) for saved scripts
+  savedId: number | null
+  name: string
+  code: string
+  viewState: string | null
+  updatedAt: string
+}
+
 export interface ScriptLog {
   level: 'log' | 'warn' | 'error'
   args: string[]
@@ -247,4 +279,12 @@ export interface ScriptComplete {
   runId: string
   durationMs: number
   error?: string
+}
+
+export interface DatabaseWasteInfo {
+  pageCount: number
+  freelistCount: number
+  pageSize: number
+  wastedBytes: number
+  wastedPct: number
 }

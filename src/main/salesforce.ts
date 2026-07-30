@@ -1516,7 +1516,11 @@ export async function writebackBulk2(
         break
       }
     }
-    if (signal.aborted) { throw new Error('Cancelled') }
+    // Only treat an aborted signal as cancellation if the SF job never reached a
+    // terminal state. If sfJobTerminated is true the job completed on SF's side
+    // (possibly while we were mid-poll-sleep), so we should collect results and
+    // report success/partial rather than cancelled.
+    if (!sfJobTerminated) { throw new Error('Cancelled') }
 
     // ── 5. Download failed results only ───────────────────────────────────
     // Successful-results download is intentionally skipped for Bulk API 2.0:

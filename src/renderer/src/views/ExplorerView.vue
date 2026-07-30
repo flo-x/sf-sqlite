@@ -49,38 +49,58 @@
 
       <!-- CSV drop zone (always visible, just triggers file selection) -->
       <div class="left-bottom">
+        <div class="section-title" style="padding: 6px 14px; display:flex; align-items:center; justify-content:space-between;">
+          <span>Database</span>
+          <button
+            class="btn btn-ghost btn-sm"
+            :disabled="vacuumChecking || vacuuming"
+            title="Compact the database file by reclaiming freed pages"
+            @click="vacuumDb"
+          >
+            <span v-if="vacuumChecking || vacuuming" class="spinner" style="width:10px;height:10px;border-width:1.5px;margin-right:4px;"></span>
+            {{ vacuuming ? 'Vacuuming…' : vacuumChecking ? 'Checking…' : 'Vacuum DB' }}
+          </button>
+        </div>
+        <div v-if="vacuumSuccess" style="font-size:12px; color:var(--success,#4caf50); padding:0 14px 6px;">{{ vacuumSuccess }}</div>
+        <div v-if="vacuumError" style="font-size:12px; color:var(--danger); padding:0 14px 6px;">{{ vacuumError }}</div>
         <div class="section-title" style="padding: 8px 14px 4px;">Import CSV</div>
+        <label style="display:flex; align-items:center; gap:6px; font-size:12px; padding:0 14px 6px; cursor:pointer;">
+          <input type="checkbox" v-model="csvDirectLoad" style="margin:0;" />
+          Direct load (no preview)
+        </label>
         <div
           class="csv-drop-zone"
-          :class="{ 'csv-drop-zone-over': csvDragOver, 'csv-drop-zone-active': csvPreview?.source === 'file' }"
+          :class="{ 'csv-drop-zone-over': csvDragOver, 'csv-drop-zone-active': csvDirectLoad ? !!csvDirectFile : csvPreview?.source === 'file' }"
           @dragover.prevent="csvDragOver = true"
           @dragleave="csvDragOver = false"
           @drop.prevent="onCsvDrop"
           @click="pickCsvFile"
         >
           <span style="font-size:20px;">📂</span>
-          <span v-if="csvPreview?.source !== 'file'">Drop CSV or click to browse</span>
-          <span v-else class="csv-drop-zone-filename">{{ csvPreview.filePath.split(/[\\/]/).pop() }}</span>
+          <span v-if="csvDirectLoad ? !csvDirectFile : csvPreview?.source !== 'file'">Drop CSV or click to browse</span>
+          <span v-else class="csv-drop-zone-filename">{{ csvDirectLoad ? csvDirectFile?.fileName : csvPreview?.filePath.split(/[\\/]/).pop() }}</span>
         </div>
-        <div class="csv-format-toggle">
-          <button
-            class="csv-fmt-btn"
-            :class="{ active: csvPasteFormat === 'csv' }"
-            @click="csvPasteFormat = 'csv'"
-          >CSV</button>
-          <button
-            class="csv-fmt-btn"
-            :class="{ active: csvPasteFormat === 'excel' }"
-            @click="csvPasteFormat = 'excel'"
-          >Excel / TSV</button>
-        </div>
-        <textarea
-          ref="csvPasteRef"
-          class="csv-paste-area"
-          :class="{ 'csv-paste-area-active': csvPreview?.source === 'paste' }"
-          :placeholder="csvPasteFormat === 'excel' ? 'Or paste Excel / TSV text here…' : 'Or paste CSV text here…'"
-          @paste.prevent="onCsvPaste"
-        ></textarea>
+        <template v-if="!csvDirectLoad">
+          <div class="csv-format-toggle">
+            <button
+              class="csv-fmt-btn"
+              :class="{ active: csvPasteFormat === 'csv' }"
+              @click="csvPasteFormat = 'csv'"
+            >CSV</button>
+            <button
+              class="csv-fmt-btn"
+              :class="{ active: csvPasteFormat === 'excel' }"
+              @click="csvPasteFormat = 'excel'"
+            >Excel / TSV</button>
+          </div>
+          <textarea
+            ref="csvPasteRef"
+            class="csv-paste-area"
+            :class="{ 'csv-paste-area-active': csvPreview?.source === 'paste' }"
+            :placeholder="csvPasteFormat === 'excel' ? 'Or paste Excel / TSV text here…' : 'Or paste CSV text here…'"
+            @paste.prevent="onCsvPaste"
+          ></textarea>
+        </template>
       </div>
     </div>
 
@@ -138,6 +158,47 @@
             </button>
           </div>
         </div><!-- csv-right-body -->
+      </template>
+
+      <!-- Direct load panel -->
+      <template v-else-if="csvDirectFile">
+        <div class="toolbar">
+          <span style="font-weight:600; font-size:15px;">Direct Load</span>
+          <span class="badge badge-gray" style="margin-left:4px;">{{ csvDirectFile.fileName }}</span>
+          <div class="toolbar-right">
+            <button
+              class="btn btn-ghost btn-sm"
+              @click="csvImporting ? window.api.cancelCsvDirectImport() : (csvDirectFile = null, csvError = '', csvSuccess = '', csvCancelled = '')"
+            >✕ Cancel</button>
+          </div>
+        </div>
+        <div style="flex:1; display:flex; align-items:flex-start; padding:16px;">
+          <div class="csv-form">
+            <label>Target table name</label>
+            <input
+              v-model="csvTableName"
+              type="text"
+              placeholder="Table name"
+              @keydown.enter="directImportCsv"
+            />
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:4px;cursor:pointer;">
+              <input type="checkbox" v-model="csvReplace" style="margin:0;" />
+              Replace table if it already exists
+            </label>
+            <div v-if="csvError" class="csv-error" style="margin-top:6px;">{{ csvError }}</div>
+            <div v-if="csvCancelled" class="csv-cancelled" style="margin-top:6px;">{{ csvCancelled }}</div>
+            <div v-if="csvSuccess" class="csv-success" style="margin-top:6px;">{{ csvSuccess }}</div>
+            <button
+              class="btn btn-primary"
+              style="margin-top:12px; align-self:flex-start;"
+              :disabled="!csvTableName.trim() || csvImporting"
+              @click="directImportCsv"
+            >
+              <span v-if="csvImporting" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
+              {{ csvImporting ? `Importing… ${csvImportProgress.toLocaleString()} rows` : 'Import' }}
+            </button>
+          </div>
+        </div>
       </template>
 
       <div v-else-if="!selectedTable" class="empty-state" style="height:100%;">
@@ -242,6 +303,12 @@
             :columns="previewCols"
             :rows="previewRows"
             :showRowNumbers="true"
+            :totalRowCount="previewTotal"
+            :onPageChange="previewTotal > EXPLORER_PAGE_SIZE ? navigatePreviewPage : undefined"
+            :externalOffset="previewOffset"
+            :pageSize="EXPLORER_PAGE_SIZE"
+            :onSortChange="previewTotal > EXPLORER_PAGE_SIZE ? handlePreviewSortChange : undefined"
+            :externalSortCriteria="previewTotal > EXPLORER_PAGE_SIZE ? previewSort : undefined"
             :onExportCsv="exportTableCsv"
             :exportingCsv="exportingCsv"
             style="flex:1;"
@@ -255,6 +322,38 @@
       <div class="ctx-item" @click="openInQueryCtx">Open in Query Editor</div>
       <div class="ctx-item" @click="startRenameCtx">Rename</div>
       <div class="ctx-item ctx-danger" @click="dropTableCtx">Delete</div>
+    </div>
+
+    <!-- Vacuum confirmation modal -->
+    <div v-if="vacuumConfirm" class="vacuum-overlay" @click.self="vacuumConfirm = null">
+      <div class="vacuum-modal">
+        <div class="vacuum-modal-title">Vacuum database?</div>
+        <div class="vacuum-modal-body">
+          <template v-if="vacuumConfirm.wastedBytes >= 1024 * 1024">
+            <p>
+              <strong>{{ formatMb(vacuumConfirm.wastedBytes) }} MB</strong> of freed pages
+              (<strong>{{ Math.round(vacuumConfirm.wastedPct) }}%</strong> of the file) can be
+              reclaimed by compacting the database.
+            </p>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:12px;">
+              The database will be temporarily locked while the vacuum runs.
+            </p>
+          </template>
+          <template v-else>
+            <p>No significant wasted space found
+              ({{ formatMb(vacuumConfirm.wastedBytes) }} MB,
+              {{ Math.round(vacuumConfirm.wastedPct) }}%).
+            </p>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:12px;">
+              You can still vacuum to defragment pages, but no space will be returned to the OS.
+            </p>
+          </template>
+        </div>
+        <div class="vacuum-modal-actions">
+          <button class="btn btn-secondary" @click="vacuumConfirm = null">Cancel</button>
+          <button class="btn btn-primary" @click="confirmVacuum">Vacuum</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -271,7 +370,7 @@ import { useRouter } from 'vue-router'
 import { useConnectionStore } from '../stores/connection'
 import { useQueryStore } from '../stores/query'
 import DataGrid from '../components/DataGrid.vue'
-import type { TableInfo, CsvPreview } from '../../../shared/types'
+import type { TableInfo, CsvPreview, SortCriterion } from '../../../shared/types'
 
 const conn = useConnectionStore()
 const queryStore = useQueryStore()
@@ -328,10 +427,66 @@ const csvTableName = ref('')
 const csvReplace = ref(true)
 const csvDragOver = ref(false)
 const csvImporting = ref(false)
+const csvImportProgress = ref(0)
 const csvError = ref('')
 const csvSuccess = ref('')
+const csvCancelled = ref('')
 const csvPasteRef = ref<HTMLTextAreaElement | null>(null)
 const csvPasteFormat = ref<'csv' | 'excel'>('csv')
+
+const csvDirectLoad = ref(false)
+type CsvDirectFile = { filePath: string; fileName: string }
+const csvDirectFile = ref<CsvDirectFile | null>(null)
+
+watch(csvDirectLoad, () => {
+  csvPreview.value = null
+  csvDirectFile.value = null
+  csvError.value = ''
+  csvSuccess.value = ''
+})
+
+// ── Vacuum ─────────────────────────────────────────────────────────────────────
+type VacuumConfirmState = { wastedBytes: number; wastedPct: number } | null
+
+const vacuumChecking = ref(false)
+const vacuuming = ref(false)
+const vacuumError = ref('')
+const vacuumSuccess = ref('')
+const vacuumConfirm = ref<VacuumConfirmState>(null)
+
+function formatMb(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(1)
+}
+
+async function vacuumDb(): Promise<void> {
+  vacuumError.value = ''
+  vacuumSuccess.value = ''
+  vacuumChecking.value = true
+  try {
+    const info = await window.api.getDatabaseWasteInfo()
+    vacuumConfirm.value = { wastedBytes: info.wastedBytes, wastedPct: info.wastedPct }
+  } catch (err) {
+    vacuumError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    vacuumChecking.value = false
+  }
+}
+
+async function confirmVacuum(): Promise<void> {
+  vacuumConfirm.value = null
+  vacuuming.value = true
+  vacuumError.value = ''
+  vacuumSuccess.value = ''
+  try {
+    await window.api.vacuumDatabase()
+    vacuumSuccess.value = 'Vacuum complete.'
+    setTimeout(() => { vacuumSuccess.value = '' }, 5000)
+  } catch (err) {
+    vacuumError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    vacuuming.value = false
+  }
+}
 
 // When the format toggle changes while paste data is loaded, re-parse headers and
 // preview rows so the DataGrid column names and the import column names stay in sync.
@@ -344,6 +499,17 @@ watch(csvPasteFormat, (fmt) => {
 })
 
 async function pickCsvFile(): Promise<void> {
+  if (csvDirectLoad.value) {
+    const filePath = await window.api.csvPickDirect()
+    if (filePath) {
+      const fileName = filePath.split(/[\\/]/).pop() ?? filePath
+      csvDirectFile.value = { filePath, fileName }
+      csvTableName.value = fileName.replace(/\.[^.]+$/, '').replace(/[^\w]/g, '_').toLowerCase()
+      csvError.value = ''
+      csvSuccess.value = ''
+    }
+    return
+  }
   const preview = await window.api.csvPickAndPreview()
   if (preview) loadCsvPreview(preview, 'file')
 }
@@ -354,6 +520,13 @@ async function onCsvDrop(e: DragEvent): Promise<void> {
   if (!file) return
   const filePath = (file as File & { path?: string }).path
   if (!filePath) return
+  if (csvDirectLoad.value) {
+    csvDirectFile.value = { filePath, fileName: file.name }
+    csvTableName.value = file.name.replace(/\.[^.]+$/, '').replace(/[^\w]/g, '_').toLowerCase()
+    csvError.value = ''
+    csvSuccess.value = ''
+    return
+  }
   const preview = await window.api.csvPreviewPath(filePath)
   loadCsvPreview(preview, 'file')
 }
@@ -463,6 +636,41 @@ async function importCsv(): Promise<void> {
   }
 }
 
+async function directImportCsv(): Promise<void> {
+  if (!csvDirectFile.value || !csvTableName.value.trim()) return
+  csvError.value = ''
+  csvSuccess.value = ''
+  csvCancelled.value = ''
+  csvImporting.value = true
+  csvImportProgress.value = 0
+  const offProgress = window.api.onCsvDirectImportProgress((n) => {
+    csvImportProgress.value = n
+  })
+  try {
+    const ifExists = csvReplace.value ? 'replace' as const : 'append' as const
+    const tableName = csvTableName.value.trim()
+    const count = await window.api.csvDirectImport(csvDirectFile.value.filePath, tableName, ifExists)
+    csvSuccess.value = `Imported ${count.toLocaleString()} rows into "${tableName}"`
+    await conn.refreshDbInfo()
+    await nextTick()
+    csvDirectFile.value = null
+    csvTableName.value = ''
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg === 'Import aborted') {
+      const committed = (err as { rowsCommitted?: number }).rowsCommitted ?? csvImportProgress.value
+      csvCancelled.value = `Import cancelled — ${committed.toLocaleString()} rows were committed before stopping.`
+      await conn.refreshDbInfo()
+    } else {
+      csvError.value = msg
+    }
+  } finally {
+    offProgress()
+    csvImportProgress.value = 0
+    csvImporting.value = false
+  }
+}
+
 // selectedTableName drives everything — selectedTable is derived reactively so
 // any update to conn.dbTables (refresh, rename, drop, CSV import) is picked up
 // automatically with no manual syncing.
@@ -472,12 +680,25 @@ const selectedTable = computed(() =>
     ? (conn.dbTables.find((t) => t.name === selectedTableName.value) ?? null)
     : null
 )
-// Clear stale preview when the selected table's schema changes.
-watch(selectedTable, () => { previewRows.value = [] })
+// Clear stale preview when the selected table changes.
+watch(selectedTable, () => {
+  previewRows.value = []
+  previewCols.value = []
+  previewTotal.value = 0
+  previewOffset.value = 0
+  previewSql.value = ''
+  previewSort.value = []
+})
+
+const EXPLORER_PAGE_SIZE = 10000
 
 const activeTab = ref<'columns' | 'indexes' | 'preview'>('columns')
 const previewCols = ref<string[]>([])
 const previewRows = ref<unknown[][]>([])
+const previewTotal = ref(0)
+const previewOffset = ref(0)
+const previewSql = ref('')
+const previewSort = ref<SortCriterion[]>([])
 const previewLoading = ref(false)
 const renaming = ref(false)
 const renameValue = ref('')
@@ -520,13 +741,43 @@ function selectTable(t: TableInfo): void {
 async function loadPreview(): Promise<void> {
   if (!selectedTable.value) return
   previewLoading.value = true
+  previewSort.value = []
+  previewOffset.value = 0
+  previewSql.value = `SELECT * FROM ${escapePreviewId(selectedTable.value.name)}`
   try {
-    const result = await window.api.executeQuery(`SELECT * FROM "${selectedTable.value.name}" LIMIT 100`)
+    const result = await window.api.queryInit(previewSql.value, EXPLORER_PAGE_SIZE)
     previewCols.value = result.columns
     previewRows.value = result.rows
+    previewTotal.value = result.totalCount
   } finally {
     previewLoading.value = false
   }
+}
+
+function escapePreviewId(name: string): string {
+  return '"' + name.replace(/"/g, '""') + '"'
+}
+
+async function navigatePreviewPage(newOffset: number): Promise<void> {
+  if (!previewSql.value) return
+  const orderBy = previewSortToOrderBy()
+  const { rows } = await window.api.queryPage(previewSql.value, newOffset, EXPLORER_PAGE_SIZE, orderBy)
+  previewRows.value = rows
+  previewOffset.value = newOffset
+}
+
+async function handlePreviewSortChange(criteria: SortCriterion[]): Promise<void> {
+  previewSort.value = criteria
+  if (!previewSql.value) return
+  const orderBy = criteria.map((c) => ({ column: previewCols.value[c.colIdx], dir: c.dir }))
+  const { rows } = await window.api.queryPage(previewSql.value, 0, EXPLORER_PAGE_SIZE, orderBy.length ? orderBy : undefined)
+  previewRows.value = rows
+  previewOffset.value = 0
+}
+
+function previewSortToOrderBy(): { column: string; dir: 'asc' | 'desc' }[] | undefined {
+  if (!previewSort.value.length) return undefined
+  return previewSort.value.map((c) => ({ column: previewCols.value[c.colIdx], dir: c.dir }))
 }
 
 const exportingCsv = ref(false)
@@ -535,17 +786,7 @@ async function exportTableCsv(): Promise<void> {
   if (!selectedTable.value) return
   exportingCsv.value = true
   try {
-    const result = await window.api.executeQuery(`SELECT * FROM "${selectedTable.value.name}"`)
-    if (result.error) throw new Error(result.error)
-    const escape = (v: unknown): string => {
-      if (v === null || v === undefined) return ''
-      const s = String(v)
-      return s.includes(',') || s.includes('"') || s.includes('\n')
-        ? '"' + s.replace(/"/g, '""') + '"'
-        : s
-    }
-    const csv = [result.columns.map(escape).join(','), ...result.rows.map((r) => r.map(escape).join(','))].join('\n')
-    await window.api.exportToCsv(csv)
+    await window.api.exportQueryCsv(`SELECT * FROM ${escapePreviewId(selectedTable.value.name)}`)
   } finally {
     exportingCsv.value = false
   }
@@ -725,6 +966,7 @@ async function confirmColRename(): Promise<void> {
 .csv-right-body { overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); }
 .csv-form { display: flex; flex-direction: column; gap: 6px; }
 .csv-error { font-size: 12px; color: var(--danger); }
+.csv-cancelled { font-size: 12px; color: var(--text-muted); font-weight: 500; }
 .csv-success { font-size: 12px; color: #166534; font-weight: 500; }
 .csv-preview-notice { font-size: 12px; color: var(--text-muted); background: var(--bg-subtle, #f5f5f5); padding: 4px 12px; border-top: 1px solid var(--border); flex: 0 0 auto; }
 .tree-item { display: flex; align-items: center; gap: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
@@ -775,4 +1017,25 @@ async function confirmColRename(): Promise<void> {
   width: 100%;
   box-sizing: border-box;
 }
+.vacuum-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.vacuum-modal {
+  background: var(--bg-panel, #1e1e2e);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 22px 24px;
+  max-width: 380px;
+  width: calc(100% - 48px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+.vacuum-modal-title { font-weight: 600; font-size: 14px; margin-bottom: 10px; }
+.vacuum-modal-body { font-size: 13px; line-height: 1.55; }
+.vacuum-modal-actions { margin-top: 18px; display: flex; justify-content: flex-end; gap: 8px; }
 </style>

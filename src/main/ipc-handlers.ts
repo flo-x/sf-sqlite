@@ -229,6 +229,9 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
     const columnTypes = new Map<string, string>()
     const pendingCols = new Set<string>()
     let stagingCreated = false
+    const priorIndexes = job.writeMode === 'replace'
+      ? db.snapshotTableIndexes(job.destTable)
+      : []
 
     function inferSqliteType(v: unknown): string {
       if (typeof v === 'boolean') return 'INTEGER'
@@ -287,6 +290,9 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
           if (job.additionalIndexes?.length) {
             try { db.ensureColumnIndexes(job.destTable, job.additionalIndexes) } catch { /* ignore */ }
           }
+          if (priorIndexes.length > 0) {
+            db.restoreTableIndexes(job.destTable, priorIndexes)
+          }
         } else if (job.writeMode === 'replace') {
           db.dropTableIfExists(job.destTable)
         }
@@ -318,6 +324,9 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
     const fields = await sf.describeObject(job.sfObject)
     const selectedFieldMeta = fields.filter((f) => job.fields.includes(f.name))
 
+    const priorIndexes = job.writeMode === 'replace'
+      ? db.snapshotTableIndexes(job.destTable)
+      : []
     db.createTableFromFields(job.destTable, selectedFieldMeta as FieldDescriptor[], job.writeMode)
 
     const indexCols = [
@@ -327,6 +336,9 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
     ]
     if (indexCols.length > 0) {
       db.ensureColumnIndexes(job.destTable, indexCols)
+    }
+    if (priorIndexes.length > 0) {
+      db.restoreTableIndexes(job.destTable, priorIndexes)
     }
 
     ;(async () => {
@@ -784,6 +796,40 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('db:query', (_e, sql: string) => db.executeQuery(sql))
 
+  // ── Server-side pagination for query results ───────────────────────────────
+  ipcMain.handle('db:query-init', (_e, sql: string, pageSize: number) =>
+    db.queryInit(sql, pageSize)
+  )
+
+  ipcMain.handle('db:query-page', (
+    _e, sql: string, offset: number, limit: number,
+    orderBy?: { column: string; dir: 'asc' | 'desc' }[]
+  ) => db.queryPage(sql, offset, limit, orderBy))
+
+  ipcMain.handle('db:export-query-csv', async (_e, sql: string) => {
+    const csvEscape = (v: unknown): string => {
+      if (v === null || v === undefined) return ''
+      const s = String(v)
+      return s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')
+        ? '"' + s.replace(/"/g, '""') + '"'
+        : s
+    }
+    const result = db.executeQuery(sql)
+    if (result.error || !result.columns.length) return null
+    const csv = [
+      result.columns.map(csvEscape).join(','),
+      ...result.rows.map((r) => r.map(csvEscape).join(','))
+    ].join('\n')
+    const saveResult = await dialog.showSaveDialog({
+      title: 'Export to CSV',
+      filters: [{ name: 'CSV', extensions: ['csv'] }],
+      defaultPath: 'export.csv'
+    })
+    if (saveResult.canceled || !saveResult.filePath) return null
+    writeFileSync(saveResult.filePath, csv, 'utf-8')
+    return saveResult.filePath
+  })
+
   ipcMain.handle('db:export-csv', async (_e, csvContent: string) => {
     const result = await dialog.showSaveDialog({
       title: 'Export to CSV',
@@ -804,6 +850,10 @@ export function registerIpcHandlers(): void {
   )
 
   ipcMain.handle('db:drop-table', (_e, name: string) => db.dropTable(name))
+
+  ipcMain.handle('db:waste-info', () => db.getDatabaseWasteInfo())
+
+  ipcMain.handle('db:vacuum', () => db.vacuumDatabase())
 
   ipcMain.handle('csv:pick-and-preview', async () => {
     const result = await dialog.showOpenDialog({
@@ -829,6 +879,40 @@ export function registerIpcHandlers(): void {
     db.importCsvText(csvContent, tableName, ifExists, separator)
   )
 
+  ipcMain.handle('csv:pick-direct', async () => {
+    const result = await dialog.showOpenDialog({
+      title: 'Select CSV file',
+      filters: [{ name: 'CSV', extensions: ['csv', 'tsv', 'txt'] }],
+      properties: ['openFile']
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return result.filePaths[0]
+  })
+
+  const directImportControllers = new Map<number, AbortController>()
+
+  ipcMain.handle('csv:direct-import', (event, filePath: string, tableName: string, ifExists: 'replace' | 'append') => {
+    assertCsvPath(filePath)
+    const wc = event.sender
+    const controller = new AbortController()
+    directImportControllers.set(wc.id, controller)
+    const PROGRESS_INTERVAL_MS = 500
+    let lastSentAt = 0
+    const onProgress = (rowsLoaded: number): void => {
+      const now = Date.now()
+      if (now - lastSentAt >= PROGRESS_INTERVAL_MS) {
+        lastSentAt = now
+        wc.send('csv:direct-import:progress', rowsLoaded)
+      }
+    }
+    return db.importCsvFileStreaming(filePath, tableName, ifExists, 500, onProgress, controller.signal)
+      .finally(() => { directImportControllers.delete(wc.id) })
+  })
+
+  ipcMain.handle('csv:direct-import:cancel', (event) => {
+    directImportControllers.get(event.sender.id)?.abort()
+  })
+
   // ── Saved Queries ────────────────────────────────────────────────────────────
 
   ipcMain.handle('query:list', () => db.listSavedQueries())
@@ -841,6 +925,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('query:drafts:list', () => db.listQueryDrafts())
   ipcMain.handle('query:drafts:upsert', (_e, draft) => db.upsertQueryDraft(draft))
   ipcMain.handle('query:drafts:delete', (_e, tabKey: string) => db.deleteQueryDraft(tabKey))
+
+  // ── Script Drafts ─────────────────────────────────────────────────────────────
+
+  ipcMain.handle('script:drafts:list', () => db.listScriptDrafts())
+  ipcMain.handle('script:drafts:upsert', (_e, draft) => db.upsertScriptDraft(draft))
+  ipcMain.handle('script:drafts:delete', (_e, draftKey: string) => db.deleteScriptDraft(draftKey))
 
 
   // ── Salesforce ───────────────────────────────────────────────────────────────
@@ -980,15 +1070,92 @@ export function registerIpcHandlers(): void {
 
   // ── Row-level access for the renderer (avoids shipping millions of rows upfront) ──
   ipcMain.handle('writeback:row-count', (_e, sql: string) => db.queryRowCount(sql))
-  ipcMain.handle('writeback:page', (_e, sql: string, offset: number, limit: number) =>
-    db.queryPage(sql, offset, limit)
-  )
+  ipcMain.handle('writeback:page', (
+    _e, sql: string, offset: number, limit: number,
+    orderBy?: { column: string; dir: 'asc' | 'desc' }[]
+  ) => db.queryPage(sql, offset, limit, orderBy))
   ipcMain.handle('writeback:failed-rows', (_e, runId: string) => {
     const state = wbRunStates.get(runId)
     if (!state) return []
     return [...state.failedRows.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([index, data]) => ({ index, message: data.message, row: data.row }))
+  })
+
+  // ── Paginated failed-row access ────────────────────────────────────────────
+
+  /** Returns total failed count + distinct error messages with per-message counts. */
+  ipcMain.handle('writeback:failed-rows-meta', (_e, runId: string) => {
+    const state = wbRunStates.get(runId)
+    if (!state) return { totalCount: 0, distinctErrors: [] }
+    const counts = new Map<string, number>()
+    for (const [, data] of state.failedRows) {
+      counts.set(data.message, (counts.get(data.message) ?? 0) + 1)
+    }
+    const distinctErrors = [...counts.entries()].map(([message, count]) => ({ message, count }))
+    return { totalCount: state.failedRows.size, distinctErrors }
+  })
+
+  /**
+   * Returns one page of failed rows.
+   * Default sort is by original absolute row index.
+   * When `errorFilter` is provided, only rows whose message exactly matches it are returned.
+   * When `sortCriteria` is provided, rows are sorted server-side before slicing.
+   * Column mapping: colIdx 0 → message, colIdx 1+ → row[colIdx - 1].
+   */
+  ipcMain.handle('writeback:failed-rows-page', (
+    _e, runId: string, offset: number, limit: number,
+    errorFilter?: string,
+    sortCriteria?: { colIdx: number; dir: 'asc' | 'desc' }[]
+  ) => {
+    const state = wbRunStates.get(runId)
+    if (!state) return []
+    let entries = [...state.failedRows.entries()].sort((a, b) => a[0] - b[0])
+    if (errorFilter) {
+      entries = entries.filter(([, data]) => data.message === errorFilter)
+    }
+    if (sortCriteria?.length) {
+      entries.sort((a, b) => {
+        for (const { colIdx, dir } of sortCriteria) {
+          const va: unknown = colIdx === 0 ? a[1].message : (a[1].row as unknown[])[colIdx - 1]
+          const vb: unknown = colIdx === 0 ? b[1].message : (b[1].row as unknown[])[colIdx - 1]
+          const cmp = va == null && vb == null ? 0
+            : va == null ? -1
+            : vb == null ? 1
+            : typeof va === 'number' && typeof vb === 'number' ? va - vb
+            : String(va).localeCompare(String(vb))
+          if (cmp !== 0) {
+            return dir === 'asc' ? cmp : -cmp
+          }
+        }
+        return 0
+      })
+    }
+    return entries.slice(offset, offset + limit).map(([index, data]) => ({
+      index,
+      message: data.message,
+      row: data.row
+    }))
+  })
+
+  /**
+   * Returns a map of absolute row index → { message, row } for all failed rows
+   * whose index falls within [fromIndex, toIndex). Used to annotate the all-rows view
+   * after a job completes without fetching every failed row to the renderer.
+   */
+  ipcMain.handle('writeback:failed-rows-in-range', (
+    _e, runId: string, fromIndex: number, toIndex: number
+  ) => {
+    const state = wbRunStates.get(runId)
+    if (!state) return {}
+    const result: Record<number, { message: string; row: unknown[] }> = {}
+    for (let i = fromIndex; i < toIndex; i++) {
+      const entry = state.failedRows.get(i)
+      if (entry) {
+        result[i] = { message: entry.message, row: entry.row }
+      }
+    }
+    return result
   })
 
   // Returns a { [absoluteRowIndex]: sfId } map for one page — insert operations only.

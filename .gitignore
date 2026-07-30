@@ -6,3 +6,4 @@ dist/
 *.db
 *.tsbuildinfo
 TODO_INTERNAL.md
+*.code-workspace

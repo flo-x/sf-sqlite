@@ -19,7 +19,6 @@
             <th>SQL Column</th>
             <th style="width:32px;"></th>
             <th>Salesforce Field</th>
-            <th v-if="showKey" style="width:52px;">Key?</th>
           </tr>
         </thead>
         <tbody>
@@ -37,15 +36,6 @@
                 <option v-for="f in sfFields" :key="f.name" :value="f.name">{{ f.name }} ({{ f.type }})</option>
               </select>
             </td>
-            <td v-if="showKey">
-              <input
-                type="radio"
-                :name="'keyfield'"
-                :checked="m.isKey"
-                :disabled="m.excluded || !m.sfField"
-                @change="setKey(origIdx)"
-              />
-            </td>
           </tr>
         </tbody>
       </table>
@@ -60,7 +50,6 @@ import type { FieldMapping, FieldDescriptor } from '../../../shared/types'
 const props = defineProps<{
   modelValue: FieldMapping[]
   sfFields: FieldDescriptor[]
-  showKey?: boolean
 }>()
 
 const emit = defineEmits<{ 'update:modelValue': [v: FieldMapping[]] }>()
@@ -104,10 +93,6 @@ function skipUnknown(): void {
 function toggleExcluded(idx: number, event: Event): void {
   mappings.value[idx].excluded = !(event.target as HTMLInputElement).checked
   emit('update:modelValue', [...mappings.value])
-}
-
-function setKey(idx: number): void {
-  for (let i = 0; i < mappings.value.length; i++) mappings.value[i].isKey = i === idx
 }
 
 function onMappingChange(): void {

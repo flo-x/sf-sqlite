@@ -252,7 +252,11 @@ if (result.rowsFailed > 0) {
             :class="{ active: outputTab === 'result' }"
             @click="outputTab = 'result'"
           >Result</button>
-          <button class="btn btn-ghost btn-sm" style="margin-left: auto; font-size: 11px;" @click="clearOutput">Clear</button>
+          <div style="display:flex; align-items:center; gap:6px; margin-left:auto;">
+            <input type="checkbox" id="autoClearOutput" v-model="autoClearOutput" style="margin:0; cursor:pointer;" />
+            <label for="autoClearOutput" style="font-size:12px; color:var(--text-muted); cursor:pointer; user-select:none; margin:0;">Auto-clear</label>
+            <button class="btn btn-ghost btn-sm" style="font-size:11px;" @click="clearOutput">Clear</button>
+          </div>
         </div>
 
         <div class="output-body">
@@ -303,7 +307,7 @@ import * as monaco from 'monaco-editor'
 import { EDITOR_BASE_OPTIONS } from '../utils/monaco'
 import { useConnectionStore } from '../stores/connection'
 import { useJobStore } from '../stores/job'
-import type { SavedScript, ScriptLog, ScriptComplete } from '../../../shared/types'
+import type { SavedScript, ScriptLog, ScriptComplete, ScriptDraft } from '../../../shared/types'
 
 const conn = useConnectionStore()
 const jobStore = useJobStore()
@@ -323,6 +327,12 @@ const editBuffer = new Map<number | null, EditBuffer>()
 
 function flushToBuffer(): void {
   editBuffer.set(activeScript.savedId, { name: activeScript.name, code: activeScript.code })
+  if (editor) {
+    const vs = editor.saveViewState()
+    if (vs) {
+      scriptViewStates.set(activeScript.savedId, vs)
+    }
+  }
 }
 
 // ── Active script state ───────────────────────────────────────────────────────
@@ -345,6 +355,8 @@ const activeScript = reactive<ActiveScript>({
 function applyToEditor(code: string): void {
   if (editor) {
     editor.setValue(code)
+    const vs = scriptViewStates.get(activeScript.savedId) ?? null
+    editor.restoreViewState(vs)
     editor.focus()
   }
 }
@@ -382,15 +394,19 @@ async function saveScript(): Promise<void> {
     language: activeScript.language,
     code: activeScript.code
   })
+  const oldKey = draftKey(activeScript.savedId)
   editBuffer.delete(activeScript.savedId)
   editBuffer.delete(saved.id)
   activeScript.savedId = saved.id
   activeScript.dirty = false
+  void window.api.deleteScriptDraft(oldKey)
   await loadScripts()
 }
 
 async function deleteScript(id: number): Promise<void> {
   editBuffer.delete(id)
+  scriptViewStates.delete(id)
+  void window.api.deleteScriptDraft(draftKey(id))
   await window.api.deleteScript(id)
   if (activeScript.savedId === id) {
     newScript()
@@ -401,7 +417,40 @@ async function deleteScript(id: number): Promise<void> {
 function markDirty(): void {
   activeScript.dirty = true
   flushToBuffer()
+  scheduleIdleDraft()
 }
+
+// ── Draft autosave ────────────────────────────────────────────────────────────
+const IDLE_DRAFT_MS = 60_000
+let idleDraftTimer: ReturnType<typeof setTimeout> | null = null
+let cleanupBeforeQuit: (() => void) | null = null
+
+function draftKey(savedId: number | null): string {
+  return savedId === null ? 'new' : String(savedId)
+}
+
+async function saveDraftAll(): Promise<void> {
+  flushToBuffer()
+  for (const [key, buf] of editBuffer) {
+    const vsRaw = scriptViewStates.get(key)
+    await window.api.upsertScriptDraft({
+      draftKey: draftKey(key),
+      savedId: key,
+      name: buf.name,
+      code: buf.code,
+      viewState: vsRaw ? JSON.stringify(vsRaw) : null
+    })
+  }
+}
+
+function scheduleIdleDraft(): void {
+  if (idleDraftTimer !== null) {
+    clearTimeout(idleDraftTimer)
+  }
+  idleDraftTimer = setTimeout(() => { void saveDraftAll() }, IDLE_DRAFT_MS)
+}
+
+function onWindowBlur(): void { void saveDraftAll() }
 
 // ── Script execution ──────────────────────────────────────────────────────────
 const running = ref(false)
@@ -447,6 +496,10 @@ function teardownListeners(): void {
 
 async function runScript(): Promise<void> {
   if (!conn.dbPath) return
+
+  if (autoClearOutput.value) {
+    clearOutput()
+  }
 
   const runId = crypto.randomUUID()
   currentRunId.value = runId
@@ -520,6 +573,10 @@ function clearOutput(): void {
   lastResult.value = null
 }
 
+const AUTOCLEAR_KEY = 'scriptsView:autoClearOutput'
+const autoClearOutput = ref(localStorage.getItem(AUTOCLEAR_KEY) === 'true')
+watch(autoClearOutput, (v) => localStorage.setItem(AUTOCLEAR_KEY, String(v)))
+
 function formatTs(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
@@ -531,6 +588,7 @@ const showHelp = ref(false)
 const monacoContainer = ref<HTMLElement | null>(null)
 const editorArea = ref<HTMLElement | null>(null)
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
+const scriptViewStates = new Map<number | null, monaco.editor.ICodeEditorViewState>()
 
 function initEditor(): void {
   if (!monacoContainer.value || editor) return
@@ -622,11 +680,79 @@ function applyPendingCode(): void {
   applyToEditor(pendingCode)
 }
 
+/**
+ * Loads all script drafts from the DB, populates editBuffer and scriptViewStates,
+ * then makes the most-recently-updated draft the active script.
+ * Called before initEditor() so the editor starts with the right code.
+ *
+ * Drafts whose content is identical to the already-saved script are silently
+ * discarded (and removed from the DB) so they never cause a spurious dirty dot.
+ */
+async function restoreDrafts(): Promise<void> {
+  const drafts = await window.api.listScriptDrafts()
+  if (drafts.length === 0) {
+    return
+  }
+
+  const dirtyDrafts: ScriptDraft[] = []
+  for (const d of drafts) {
+    if (d.savedId !== null) {
+      const saved = scripts.value.find((x) => x.id === d.savedId)
+      if (saved && saved.name === d.name && saved.code === d.code) {
+        // Draft matches saved state — discard it.
+        void window.api.deleteScriptDraft(d.draftKey)
+        continue
+      }
+    }
+    dirtyDrafts.push(d)
+    editBuffer.set(d.savedId, { name: d.name, code: d.code })
+    if (d.viewState) {
+      try {
+        scriptViewStates.set(d.savedId, JSON.parse(d.viewState) as monaco.editor.ICodeEditorViewState)
+      } catch { /* ignore malformed state */ }
+    }
+  }
+
+  if (dirtyDrafts.length === 0) {
+    return
+  }
+
+  // Activate the most-recently-updated dirty draft (list is already ordered DESC by updated_at)
+  const latest: ScriptDraft = dirtyDrafts[0]
+  if (latest.savedId === null) {
+    activeScript.savedId = null
+    activeScript.name = latest.name
+    activeScript.language = 'javascript'
+    activeScript.code = latest.code
+    activeScript.dirty = true
+  } else {
+    const s = scripts.value.find((x) => x.id === latest.savedId)
+    if (s) {
+      const buf = editBuffer.get(s.id)
+      activeScript.savedId = s.id
+      activeScript.name = buf?.name ?? s.name
+      activeScript.language = s.language
+      activeScript.code = buf?.code ?? s.code
+      activeScript.dirty = true
+    }
+  }
+}
+
 onMounted(async () => {
+  window.addEventListener('blur', onWindowBlur)
+
+  cleanupBeforeQuit = window.api.onBeforeQuit(() => { void saveDraftAll() })
+
   if (!conn.dbConnected) return
   await loadScripts()
+  await restoreDrafts()
   await nextTick()
   initEditor()
+  // Restore view state for whatever script is now active
+  const vs = scriptViewStates.get(activeScript.savedId) ?? null
+  if (vs && editor) {
+    editor.restoreViewState(vs)
+  }
   applyPendingCode()
   // NOTE: window listener is managed by onActivated/onDeactivated (keep-alive).
 })
@@ -639,13 +765,28 @@ onMounted(async () => {
 onActivated(() => {
   window.addEventListener('keydown', onKeydown)
   applyPendingCode()
+  if (editor) {
+    const vs = scriptViewStates.get(activeScript.savedId) ?? null
+    editor.restoreViewState(vs)
+  }
 })
 
 onDeactivated(() => {
   window.removeEventListener('keydown', onKeydown)
+  if (editor) {
+    const vs = editor.saveViewState()
+    if (vs) {
+      scriptViewStates.set(activeScript.savedId, vs)
+    }
+  }
 })
 
 onBeforeUnmount(() => {
+  if (idleDraftTimer !== null) {
+    clearTimeout(idleDraftTimer)
+  }
+  cleanupBeforeQuit?.()
+  window.removeEventListener('blur', onWindowBlur)
   editor?.dispose()
   editor = null
   teardownListeners()
@@ -655,8 +796,13 @@ onBeforeUnmount(() => {
 watch(() => conn.dbConnected, async (v) => {
   if (v) {
     await loadScripts()
+    await restoreDrafts()
     await nextTick()
-    if (!editor) initEditor()
+    if (!editor) {
+      initEditor()
+    } else {
+      applyToEditor(activeScript.code)
+    }
   }
 })
 </script>

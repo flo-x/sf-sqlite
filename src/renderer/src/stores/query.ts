@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { SavedQuery, QueryDraft, QueryResult } from '../../../shared/types'
+import type { SavedQuery, QueryDraft, PagedQueryResult, SortCriterion } from '../../../shared/types'
 
 export interface QueryTab {
   key: string
@@ -8,8 +8,10 @@ export interface QueryTab {
   name: string
   sqlText: string
   savedSqlText: string
-  result: QueryResult | null
+  result: PagedQueryResult | null
   executing: boolean
+  viewState: string | null
+  sortCriteria: SortCriterion[]
 }
 
 export const useQueryStore = defineStore('query', () => {
@@ -27,7 +29,9 @@ export const useQueryStore = defineStore('query', () => {
       sqlText: sql ?? '',
       savedSqlText: sql ?? '',
       result: null,
-      executing: false
+      executing: false,
+      viewState: null,
+      sortCriteria: []
     }
     tabs.value.push(tab)
     activeTabKey.value = key
@@ -52,7 +56,9 @@ export const useQueryStore = defineStore('query', () => {
         // For unsaved tabs it stays '' so any content appears dirty.
         savedSqlText: saved?.sqlText ?? '',
         result: null,
-        executing: false
+        executing: false,
+        viewState: d.viewState,
+        sortCriteria: [] as SortCriterion[]
       }
     })
     const pendingTabs = tabs.value.filter((t) => t.savedId === null)
@@ -73,7 +79,9 @@ export const useQueryStore = defineStore('query', () => {
       sqlText: q.sqlText,
       savedSqlText: q.sqlText,
       result: null,
-      executing: false
+      executing: false,
+      viewState: q.viewState,
+      sortCriteria: [] as SortCriterion[]
     }))
     // Preserve any unsaved tabs that were added before initialization
     // (e.g. from "Open in Query Editor" in DB Explorer before visiting this view).
@@ -110,9 +118,25 @@ export const useQueryStore = defineStore('query', () => {
     }
   }
 
-  function setResult(key: string, result: QueryResult): void {
+  function setResult(key: string, result: PagedQueryResult): void {
     const tab = tabs.value.find((t) => t.key === key)
-    if (tab) tab.result = result
+    if (tab) {
+      tab.result = result
+    }
+  }
+
+  function updateResultPage(key: string, rows: unknown[][], offset: number): void {
+    const tab = tabs.value.find((t) => t.key === key)
+    if (tab?.result) {
+      tab.result = { ...tab.result, rows, offset }
+    }
+  }
+
+  function updateSortCriteria(key: string, criteria: SortCriterion[]): void {
+    const tab = tabs.value.find((t) => t.key === key)
+    if (tab) {
+      tab.sortCriteria = criteria
+    }
   }
 
   function setExecuting(key: string, val: boolean): void {
@@ -148,6 +172,8 @@ export const useQueryStore = defineStore('query', () => {
     updateSql,
     markSaved,
     setResult,
+    updateResultPage,
+    updateSortCriteria,
     setExecuting,
     closeTab,
     toggleTableExpanded

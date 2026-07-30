@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import { join, dirname } from 'path'
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync, createReadStream } from 'fs'
 import type {
   TableInfo,
   TableColumn,
@@ -14,9 +14,11 @@ import type {
   WritebackRunEntry,
   SavedQuery,
   QueryDraft,
+  ScriptDraft,
   FieldDescriptor,
   SavedScript,
-  SavedScriptInput
+  SavedScriptInput,
+  DatabaseWasteInfo
 } from '../shared/types'
 
 let db: Database.Database | null = null
@@ -142,6 +144,7 @@ function initMetaTables(): void {
       name       TEXT NOT NULL DEFAULT 'Untitled',
       sql_text   TEXT NOT NULL DEFAULT '',
       tab_order  INTEGER NOT NULL DEFAULT 0,
+      view_state TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -152,6 +155,16 @@ function initMetaTables(): void {
       name       TEXT NOT NULL DEFAULT '',
       sql_text   TEXT NOT NULL DEFAULT '',
       tab_order  INTEGER NOT NULL DEFAULT 0,
+      view_state TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS _sf_bridge_script_drafts (
+      draft_key  TEXT PRIMARY KEY,
+      saved_id   INTEGER,
+      name       TEXT NOT NULL DEFAULT '',
+      code       TEXT NOT NULL DEFAULT '',
+      view_state TEXT,
       updated_at TEXT NOT NULL
     );
 
@@ -243,6 +256,14 @@ function initMetaTables(): void {
   if (httpLogCols.length > 0 && !httpLogCols.includes('request_system_prompt')) {
     d.exec(`ALTER TABLE ai_llm_http_log ADD COLUMN request_system_prompt TEXT`)
   }
+  const queryCols = (d.prepare(`PRAGMA table_info("_sf_bridge_queries")`).all() as Array<{ name: string }>).map(c => c.name)
+  if (!queryCols.includes('view_state')) {
+    d.exec(`ALTER TABLE _sf_bridge_queries ADD COLUMN view_state TEXT`)
+  }
+  const draftCols = (d.prepare(`PRAGMA table_info("_sf_bridge_query_drafts")`).all() as Array<{ name: string }>).map(c => c.name)
+  if (!draftCols.includes('view_state')) {
+    d.exec(`ALTER TABLE _sf_bridge_query_drafts ADD COLUMN view_state TEXT`)
+  }
 }
 
 export function getDatabaseInfo(): TableInfo[] {
@@ -326,6 +347,47 @@ export function executeQuery(sql: string): QueryResult {
     return {
       columns: [],
       rows: [],
+      durationMs: Date.now() - start,
+      error: err instanceof Error ? err.message : String(err)
+    }
+  }
+}
+
+/**
+ * Execute a SQL statement and return only the first page of rows plus the total row count.
+ * For SELECT statements this runs two queries (COUNT + LIMIT/OFFSET) in the same synchronous
+ * call so that the renderer never needs all rows at once.
+ * For DML statements the result is always a single row (changes + lastInsertRowid).
+ */
+export function queryInit(
+  sql: string,
+  pageSize: number
+): { columns: string[]; rows: unknown[][]; totalCount: number; durationMs: number; error?: string } {
+  const d = getDb()
+  const start = Date.now()
+  try {
+    const stmt = d.prepare(sql)
+    if (stmt.reader) {
+      const countRow = d.prepare(`SELECT COUNT(*) AS _cnt FROM (${sql}) AS _t`).get() as { _cnt: number }
+      const totalCount = countRow._cnt
+      const pageStmt = d.prepare(`SELECT * FROM (${sql}) LIMIT ? OFFSET ?`)
+      const columns = pageStmt.columns().map((c) => c.name)
+      const rows = pageSize > 0 ? pageStmt.raw(true).all(pageSize, 0) as unknown[][] : []
+      return { columns, rows, totalCount, durationMs: Date.now() - start }
+    } else {
+      const info = stmt.run()
+      return {
+        columns: ['changes', 'lastInsertRowid'],
+        rows: [[info.changes, Number(info.lastInsertRowid)]],
+        totalCount: 1,
+        durationMs: Date.now() - start
+      }
+    }
+  } catch (err: unknown) {
+    return {
+      columns: [],
+      rows: [],
+      totalCount: 0,
       durationMs: Date.now() - start,
       error: err instanceof Error ? err.message : String(err)
     }
@@ -619,16 +681,20 @@ export function queryRowCount(sql: string): number {
   }
 }
 
-/** Return a page of rows from a SELECT query (LIMIT / OFFSET). */
+/** Return a page of rows from a SELECT query (LIMIT / OFFSET), with optional ORDER BY. */
 export function queryPage(
   sql: string,
   offset: number,
-  limit: number
+  limit: number,
+  orderBy?: { column: string; dir: 'asc' | 'desc' }[]
 ): { columns: string[]; rows: unknown[][] } {
   assertSelectOnly(sql)
   const d = getDb()
   try {
-    const stmt = d.prepare(`SELECT * FROM (${sql}) LIMIT ? OFFSET ?`)
+    const orderClause = orderBy?.length
+      ? ' ORDER BY ' + orderBy.map((o) => `${escapeId(o.column)} ${o.dir === 'asc' ? 'ASC' : 'DESC'}`).join(', ')
+      : ''
+    const stmt = d.prepare(`SELECT * FROM (${sql})${orderClause} LIMIT ? OFFSET ?`)
     const columns = stmt.columns().map((c) => c.name)
     if (limit === 0) {
       return { columns, rows: [] }
@@ -646,14 +712,14 @@ export function listSavedQueries(): SavedQuery[] {
   return (getDb().prepare('SELECT * FROM _sf_bridge_queries ORDER BY tab_order, id').all() as Array<Record<string, unknown>>).map(rowToSavedQuery)
 }
 
-export function saveQuery(q: { id?: number; name: string; sqlText: string; tabOrder: number }): SavedQuery {
+export function saveQuery(q: { id?: number; name: string; sqlText: string; tabOrder: number; viewState?: string | null }): SavedQuery {
   const d = getDb()
   const now = new Date().toISOString()
   if (q.id) {
-    d.prepare('UPDATE _sf_bridge_queries SET name=?,sql_text=?,tab_order=?,updated_at=? WHERE id=?').run(q.name, q.sqlText, q.tabOrder, now, q.id)
+    d.prepare('UPDATE _sf_bridge_queries SET name=?,sql_text=?,tab_order=?,view_state=?,updated_at=? WHERE id=?').run(q.name, q.sqlText, q.tabOrder, q.viewState ?? null, now, q.id)
     return rowToSavedQuery(d.prepare('SELECT * FROM _sf_bridge_queries WHERE id=?').get(q.id) as Record<string, unknown>)
   }
-  const info = d.prepare('INSERT INTO _sf_bridge_queries (name,sql_text,tab_order,created_at,updated_at) VALUES (?,?,?,?,?)').run(q.name, q.sqlText, q.tabOrder, now, now)
+  const info = d.prepare('INSERT INTO _sf_bridge_queries (name,sql_text,tab_order,view_state,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(q.name, q.sqlText, q.tabOrder, q.viewState ?? null, now, now)
   return rowToSavedQuery(d.prepare('SELECT * FROM _sf_bridge_queries WHERE id=?').get(info.lastInsertRowid) as Record<string, unknown>)
 }
 
@@ -684,16 +750,17 @@ export function upsertQueryDraft(draft: Omit<QueryDraft, 'updatedAt'>): void {
   const now = new Date().toISOString()
   getDb()
     .prepare(
-      `INSERT INTO _sf_bridge_query_drafts (tab_key, saved_id, name, sql_text, tab_order, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO _sf_bridge_query_drafts (tab_key, saved_id, name, sql_text, tab_order, view_state, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(tab_key) DO UPDATE SET
          saved_id   = excluded.saved_id,
          name       = excluded.name,
          sql_text   = excluded.sql_text,
          tab_order  = excluded.tab_order,
+         view_state = excluded.view_state,
          updated_at = excluded.updated_at`
     )
-    .run(draft.tabKey, draft.savedId ?? null, draft.name, draft.sqlText, draft.tabOrder, now)
+    .run(draft.tabKey, draft.savedId ?? null, draft.name, draft.sqlText, draft.tabOrder, draft.viewState ?? null, now)
 }
 
 export function deleteQueryDraft(tabKey: string): void {
@@ -702,6 +769,47 @@ export function deleteQueryDraft(tabKey: string): void {
 
 export function clearQueryDrafts(): void {
   getDb().prepare('DELETE FROM _sf_bridge_query_drafts').run()
+}
+
+// ─── Script Drafts ────────────────────────────────────────────────────────────
+
+export function listScriptDrafts(): ScriptDraft[] {
+  return (
+    getDb()
+      .prepare('SELECT * FROM _sf_bridge_script_drafts ORDER BY updated_at DESC')
+      .all() as Array<Record<string, unknown>>
+  ).map(rowToScriptDraft)
+}
+
+export function upsertScriptDraft(draft: Omit<ScriptDraft, 'updatedAt'>): void {
+  const now = new Date().toISOString()
+  getDb()
+    .prepare(
+      `INSERT INTO _sf_bridge_script_drafts (draft_key, saved_id, name, code, view_state, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(draft_key) DO UPDATE SET
+         saved_id   = excluded.saved_id,
+         name       = excluded.name,
+         code       = excluded.code,
+         view_state = excluded.view_state,
+         updated_at = excluded.updated_at`
+    )
+    .run(draft.draftKey, draft.savedId ?? null, draft.name, draft.code, draft.viewState ?? null, now)
+}
+
+export function deleteScriptDraft(draftKey: string): void {
+  getDb().prepare('DELETE FROM _sf_bridge_script_drafts WHERE draft_key = ?').run(draftKey)
+}
+
+function rowToScriptDraft(r: Record<string, unknown>): ScriptDraft {
+  return {
+    draftKey: r.draft_key as string,
+    savedId: r.saved_id != null ? Number(r.saved_id) : null,
+    name: r.name as string,
+    code: r.code as string,
+    viewState: (r.view_state as string | null) ?? null,
+    updatedAt: r.updated_at as string
+  }
 }
 
 // ─── Row mappers ─────────────────────────────────────────────────────────────
@@ -778,6 +886,7 @@ function rowToSavedQuery(r: Record<string, unknown>): SavedQuery {
     name: r.name as string,
     sqlText: r.sql_text as string,
     tabOrder: Number(r.tab_order),
+    viewState: (r.view_state as string | null) ?? null,
     createdAt: r.created_at as string,
     updatedAt: r.updated_at as string
   }
@@ -790,6 +899,7 @@ function rowToQueryDraft(r: Record<string, unknown>): QueryDraft {
     name: r.name as string,
     sqlText: r.sql_text as string,
     tabOrder: Number(r.tab_order),
+    viewState: (r.view_state as string | null) ?? null,
     updatedAt: r.updated_at as string
   }
 }
@@ -882,6 +992,194 @@ export function importCsvFile(filePath: string, tableName: string, ifExists: 're
   return _importParsed(parseCsv(readFileSync(filePath, 'utf-8')), tableName, ifExists)
 }
 
+/**
+ * Stateful RFC-4180 CSV parser that processes data chunk-by-chunk.
+ * Handles quoted fields that span multiple lines and `""` escape sequences
+ * even across chunk boundaries.
+ */
+class CsvStreamParser {
+  private field = ''
+  private row: string[] = []
+  private inQuote = false
+  /** True when we just saw a `"` inside a quoted field and haven't yet seen the next char. */
+  private pendingClosingQuote = false
+  readonly separator: string
+
+  onRow?: (row: string[]) => void
+
+  constructor(separator = ',') {
+    this.separator = separator
+  }
+
+  push(chunk: string): void {
+    for (let i = 0; i < chunk.length; i++) {
+      const ch = chunk[i]
+
+      if (this.pendingClosingQuote) {
+        this.pendingClosingQuote = false
+        if (ch === '"') {
+          // "" inside a quoted field → literal double-quote character
+          this.field += '"'
+          continue
+        }
+        // Closing quote followed by something else → end of quoted field
+        this.inQuote = false
+        // Fall through and process ch in the unquoted branch below
+      }
+
+      if (this.inQuote) {
+        if (ch === '"') {
+          this.pendingClosingQuote = true
+        } else {
+          this.field += ch
+        }
+      } else {
+        if (ch === '"') {
+          this.inQuote = true
+        } else if (ch === this.separator) {
+          this.row.push(this.field)
+          this.field = ''
+        } else if (ch === '\r') {
+          // skip bare CR
+        } else if (ch === '\n') {
+          this.row.push(this.field)
+          this.field = ''
+          if (this.row.some((f) => f !== '')) {
+            this.onRow?.(this.row)
+          }
+          this.row = []
+        } else {
+          this.field += ch
+        }
+      }
+    }
+  }
+
+  /** Call after the stream ends to emit any final partial row (no trailing newline). */
+  flush(): void {
+    if (this.pendingClosingQuote) {
+      this.pendingClosingQuote = false
+      this.inQuote = false
+    }
+    this.row.push(this.field)
+    if (this.row.some((f) => f !== '')) {
+      this.onRow?.(this.row)
+    }
+  }
+}
+
+/**
+ * Stream a CSV file directly into a SQLite table without loading the whole
+ * file into memory. Handles multi-line quoted fields and `""` escapes.
+ * Rows are committed in transactions of `batchSize`.
+ */
+export function importCsvFileStreaming(
+  filePath: string,
+  tableName: string,
+  ifExists: 'replace' | 'append' = 'replace',
+  batchSize = 500,
+  onProgress?: (rowsLoaded: number) => void,
+  signal?: AbortSignal
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const stream = createReadStream(filePath, { encoding: 'utf-8' })
+    const parser = new CsvStreamParser()
+
+    const d = getDb()
+    let cols: string[] | null = null
+    let stmt: ReturnType<typeof d.prepare> | null = null
+    let batch: string[][] = []
+    let totalCount = 0
+    // Guard against settling the promise more than once (end + close can both fire).
+    let settled = false
+    const doResolve = (v: number): void => { if (!settled) { settled = true; resolve(v) } }
+    const doReject  = (e: unknown): void  => { if (!settled) { settled = true; reject(e)  } }
+
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        stream.destroy()  // triggers 'close', suppresses 'end'
+      }, { once: true })
+    }
+
+    function flushBatch(): void {
+      if (!cols || !stmt || batch.length === 0) return
+      const rows = batch.splice(0)
+      const c = cols
+      const s = stmt
+      d.transaction((items: string[][]) => {
+        for (const item of items) {
+          s.run(c.map((_, i) => item[i] ?? null))
+        }
+      })(rows)
+      totalCount += rows.length
+      onProgress?.(totalCount)
+    }
+
+    parser.onRow = (row) => {
+      if (!cols) {
+        const sanitize = (name: string): string => name.replace(/[^\w]/g, '_') || 'col'
+        cols = row.map(sanitize)
+        if (ifExists === 'replace') {
+          d.exec(`DROP TABLE IF EXISTS ${escapeId(tableName)}`)
+        }
+        const colDefs = cols.map((c) => `${escapeId(c)} TEXT`).join(', ')
+        d.exec(`CREATE TABLE IF NOT EXISTS ${escapeId(tableName)} (${colDefs})`)
+        const placeholders = cols.map(() => '?').join(', ')
+        stmt = d.prepare(`INSERT INTO ${escapeId(tableName)} (${cols.map((c) => escapeId(c)).join(', ')}) VALUES (${placeholders})`)
+        return
+      }
+      batch.push(row)
+      if (batch.length >= batchSize) {
+        flushBatch()
+      }
+    }
+
+    stream.on('data', (chunk: string | Buffer) => {
+      try {
+        parser.push(typeof chunk === 'string' ? chunk : chunk.toString('utf-8'))
+      } catch (err) {
+        stream.destroy()
+        doReject(err)
+      }
+    })
+
+    stream.on('end', () => {
+      try {
+        parser.flush()
+        flushBatch()
+        doResolve(totalCount)
+      } catch (err) {
+        doReject(err)
+      }
+    })
+
+    // 'close' fires after both normal end and destroy(). Only act when aborted.
+    stream.on('close', () => {
+      if (signal?.aborted) {
+        doReject(Object.assign(new Error('Import aborted'), { rowsCommitted: totalCount }))
+      }
+    })
+
+    stream.on('error', (err: Error) => doReject(err))
+  })
+}
+
+// ── Maintenance ──────────────────────────────────────────────────────────────
+
+export function getDatabaseWasteInfo(): DatabaseWasteInfo {
+  const d = getDb()
+  const pageCount = (d.prepare('PRAGMA page_count').get() as { page_count: number }).page_count
+  const freelistCount = (d.prepare('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count
+  const pageSize = (d.prepare('PRAGMA page_size').get() as { page_size: number }).page_size
+  const wastedBytes = freelistCount * pageSize
+  const wastedPct = pageCount > 0 ? (freelistCount / pageCount) * 100 : 0
+  return { pageCount, freelistCount, pageSize, wastedBytes, wastedPct }
+}
+
+export function vacuumDatabase(): void {
+  getDb().exec('VACUUM')
+}
+
 // ── Scripts ──────────────────────────────────────────────────────────────────
 
 function rowToScript(r: Record<string, unknown>): SavedScript {
@@ -958,6 +1256,59 @@ export function ensureColumnIndexes(tableName: string, columnNames: string[]): v
 
 export function dropIndex(indexName: string): void {
   getDb().exec(`DROP INDEX IF EXISTS ${escapeId(indexName)}`)
+}
+
+// ─── Index snapshot / restore ─────────────────────────────────────────────────
+
+export interface IndexSnapshot {
+  name: string
+  unique: boolean
+  columns: string[]
+}
+
+/**
+ * Capture all user-created indexes (origin = 'c') on a table so they can be
+ * recreated after the table is dropped and rebuilt. Returns an empty array if
+ * the table does not exist.
+ */
+export function snapshotTableIndexes(tableName: string): IndexSnapshot[] {
+  const d = getDb()
+  const list = d.prepare(`PRAGMA index_list(${escapeId(tableName)})`).all() as {
+    name: string
+    unique: number
+    origin: string
+  }[]
+  return list
+    .filter((idx) => idx.origin === 'c')
+    .map((idx) => {
+      const cols = d
+        .prepare(`PRAGMA index_info(${escapeId(idx.name)})`)
+        .all() as { seqno: number; name: string }[]
+      return {
+        name: idx.name,
+        unique: idx.unique === 1,
+        columns: cols.sort((a, b) => a.seqno - b.seqno).map((c) => c.name)
+      }
+    })
+}
+
+/**
+ * Recreate a set of index snapshots on a (possibly rebuilt) table.
+ * Each index is attempted independently; errors are swallowed so that indexes
+ * whose columns no longer exist in the new schema are silently skipped.
+ */
+export function restoreTableIndexes(tableName: string, snapshots: IndexSnapshot[]): void {
+  const d = getDb()
+  for (const snap of snapshots) {
+    try {
+      const unique = snap.unique ? 'UNIQUE ' : ''
+      const safeName = `idx_${tableName}_${snap.columns.join('_')}`.replace(/[^a-zA-Z0-9_]/g, '_')
+      const cols = snap.columns.map((c) => escapeId(c)).join(', ')
+      d.exec(`CREATE ${unique}INDEX IF NOT EXISTS ${escapeId(safeName)} ON ${escapeId(tableName)} (${cols})`)
+    } catch {
+      /* column no longer exists or other schema mismatch — skip silently */
+    }
+  }
 }
 
 export function columnHasIndex(tableName: string, columnName: string): boolean {
