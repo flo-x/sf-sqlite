@@ -545,13 +545,18 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
           const sendPromise = sf.writebackBatch(
             { ...sfOpts, disableProbe: probeCompleted },
             records,
-            (batchSize) => {
+            (batchSize, batchStartInChunk) => {
               inFlight += batchSize
               const elapsed = (Date.now() - startTime) / 1000
               const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
+              const processingStatuses = Array.from({ length: batchSize }, (_, i) => ({
+                index: currentChunkOffset + batchStartInChunk + i,
+                status: 'processing' as const
+              }))
               send('job:progress', {
                 runId, type: 'writeback', succeeded, failed,
-                total: succeeded + failed, rps, inFlight
+                total: succeeded + failed, rps, inFlight,
+                rowStatuses: processingStatuses
               } as JobProgress)
             },
             (batchResults) => {
@@ -1289,25 +1294,29 @@ export function registerIpcHandlers(): void {
         await sf.writebackBatch(
           sfOpts,
           records,
-          (batchSize) => {
+          (batchSize, batchStartInRecords, origIndices) => {
             inFlight += batchSize
             const elapsed = (Date.now() - startTime) / 1000
             const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
+            const processingStatuses = Array.from({ length: batchSize }, (_, i) => {
+              const recIdx = origIndices ? origIndices[i] : batchStartInRecords + i
+              return { index: recIdx, status: 'processing' as const }
+            })
             send('job:progress', {
               runId: newRunId, type: 'writeback', succeeded, failed,
-              total: totalRows, rps, inFlight
+              total: totalRows, rps, inFlight,
+              rowStatuses: processingStatuses
             } as JobProgress)
           },
           (batchResults) => {
             inFlight -= batchResults.length
             for (const r of batchResults) {
-              const origAbsIdx = failedEntries[r.index][0]
               if (r.success) {
                 succeeded++
-                if (r.id) newState.rowIds.set(origAbsIdx, r.id)
+                if (r.id) newState.rowIds.set(r.index, r.id)
               } else {
                 failed++
-                newState.failedRows.set(origAbsIdx, {
+                newState.failedRows.set(r.index, {
                   message: r.errors[0] ?? '',
                   row: failedEntries[r.index][1].row
                 })
@@ -1324,7 +1333,7 @@ export function registerIpcHandlers(): void {
               rps,
               inFlight,
               rowStatuses: batchResults.map((r) => ({
-                index: failedEntries[r.index][0],
+                index: r.index,
                 status: r.success ? 'success' : 'error',
                 message: r.errors[0],
                 id: r.id

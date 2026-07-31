@@ -1,7 +1,6 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import ConnectionsView from './views/ConnectionsView.vue'
-import ExtractView from './views/ExtractView.vue'
-import WritebackView from './views/WritebackView.vue'
+import JobsView from './views/JobsView.vue'
 import ExplorerView from './views/ExplorerView.vue'
 import QueryView from './views/QueryView.vue'
 import ScriptsView from './views/ScriptsView.vue'
@@ -12,8 +11,9 @@ export const router = createRouter({
   routes: [
     { path: '/', redirect: '/connections' },
     { path: '/connections', component: ConnectionsView },
-    { path: '/extract', component: ExtractView },
-    { path: '/writeback', component: WritebackView },
+    { path: '/jobs', component: JobsView },
+    { path: '/extract', redirect: '/jobs' },
+    { path: '/writeback', redirect: '/jobs' },
     { path: '/explorer', component: ExplorerView },
     { path: '/query', component: QueryView },
     { path: '/scripts', component: ScriptsView },

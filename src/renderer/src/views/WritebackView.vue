@@ -1262,6 +1262,10 @@ onActivated(async () => {
 })
 
 watch(() => conn.bothConnected, async (v) => { if (v) { await loadJobs(); await conn.loadSFObjects() } })
+watch(() => conn.dbPath, async (newPath, oldPath) => {
+  if (!newPath) { allJobs.value = []; selectedJobId.value = null; editing.value = false; return }
+  if (oldPath && conn.sfConnected) { selectedJobId.value = null; editing.value = false; await loadJobs() }
+})
 
 const filteredJobs = computed(() => {
   const q = search.value.toLowerCase()

@@ -1010,7 +1010,7 @@ export type WritebackResult = {
 export async function writebackBatch(
   opts: WritebackOptions,
   records: Record<string, unknown>[],
-  onBatchStart: (count: number) => void,
+  onBatchStart: (count: number, startIndex: number, origIndices?: number[]) => void,
   onBatchResult: (results: WritebackResult[]) => void,
   signal: AbortSignal
 ): Promise<{ succeeded: number; failed: number }> {
@@ -1039,7 +1039,7 @@ export async function writebackBatch(
     origIndices?: number[]
   ): Promise<void> => {
     if (signal.aborted) return
-    onBatchStart(batch.length)
+    onBatchStart(batch.length, startIndex, origIndices)
     const sobject = conn.sobject(opts.sfObject)
     let rawResults: SfSaveResult[]
     if (opts.operation === 'insert') {

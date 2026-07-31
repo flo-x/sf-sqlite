@@ -65,7 +65,7 @@
               :class="trClass(vi)"
               @mousedown="onRowMousedown(vi, $event)"
             >
-              <td v-if="showRowNumbers" class="rn-col rn-td">{{ scrollOffset + vi + (externalOffset ?? 0) + 1 }}</td>
+              <td v-if="showRowNumbers" class="rn-col rn-td">{{ rowNumbers ? rowNumbers[scrollOffset + vi] : scrollOffset + vi + (externalOffset ?? 0) + 1 }}</td>
               <td
                 v-for="col in displayCols"
                 :key="col.origIdx"
@@ -173,6 +173,12 @@ const props = defineProps<{
   onPageChange?: (newOffset: number) => void
   /** The row index of the first row in the current page (0-based). */
   externalOffset?: number
+  /**
+   * When provided, overrides the auto-computed row number for each visible row.
+   * `rowNumbers[i]` is the 1-based display number for the i-th row in `rows`.
+   * Useful when rows are a filtered subset and sequential numbering would be wrong.
+   */
+  rowNumbers?: number[]
   /**
    * When set together with `onSortChange`, enables server-side sort mode.
    * The parent owns the sort state; DataGrid shows indicators from this prop

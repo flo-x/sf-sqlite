@@ -45,24 +45,13 @@
           <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
         </svg>
       </NavButton>
-      <NavButton to="/extract" tooltip="SF → SQLite" :disabled="!conn.bothConnected" :running="extractRunning">
+      <NavButton to="/jobs" tooltip="Jobs (Extract & Write-back)" :disabled="!conn.bothConnected" :running="jobsRunning">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
-          <rect x="3" y="2" width="18" height="4" rx="1" fill="currentColor" opacity="0.3"/>
-          <rect x="3" y="18" width="18" height="4" rx="1" fill="currentColor" opacity="0.3"/>
-        </svg>
-      </NavButton>
-      <NavButton to="/writeback" tooltip="SQLite → SF" :disabled="!conn.bothConnected" :running="writebackRunning">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>
-          <rect x="3" y="2" width="18" height="4" rx="1" fill="currentColor" opacity="0.3"/>
-          <rect x="3" y="18" width="18" height="4" rx="1" fill="currentColor" opacity="0.3"/>
-        </svg>
-      </NavButton>
-      <NavButton to="/explorer" tooltip="DB Explorer" :disabled="!conn.dbConnected">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
-          <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+          <line x1="12" y1="3" x2="12" y2="21"/>
+          <polyline points="18 9 12 3 6 9"/>
+          <polyline points="6 15 12 21 18 15"/>
+          <rect x="3" y="2" width="18" height="3" rx="1" fill="currentColor" opacity="0.3"/>
+          <rect x="3" y="19" width="18" height="3" rx="1" fill="currentColor" opacity="0.3"/>
         </svg>
       </NavButton>
       <NavButton to="/scripts" tooltip="JS Scripts" :disabled="!conn.dbConnected" :running="scriptRunning">
@@ -70,6 +59,12 @@
           <rect x="3" y="3" width="18" height="18" rx="2"/>
           <path d="M9 9l-3 3 3 3"/><path d="M15 9l3 3-3 3"/>
           <line x1="12" y1="7" x2="12" y2="17" stroke-dasharray="2 2"/>
+        </svg>
+      </NavButton>
+      <NavButton to="/explorer" tooltip="DB Explorer" :disabled="!conn.dbConnected">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+          <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
         </svg>
       </NavButton>
       <NavButton to="/connections" tooltip="Connections">
@@ -113,11 +108,8 @@ import appLogoUrl from './assets/icon.png'
 const conn = useConnectionStore()
 const jobs = useJobStore()
 
-const extractRunning = computed(() =>
-  [...jobs.activeJobs.values()].some((j) => j.type === 'extract' && j.status === 'running')
-)
-const writebackRunning = computed(() =>
-  [...jobs.activeJobs.values()].some((j) => j.type === 'writeback' && j.status === 'running')
+const jobsRunning = computed(() =>
+  [...jobs.activeJobs.values()].some((j) => (j.type === 'extract' || j.type === 'writeback') && j.status === 'running')
 )
 const scriptRunning = computed(() => jobs.scriptRunning)
 

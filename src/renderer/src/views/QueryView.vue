@@ -696,13 +696,13 @@ function sortCriteriaToOrderBy(tab: { result: PagedQueryResult | null; sortCrite
 function sendToExtract(): void {
   const queryText = getEffectiveQuery().trim()
   if (!queryText) return
-  router.push({ path: '/extract', state: { pendingSoql: queryText } })
+  router.push({ path: '/jobs', state: { pendingSoql: queryText } })
 }
 
 function sendToWriteback(): void {
   const queryText = getEffectiveQuery().trim()
   if (!queryText) return
-  router.push({ path: '/writeback', state: { pendingSql: queryText } })
+  router.push({ path: '/jobs', state: { pendingSql: queryText } })
 }
 
 async function saveTab(key: string): Promise<void> {

@@ -1,0 +1,2241 @@
+<template>
+  <div class="split-view" v-if="conn.bothConnected" ref="splitContainer">
+    <!-- ── Left: Unified job list ──────────────────────────────────────── -->
+    <div class="split-left" :style="{ flexBasis: splitPct + '%' }">
+      <div class="toolbar">
+        <div class="new-job-wrap">
+          <button class="btn btn-primary btn-sm new-job-btn" @click.stop="newJobMenuOpen = !newJobMenuOpen">
+            + New Job <span style="font-size:10px; margin-left:2px;">▾</span>
+          </button>
+          <div v-if="newJobMenuOpen" class="new-job-menu" @click.stop>
+            <button class="new-job-menu-item" @click="startNewExtractJob">
+              <span class="type-icon-extract">⬇</span>
+              Extraction Job
+              <span class="new-job-menu-hint">SF → SQLite</span>
+            </button>
+            <button class="new-job-menu-item" @click="startNewWbJob">
+              <span class="type-icon-wb">⬆</span>
+              Write-back Job
+              <span class="new-job-menu-hint">SQLite → SF</span>
+            </button>
+          </div>
+        </div>
+        <input v-model="search" type="text" placeholder="Search jobs…" style="flex:1; font-size:12px;" />
+      </div>
+
+      <div v-if="!filteredJobs.length" class="empty-state" style="padding: 32px 16px; gap:10px;">
+        <div style="font-size:28px; line-height:1;">⬇⬆</div>
+        <div>No jobs yet</div>
+        <button class="btn btn-primary btn-sm" @click="startNewExtractJob">⬇ New Extraction Job</button>
+        <button class="btn btn-secondary btn-sm" @click="startNewWbJob">⬆ New Write-back Job</button>
+      </div>
+
+      <div
+        v-for="entry in filteredJobs"
+        :key="entry.type + ':' + entry.id"
+        class="job-row"
+        :class="[
+          entry.type === 'extract' ? 'job-row-extract' : 'job-row-wb',
+          {
+            selected: selectedJob?.type === entry.type && selectedJob?.id === entry.id,
+            running: isEntryRunning(entry)
+          }
+        ]"
+        @click="selectEntry(entry)"
+      >
+        <div class="job-row-name">
+          <span :class="entry.type === 'extract' ? 'type-icon-extract' : 'type-icon-wb'">
+            {{ entry.type === 'extract' ? '⬇' : '⬆' }}
+          </span>
+          <span class="spinner job-row-spinner" v-if="isEntryRunning(entry)"></span>
+          {{ entry.name }}
+        </div>
+        <div class="job-row-meta">
+          <span class="job-row-sub">{{ entry.subtitle }}</span>
+          <span class="job-row-right">
+            <span v-if="isEntryRunning(entry)" class="job-row-running-label">running</span>
+            <span v-else-if="isEntryQueued(entry)" class="job-row-running-label" style="color:var(--text-muted);">queued</span>
+            <template v-else-if="entryLastRun(entry)">
+              <span class="badge" :class="runStatusBadge(entryLastRun(entry)!.status)">{{ entryLastRun(entry)!.status }}</span>
+              <span v-if="entryRowCount(entry) != null" class="job-row-rows">{{ entryRowCount(entry)!.toLocaleString() }}</span>
+            </template>
+            <button
+              class="job-run-btn"
+              :class="entry.type === 'extract' ? 'job-run-btn-extract' : 'job-run-btn-wb'"
+              :disabled="isEntryRunning(entry) || isEntryQueued(entry)"
+              :title="isEntryRunning(entry) ? 'Running…' : isEntryQueued(entry) ? 'Queued…' : 'Run job'"
+              @click.stop="runEntry(entry)"
+            >
+              <span v-if="isEntryRunning(entry)" class="spinner" style="width:10px;height:10px;border-width:1.5px;"></span>
+              <span v-else>▶</span>
+            </button>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Draggable divider -->
+    <div class="split-divider" @mousedown.prevent="startDrag"></div>
+
+    <!-- ── Right panel ────────────────────────────────────────────────── -->
+    <div style="display:flex; flex:1; overflow:hidden; min-width:0;">
+      <div class="split-right" style="padding:0; flex:1; overflow:hidden; min-width:0;">
+
+        <!-- Nothing selected -->
+        <div v-if="!selectedJob && !creating" class="empty-state" style="height:100%;">
+          <div style="font-size:32px; line-height:1;">⬇⬆</div>
+          <div>Select a job or create a new one</div>
+        </div>
+
+        <!-- ╔══════════════════════════════════════════════════╗ -->
+        <!-- ║  EXTRACT – New job form                          ║ -->
+        <!-- ╚══════════════════════════════════════════════════╝ -->
+        <div v-else-if="creating === 'extract'" class="job-editor">
+          <div class="toolbar">
+            <span style="font-weight:600;">New Extraction Job</span>
+            <div class="toolbar-right">
+              <button class="btn btn-secondary btn-sm" @click="cancelCreating">Cancel</button>
+              <button class="btn btn-secondary btn-sm" :disabled="exSaving" @click="exSave(false)">
+                <span v-if="exSaving" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>
+                Save
+              </button>
+              <button class="btn btn-primary btn-sm" :disabled="exSaving" @click="exSave(true)">Save &amp; Execute</button>
+            </div>
+          </div>
+          <div class="editor-body">
+            <div class="form-group">
+              <label>Job Name</label>
+              <input v-model="exEditForm.name" type="text" placeholder="e.g. Active Accounts EU" />
+            </div>
+            <div class="form-group">
+              <label>Mode</label>
+              <div class="mode-toggle">
+                <label class="mode-option" :class="{ active: exEditForm.mode === 'structured' }">
+                  <input type="radio" v-model="exEditForm.mode" value="structured" />Structured
+                </label>
+                <label class="mode-option" :class="{ active: exEditForm.mode === 'soql' }">
+                  <input type="radio" v-model="exEditForm.mode" value="soql" />Raw SOQL
+                </label>
+              </div>
+            </div>
+            <template v-if="exEditForm.mode === 'structured'">
+              <div class="form-group">
+                <label>Salesforce Object</label>
+                <ObjectPicker v-model="exEditForm.sfObject" :objects="conn.sfObjects" :refreshing="sfRefreshing" @update:modelValue="exOnObjectChange" @refresh="refreshObjects" />
+              </div>
+              <div v-if="exLoadingFields" style="display:flex;align-items:center;gap:8px;color:var(--text-muted);"><span class="spinner"></span> Loading fields…</div>
+              <template v-else-if="exEditForm.sfObject && exFields.length">
+                <div class="field-accordion">
+                  <button type="button" class="field-accordion-header" @click="exFieldPickerOpen = !exFieldPickerOpen">
+                    <span class="field-accordion-title">Fields</span>
+                    <span class="field-accordion-summary">{{ exFieldPickerLabel }}</span>
+                    <span class="index-accordion-chevron" :class="{ open: exFieldPickerOpen }">▾</span>
+                  </button>
+                  <div v-if="exFieldPickerOpen" class="field-accordion-body">
+                    <SObjectFieldList :fields="exFields" v-model="exEditForm.fields" v-model:customExpressions="exEditForm.customExpressions" />
+                  </div>
+                </div>
+                <div class="form-group">
+                  <label>WHERE Clause (optional)</label>
+                  <textarea v-model="exEditForm.whereClause" placeholder="e.g. CreatedDate = TODAY" rows="2" class="where-textarea" />
+                </div>
+                <div class="form-row">
+                  <div class="form-group" style="flex:0 0 140px;">
+                    <label>LIMIT (optional)</label>
+                    <input v-model.number="exEditForm.rowLimit" type="number" placeholder="e.g. 10000" />
+                  </div>
+                </div>
+              </template>
+            </template>
+            <template v-else>
+              <div class="form-group">
+                <label>SOQL Query</label>
+                <textarea v-model="exEditForm.soqlQuery" placeholder="SELECT Id, Name FROM Account WHERE IsActive__c = true" rows="6" class="soql-textarea" spellcheck="false" />
+                <div class="field-hint">Column names in the destination table are derived from the field names returned by the first batch of data.</div>
+              </div>
+            </template>
+            <div class="index-accordion" v-if="exEditForm.mode === 'soql' || (exEditForm.sfObject && exFields.length)">
+              <button type="button" class="index-accordion-header" @click="exIndexPickerOpen = !exIndexPickerOpen">
+                <span class="index-accordion-title">Additional Indexes <span v-if="exEditForm.additionalIndexes.length" class="index-count-badge">{{ exEditForm.additionalIndexes.length }}</span></span>
+                <span class="index-accordion-hint">{{ exEditForm.mode === 'structured' ? 'Id and unique/ExternalId fields are indexed automatically' : 'optional' }}</span>
+                <span class="index-accordion-chevron" :class="{ open: exIndexPickerOpen }">▾</span>
+              </button>
+              <div v-if="exIndexPickerOpen" class="index-accordion-body">
+                <div class="index-tags" v-if="exEditForm.additionalIndexes.length">
+                  <span v-for="col in exEditForm.additionalIndexes" :key="col" class="index-tag">{{ col }}<button class="index-tag-remove" @click="exRemoveIndex(col)">✕</button></span>
+                </div>
+                <div class="index-input-wrap">
+                  <input v-model="exAdditionalIndexInput" type="text" :placeholder="exEditForm.mode === 'structured' ? 'Filter columns…' : 'Type column name and press Enter…'" class="index-input" @keydown.enter.prevent="exAddIndexFromInput" @keydown.escape="exAdditionalIndexInput = ''" />
+                  <ul v-if="exEditForm.mode === 'structured'" class="index-suggestions index-suggestions-static">
+                    <li v-for="name in exIndexSuggestions" :key="name" @click="exAddIndex(name)">{{ name }}</li>
+                    <li v-if="!exIndexSuggestions.length" class="index-suggestions-empty">{{ exAdditionalIndexInput ? 'No matching columns' : 'All columns already added' }}</li>
+                  </ul>
+                </div>
+                <div class="field-hint" v-if="exEditForm.mode !== 'structured'">Press Enter to add each column name. These columns will be indexed after the job runs.</div>
+              </div>
+            </div>
+            <div class="form-row" v-if="exEditForm.mode === 'soql' || (exEditForm.sfObject && exFields.length)">
+              <div class="form-group">
+                <label>Destination Table</label>
+                <input v-model="exEditForm.destTable" type="text" :placeholder="exEditForm.mode === 'soql' ? 'sf_results' : exEditForm.sfObject" />
+              </div>
+              <div class="form-group" style="flex:0 0 160px;">
+                <label>Write Mode</label>
+                <select v-model="exEditForm.writeMode"><option value="replace">Replace</option><option value="append">Append</option></select>
+              </div>
+            </div>
+            <div v-if="exSaveError" class="alert alert-error">{{ exSaveError }}</div>
+          </div>
+        </div>
+
+        <!-- ╔══════════════════════════════════════════════════╗ -->
+        <!-- ║  EXTRACT – Selected job (tabs)                   ║ -->
+        <!-- ╚══════════════════════════════════════════════════╝ -->
+        <div v-else-if="selectedJob?.type === 'extract'" class="job-detail">
+          <div class="toolbar">
+            <span style="font-weight:600;">{{ exSelectedJobData?.name }}</span>
+            <template v-if="exDetailTab === 'definition'">
+              <button v-if="!exThisJobIsRunning && !exThisJobIsQueued" class="btn btn-primary btn-sm" :disabled="exSaving" @click="exSave(true)">
+                <span v-if="exSaving" class="spinner" style="width:12px;height:12px;border-width:2px;margin-right:4px;"></span>
+                Save &amp; Execute
+              </button>
+              <button v-else class="btn btn-danger btn-sm" @click="exCancelRun">■ Cancel</button>
+            </template>
+            <template v-else>
+              <button v-if="!exThisJobIsRunning && !exThisJobIsQueued" class="btn btn-primary btn-sm" @click="exExecuteJob">▶ Execute</button>
+              <button v-else class="btn btn-danger btn-sm" @click="exCancelRun">■ Cancel</button>
+            </template>
+            <div class="toolbar-right">
+              <button class="btn btn-ghost btn-sm" @click="exDuplicateSelectedJob">Duplicate</button>
+              <button class="btn btn-danger btn-sm" @click="exDeleteSelectedJob">Delete</button>
+            </div>
+          </div>
+          <div class="tab-bar">
+            <button class="tab-btn" :class="{ active: exDetailTab === 'definition' }" @click="exDetailTab = 'definition'">Definition</button>
+            <button class="tab-btn" :class="{ active: exDetailTab === 'execution' }" @click="exDetailTab = 'execution'">
+              Execution
+              <span v-if="exThisJobIsRunning" class="spinner" style="width:8px;height:8px;border-width:1.5px;margin-left:4px;display:inline-block;vertical-align:middle;"></span>
+              <span v-else-if="exThisJobIsQueued" style="margin-left:4px;font-size:10px;opacity:0.6;">queued</span>
+            </button>
+            <button class="tab-btn" :class="{ active: exDetailTab === 'history' }" @click="exDetailTab = 'history'">History</button>
+          </div>
+
+          <!-- Extract Definition tab -->
+          <div v-if="exDetailTab === 'definition'" class="tab-panel definition-panel">
+            <div class="form-actions">
+              <button class="btn btn-ghost btn-sm" @click="exResetForm">Reset</button>
+              <button class="btn btn-secondary btn-sm" :disabled="exSaving || exThisJobIsRunning" @click="exSave(false)">
+                <span v-if="exSaving" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>Save
+              </button>
+              <button class="btn btn-secondary btn-sm" style="margin-left:auto;" @click="exClearDestTable">
+                Clear table <strong>{{ exSelectedJobData?.destTable }}</strong>
+              </button>
+              <span v-if="exClearMsg" class="qs-msg" :class="exClearMsgError ? 'qs-msg-error' : 'qs-msg-ok'">{{ exClearMsg }}</span>
+            </div>
+            <div v-if="exSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ exSaveError }}</div>
+            <div class="form-group"><label>Job Name</label><input v-model="exEditForm.name" type="text" placeholder="e.g. Active Accounts EU" /></div>
+            <div class="form-group">
+              <label>Mode</label>
+              <div class="mode-toggle">
+                <label class="mode-option" :class="{ active: exEditForm.mode === 'structured' }"><input type="radio" v-model="exEditForm.mode" value="structured" />Structured</label>
+                <label class="mode-option" :class="{ active: exEditForm.mode === 'soql' }"><input type="radio" v-model="exEditForm.mode" value="soql" />Raw SOQL</label>
+              </div>
+            </div>
+            <template v-if="exEditForm.mode === 'structured'">
+              <div class="form-group">
+                <label>Salesforce Object</label>
+                <ObjectPicker v-model="exEditForm.sfObject" :objects="conn.sfObjects" :refreshing="sfRefreshing" @update:modelValue="exOnObjectChange" @refresh="refreshObjects" />
+              </div>
+              <div v-if="exLoadingFields" style="display:flex;align-items:center;gap:8px;color:var(--text-muted);"><span class="spinner"></span> Loading fields…</div>
+              <template v-else-if="exEditForm.sfObject && exFields.length">
+                <div class="field-accordion">
+                  <button type="button" class="field-accordion-header" @click="exFieldPickerOpen = !exFieldPickerOpen">
+                    <span class="field-accordion-title">Fields</span>
+                    <span class="field-accordion-summary">{{ exFieldPickerLabel }}</span>
+                    <span class="index-accordion-chevron" :class="{ open: exFieldPickerOpen }">▾</span>
+                  </button>
+                  <div v-if="exFieldPickerOpen" class="field-accordion-body">
+                    <SObjectFieldList :fields="exFields" v-model="exEditForm.fields" v-model:customExpressions="exEditForm.customExpressions" />
+                  </div>
+                </div>
+                <div class="form-group"><label>WHERE Clause (optional)</label><textarea v-model="exEditForm.whereClause" placeholder="e.g. CreatedDate = TODAY" rows="2" class="where-textarea" /></div>
+                <div class="form-row">
+                  <div class="form-group" style="flex:0 0 140px;"><label>LIMIT (optional)</label><input v-model.number="exEditForm.rowLimit" type="number" placeholder="e.g. 10000" /></div>
+                </div>
+              </template>
+            </template>
+            <template v-else>
+              <div class="form-group">
+                <label>SOQL Query</label>
+                <textarea v-model="exEditForm.soqlQuery" placeholder="SELECT Id, Name FROM Account WHERE IsActive__c = true" rows="6" class="soql-textarea" spellcheck="false" />
+                <div class="field-hint">Column names in the destination table are derived from the field names returned by the first batch of data.</div>
+              </div>
+            </template>
+            <div class="index-accordion" v-if="exEditForm.mode === 'soql' || (exEditForm.sfObject && exFields.length)">
+              <button type="button" class="index-accordion-header" @click="exIndexPickerOpen = !exIndexPickerOpen">
+                <span class="index-accordion-title">Additional Indexes <span v-if="exEditForm.additionalIndexes.length" class="index-count-badge">{{ exEditForm.additionalIndexes.length }}</span></span>
+                <span class="index-accordion-hint">{{ exEditForm.mode === 'structured' ? 'Id and unique/ExternalId fields are indexed automatically' : 'optional' }}</span>
+                <span class="index-accordion-chevron" :class="{ open: exIndexPickerOpen }">▾</span>
+              </button>
+              <div v-if="exIndexPickerOpen" class="index-accordion-body">
+                <div class="index-tags" v-if="exEditForm.additionalIndexes.length">
+                  <span v-for="col in exEditForm.additionalIndexes" :key="col" class="index-tag">{{ col }}<button class="index-tag-remove" @click="exRemoveIndex(col)">✕</button></span>
+                </div>
+                <div class="index-input-wrap">
+                  <input v-model="exAdditionalIndexInput" type="text" :placeholder="exEditForm.mode === 'structured' ? 'Filter columns…' : 'Type column name and press Enter…'" class="index-input" @keydown.enter.prevent="exAddIndexFromInput" @keydown.escape="exAdditionalIndexInput = ''" />
+                  <ul v-if="exEditForm.mode === 'structured'" class="index-suggestions index-suggestions-static">
+                    <li v-for="name in exIndexSuggestions" :key="name" @click="exAddIndex(name)">{{ name }}</li>
+                    <li v-if="!exIndexSuggestions.length" class="index-suggestions-empty">{{ exAdditionalIndexInput ? 'No matching columns' : 'All columns already added' }}</li>
+                  </ul>
+                </div>
+                <div class="field-hint" v-if="exEditForm.mode !== 'structured'">Press Enter to add each column name. These columns will be indexed after the job runs.</div>
+              </div>
+            </div>
+            <div class="form-row" v-if="exEditForm.mode === 'soql' || (exEditForm.sfObject && exFields.length)">
+              <div class="form-group"><label>Destination Table</label><input v-model="exEditForm.destTable" type="text" :placeholder="exEditForm.mode === 'soql' ? 'sf_results' : exEditForm.sfObject" /></div>
+              <div class="form-group" style="flex:0 0 160px;"><label>Write Mode</label><select v-model="exEditForm.writeMode"><option value="replace">Replace</option><option value="append">Append</option></select></div>
+            </div>
+          </div>
+
+          <!-- Extract History tab -->
+          <div v-else-if="exDetailTab === 'history'" class="tab-panel history-panel">
+            <div v-if="!exHistory.length" class="empty-state" style="padding:32px 16px;">No runs yet</div>
+            <table v-else class="data-table history-table">
+              <thead><tr><th>Started</th><th>Status</th><th style="text-align:right;">Rows</th><th style="text-align:right;">Duration</th><th style="text-align:right;">Rows/s</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="h in exHistory" :key="h.id">
+                  <td style="white-space:nowrap;">{{ formatDate(h.startedAt) }}</td>
+                  <td><span class="badge" :class="runStatusBadge(h.status)">{{ h.status }}</span></td>
+                  <td style="text-align:right;font-variant-numeric:tabular-nums;">{{ h.rowsLoaded?.toLocaleString() ?? '—' }}</td>
+                  <td style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">{{ formatDuration(h.durationMs) }}</td>
+                  <td style="text-align:right;font-variant-numeric:tabular-nums;">{{ h.durationMs && h.rowsLoaded ? Math.round(h.rowsLoaded / (h.durationMs / 1000)).toLocaleString() : '—' }}</td>
+                  <td><span v-if="h.errorMsg" class="error-cell" @click.stop="exToggleErrorPopover(h.id, h.errorMsg!, $event)">{{ h.errorMsg.slice(0, 20) }}{{ h.errorMsg.length > 20 ? '…' : '' }}</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Extract Execution tab -->
+          <div v-else-if="exDetailTab === 'execution'" class="tab-panel execution-panel">
+            <div v-if="exThisJobIsQueued" class="empty-state" style="padding:40px 16px;gap:12px;">
+              <div style="font-size:28px;">⏳</div>
+              <div style="font-weight:600;">Job is queued</div>
+              <div style="color:var(--text-muted);font-size:13px;text-align:center;">
+                {{ exActiveRuns.size }} of {{ MAX_PARALLEL }} slots in use.<br>
+                Position in queue: {{ exJobQueue.indexOf(exSelectedJobId!) + 1 }}
+              </div>
+              <button class="btn btn-secondary btn-sm" @click="exCancelRun">Remove from queue</button>
+            </div>
+            <ProgressPanel
+              v-else-if="exDisplayedJobData"
+              type="extract"
+              :fetched="exDisplayedJobData.fetched"
+              :total="exDisplayedJobData.total"
+              :rps="exDisplayedJobData.rps"
+              :status="exDisplayedJobData.status"
+              :errorMsg="exDisplayedJobData.errorMsg"
+              :startTime="exSelectedRunStartTime"
+            />
+            <div v-else class="empty-state" style="padding:32px 16px;">
+              <div>No execution yet</div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">Press ▶ Execute to start a run, or check the History tab for past runs.</div>
+            </div>
+          </div>
+
+          <!-- Extract error popover -->
+          <div v-if="exErrorPopover" class="error-popover" :style="{ top: exErrorPopover.y + 'px', left: exErrorPopover.x + 'px' }" @click.stop>
+            <div class="error-popover-header"><span>Error</span><button class="btn-icon" @click="exErrorPopover = null">✕</button></div>
+            <div class="error-popover-body">{{ exErrorPopover.msg }}</div>
+          </div>
+        </div>
+
+        <!-- ╔══════════════════════════════════════════════════╗ -->
+        <!-- ║  WRITEBACK – New job form                        ║ -->
+        <!-- ╚══════════════════════════════════════════════════╝ -->
+        <div v-else-if="creating === 'writeback'" class="job-editor">
+          <div class="toolbar">
+            <span style="font-weight:600;">New Write-back Job</span>
+            <div class="toolbar-right">
+              <button class="btn btn-secondary btn-sm" @click="cancelCreating">Cancel</button>
+              <button class="btn btn-secondary btn-sm" :disabled="wbSaving" @click="wbSave(false)">
+                <span v-if="wbSaving" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>Save
+              </button>
+              <button class="btn btn-primary btn-sm" :disabled="wbSaving" @click="wbSave(true)">Save &amp; Execute</button>
+            </div>
+          </div>
+          <div class="editor-body">
+            <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="e.g. Sync EU Accounts" /></div>
+            <div class="form-group">
+              <label>SQL Query (source data)</label>
+              <textarea v-model="wbEditForm.sqlQuery" class="sql-query-textarea" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
+              <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
+                <button class="btn btn-secondary btn-sm" :disabled="wbPreviewLoading" @click="wbRunPreview">
+                  <span v-if="wbPreviewLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>Preview (first 50 rows)
+                </button>
+                <button class="btn btn-secondary btn-sm" :disabled="wbRowCountLoading" @click="wbRunRowCount">
+                  <span v-if="wbRowCountLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>Row count
+                </button>
+                <span v-if="wbRowCountResult !== null" class="row-count-result">{{ wbRowCountResult.toLocaleString() }} rows</span>
+                <span v-if="wbRowCountError" class="row-count-error">{{ wbRowCountError }}</span>
+              </div>
+            </div>
+            <div v-if="wbPreviewResult" class="form-group">
+              <div style="height:180px;border:1px solid var(--border);border-radius:4px;overflow:hidden;">
+                <DataGrid :columns="wbPreviewResult.columns" :rows="wbPreviewResult.rows" />
+              </div>
+            </div>
+            <div v-if="wbPreviewError" class="alert alert-error">{{ wbPreviewError }}</div>
+            <div class="form-group"><label>Target Salesforce Object</label><ObjectPicker v-model="wbEditForm.sfObject" :objects="conn.sfObjects" :refreshing="sfRefreshing" @update:modelValue="wbOnObjectChange" @refresh="refreshObjects" /></div>
+            <div class="form-group">
+              <label>Operation</label>
+              <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
+            </div>
+            <template v-if="wbSfFields.length">
+              <div class="form-group"><FieldMapper v-model="wbEditForm.fieldMap" :sfFields="wbSfFields" /></div>
+              <div v-if="wbEditForm.operation === 'upsert'" class="form-group"><label>External ID Field (SF)</label><input v-model="wbEditForm.externalIdField" type="text" placeholder="Id" /></div>
+            </template>
+            <div v-else-if="wbEditForm.sfObject" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Loading field list…</div>
+            <div class="form-row">
+              <div class="form-group"><label>Batch Size</label><input v-model.number="wbEditForm.batchSize" type="number" placeholder="200" /></div>
+              <div class="form-group"><label>Threads (1–10)</label><input v-model.number="wbEditForm.threads" type="number" min="1" max="10" placeholder="1" /></div>
+            </div>
+            <div v-if="!wbEditForm.useBulkApi && wbDistribKeyCols.length" class="form-group">
+              <label>Distribution Key <span style="font-weight:400;color:var(--text-muted);font-size:11px;"><template v-if="(wbEditForm.threads ?? 1) > 1">(rows with same key always go to the same thread)</template><template v-else>(set Threads > 1 to enable)</template></span></label>
+              <div class="distrib-key-input" :class="{ 'distrib-key-list--disabled': (wbEditForm.threads ?? 1) <= 1 }">
+                <span v-for="col in (wbEditForm.distributionKey ?? [])" :key="col" class="distrib-key-tag">{{ col }}<button class="distrib-key-tag-remove" @mousedown.prevent="wbToggleDistribKey(col)">×</button></span>
+                <input v-model="wbDistribKeySearch" type="text" class="distrib-key-search" placeholder="Add column…" @focus="wbDistribKeyDropdownOpen = true" @blur="wbHideDistribDropdownDelayed" @keydown.escape="wbDistribKeyDropdownOpen = false" />
+                <div v-if="wbDistribKeyDropdownOpen && wbDistribKeyOptions.length" class="distrib-key-dropdown">
+                  <div v-for="col in wbDistribKeyOptions" :key="col" class="distrib-key-option" @mousedown.prevent="wbSelectDistribKey(col)">{{ col }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="form-group checkboxes-group">
+              <label class="checkbox-label"><input type="checkbox" v-model="wbEditForm.useBulkApi" /> Use Bulk API 2.0 (for very large datasets)</label>
+            </div>
+            <div class="form-group">
+              <label>Custom Headers <span style="font-weight:400;color:var(--text-muted);font-size:11px;">(JSON — ↓ for presets)</span></label>
+              <div class="suggest-wrap">
+                <textarea v-model="wbEditForm.customHeaders" rows="3" style="font-family:monospace;font-size:12px;width:100%;" placeholder='{"DuplicateRuleHeader": {"allowSave": true}}' @keydown="wbOnHeadersKeydown" @blur="wbHideSuggestionsDelayed"></textarea>
+                <div v-if="wbShowHeaderSuggestions" class="suggest-list">
+                  <div v-for="(s, i) in wbHeaderSuggestions" :key="i" class="suggest-item" :class="{ active: wbActiveSuggestion === i }" @mousedown.prevent="wbSelectHeaderSuggestion(i)">
+                    <span class="suggest-name">{{ s.label }}</span><span class="suggest-preview">{{ s.preview }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-if="wbSaveError" class="alert alert-error">{{ wbSaveError }}</div>
+          </div>
+        </div>
+
+        <!-- ╔══════════════════════════════════════════════════╗ -->
+        <!-- ║  WRITEBACK – Selected job (tabs)                 ║ -->
+        <!-- ╚══════════════════════════════════════════════════╝ -->
+        <div v-else-if="selectedJob?.type === 'writeback'" class="job-detail">
+          <div class="toolbar">
+            <span style="font-weight:600;margin-right:4px;">{{ wbSelectedJobData?.name }}</span>
+            <template v-if="wbDetailTab === 'definition'">
+              <button v-if="!wbThisJobIsRunning && !wbThisJobIsQueued" class="btn btn-primary btn-sm" :disabled="wbSaving" @click="wbSave(true)">
+                <span v-if="wbSaving" class="spinner" style="width:12px;height:12px;border-width:2px;margin-right:4px;"></span>
+                Save &amp; Execute
+              </button>
+              <button v-else class="btn btn-danger btn-sm" @click="wbCancelRun">■ Cancel</button>
+            </template>
+            <template v-else>
+              <button v-if="!wbThisJobIsRunning && !wbThisJobIsQueued" class="btn btn-primary btn-sm" :disabled="wbSaving" @click="wbExecuteJob">▶ Execute</button>
+              <button v-else class="btn btn-danger btn-sm" @click="wbCancelRun">■ Cancel</button>
+            </template>
+            <div class="toolbar-right">
+              <button class="btn btn-ghost btn-sm" @click="wbDuplicateSelectedJob">Duplicate</button>
+              <button class="btn btn-danger btn-sm" @click="wbDeleteSelectedJob">Delete</button>
+            </div>
+          </div>
+
+          <div class="tab-bar">
+            <button class="tab-btn" :class="{ active: wbDetailTab === 'definition' }" @click="wbDetailTab = 'definition'">Definition</button>
+            <button class="tab-btn" :class="{ active: wbDetailTab === 'execution' }" @click="wbDetailTab = 'execution'">
+              Execution
+              <span v-if="wbThisJobIsRunning" class="spinner" style="width:8px;height:8px;border-width:1.5px;margin-left:4px;display:inline-block;vertical-align:middle;"></span>
+              <span v-else-if="wbThisJobIsQueued" style="margin-left:4px;font-size:10px;opacity:0.6;">queued</span>
+            </button>
+            <button class="tab-btn" :class="{ active: wbDetailTab === 'history' }" @click="wbDetailTab = 'history'">History</button>
+          </div>
+
+          <!-- WB Definition tab -->
+          <div v-if="wbDetailTab === 'definition'" class="tab-panel editor-body">
+            <div class="form-actions">
+              <button class="btn btn-ghost btn-sm" @click="wbResetDefinitionForm">Reset</button>
+              <button class="btn btn-secondary btn-sm" :disabled="wbSaving || wbThisJobIsRunning" @click="wbSave(false)">
+                <span v-if="wbSaving" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>Save
+              </button>
+            </div>
+            <div v-if="wbSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ wbSaveError }}</div>
+            <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="e.g. Sync EU Accounts" /></div>
+            <div class="form-group">
+              <label>SQL Query (source data)</label>
+              <textarea v-model="wbEditForm.sqlQuery" class="sql-query-textarea" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
+              <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
+                <button class="btn btn-secondary btn-sm" :disabled="wbPreviewLoading" @click="wbRunPreview">
+                  <span v-if="wbPreviewLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>Preview (first 50 rows)
+                </button>
+                <button class="btn btn-secondary btn-sm" :disabled="wbRowCountLoading" @click="wbRunRowCount">
+                  <span v-if="wbRowCountLoading" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>Row count
+                </button>
+                <span v-if="wbRowCountResult !== null" class="row-count-result">{{ wbRowCountResult.toLocaleString() }} rows</span>
+                <span v-if="wbRowCountError" class="row-count-error">{{ wbRowCountError }}</span>
+              </div>
+            </div>
+            <div v-if="wbPreviewResult" class="form-group">
+              <div style="height:180px;border:1px solid var(--border);border-radius:4px;overflow:hidden;">
+                <DataGrid :columns="wbPreviewResult.columns" :rows="wbPreviewResult.rows" />
+              </div>
+            </div>
+            <div v-if="wbPreviewError" class="alert alert-error">{{ wbPreviewError }}</div>
+            <div class="form-group"><label>Target Salesforce Object</label><ObjectPicker v-model="wbEditForm.sfObject" :objects="conn.sfObjects" :refreshing="sfRefreshing" @update:modelValue="wbOnObjectChange" @refresh="refreshObjects" /></div>
+            <div class="form-group">
+              <label>Operation</label>
+              <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
+            </div>
+            <template v-if="wbSfFields.length">
+              <div class="form-group"><FieldMapper v-model="wbEditForm.fieldMap" :sfFields="wbSfFields" /></div>
+              <div v-if="wbEditForm.operation === 'upsert'" class="form-group"><label>External ID Field (SF)</label><input v-model="wbEditForm.externalIdField" type="text" placeholder="Id" /></div>
+            </template>
+            <div v-else-if="wbEditForm.sfObject" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Loading field list…</div>
+            <div class="form-row">
+              <div class="form-group"><label>Batch Size</label><input v-model.number="wbEditForm.batchSize" type="number" placeholder="200" /></div>
+              <div class="form-group"><label>Threads (1–10)</label><input v-model.number="wbEditForm.threads" type="number" min="1" max="10" placeholder="1" /></div>
+            </div>
+            <div v-if="!wbEditForm.useBulkApi && wbDistribKeyCols.length" class="form-group">
+              <label>Distribution Key <span style="font-weight:400;color:var(--text-muted);font-size:11px;"><template v-if="(wbEditForm.threads ?? 1) > 1">(rows with same key always go to the same thread)</template><template v-else>(set Threads > 1 to enable)</template></span></label>
+              <div class="distrib-key-input" :class="{ 'distrib-key-list--disabled': (wbEditForm.threads ?? 1) <= 1 }">
+                <span v-for="col in (wbEditForm.distributionKey ?? [])" :key="col" class="distrib-key-tag">{{ col }}<button class="distrib-key-tag-remove" @mousedown.prevent="wbToggleDistribKey(col)">×</button></span>
+                <input v-model="wbDistribKeySearch" type="text" class="distrib-key-search" placeholder="Add column…" @focus="wbDistribKeyDropdownOpen = true" @blur="wbHideDistribDropdownDelayed" @keydown.escape="wbDistribKeyDropdownOpen = false" />
+                <div v-if="wbDistribKeyDropdownOpen && wbDistribKeyOptions.length" class="distrib-key-dropdown">
+                  <div v-for="col in wbDistribKeyOptions" :key="col" class="distrib-key-option" @mousedown.prevent="wbSelectDistribKey(col)">{{ col }}</div>
+                </div>
+              </div>
+              <p v-if="(wbEditForm.threads ?? 1) > 1 && wbEditForm.distributionKey?.length" class="distrib-key-hint">
+                Tip: consider adding <code>ORDER BY</code> to the query, so that rows with the same distribution key are <strong>not</strong> clustered together.
+              </p>
+            </div>
+            <div class="form-group checkboxes-group">
+              <label class="checkbox-label"><input type="checkbox" v-model="wbEditForm.useBulkApi" /> Use Bulk API 2.0 (for very large datasets)</label>
+            </div>
+            <div class="form-group">
+              <label>Custom Headers <span style="font-weight:400;color:var(--text-muted);font-size:11px;">(JSON — ↓ for presets)</span></label>
+              <div class="suggest-wrap">
+                <textarea v-model="wbEditForm.customHeaders" rows="3" style="font-family:monospace;font-size:12px;width:100%;" placeholder='{"DuplicateRuleHeader": {"allowSave": true}}' @keydown="wbOnHeadersKeydown" @blur="wbHideSuggestionsDelayed"></textarea>
+                <div v-if="wbShowHeaderSuggestions" class="suggest-list">
+                  <div v-for="(s, i) in wbHeaderSuggestions" :key="i" class="suggest-item" :class="{ active: wbActiveSuggestion === i }" @mousedown.prevent="wbSelectHeaderSuggestion(i)">
+                    <span class="suggest-name">{{ s.label }}</span><span class="suggest-preview">{{ s.preview }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- WB History tab -->
+          <div v-else-if="wbDetailTab === 'history'" class="tab-panel history-section">
+            <div v-if="!wbHistory.length" class="empty-state" style="padding:32px 16px;">No runs yet</div>
+            <table v-else class="data-table">
+              <thead><tr><th>Started</th><th>Status</th><th>API</th><th>Sent</th><th>✓ OK</th><th>✗ Failed</th><th style="text-align:right;">Duration</th><th style="text-align:right;">Rows/s</th></tr></thead>
+              <tbody>
+                <tr v-for="h in wbHistory" :key="h.id">
+                  <td>{{ formatDate(h.startedAt) }}</td>
+                  <td><span class="badge" :class="runStatusBadge(h.status)">{{ h.status }}</span></td>
+                  <td><span class="badge" :class="h.useBulkApi ? 'badge-bulk' : 'badge-rest'">{{ h.useBulkApi ? 'Bulk 2.0' : 'REST' }}</span></td>
+                  <td>{{ h.rowsSent?.toLocaleString() ?? '—' }}</td>
+                  <td>{{ h.rowsSucceeded?.toLocaleString() ?? '—' }}</td>
+                  <td style="color:var(--danger)">{{ h.rowsFailed ? h.rowsFailed.toLocaleString() : '—' }}</td>
+                  <td style="text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;">{{ formatDuration(h.durationMs) }}</td>
+                  <td style="text-align:right;font-variant-numeric:tabular-nums;">{{ h.durationMs && h.rowsSent ? Math.round(h.rowsSent / (h.durationMs / 1000)).toLocaleString() : '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- WB Execution tab -->
+          <div v-else-if="wbDetailTab === 'execution'" class="tab-panel execution-section">
+            <div v-if="wbThisJobIsQueued" class="empty-state" style="padding:40px 16px;gap:12px;">
+              <div style="font-size:28px;">⏳</div>
+              <div style="font-weight:600;">Job is queued</div>
+              <div style="color:var(--text-muted);font-size:13px;text-align:center;">
+                {{ wbActiveRuns.size }} of {{ MAX_PARALLEL }} slots in use.<br>
+                Position in queue: {{ wbJobQueue.indexOf(wbSelectedJobId!) + 1 }}
+              </div>
+              <button class="btn btn-secondary btn-sm" @click="wbCancelRun">Remove from queue</button>
+            </div>
+            <div v-else-if="execError" class="exec-banner exec-banner-error">
+              <span style="font-weight:600;">Job failed</span>
+              <span style="white-space:pre-wrap;">{{ execError }}</span>
+              <button class="btn btn-ghost btn-sm" style="margin-left:auto;flex-shrink:0;" @click="wbClearExecState">Dismiss</button>
+            </div>
+            <div v-else-if="execWarn" class="exec-banner exec-banner-warn">
+              <span style="white-space:pre-wrap;">{{ execWarn }}</span>
+              <button class="btn btn-ghost btn-sm" style="margin-left:auto;flex-shrink:0;" @click="execWarn = null">Dismiss</button>
+            </div>
+            <template v-if="!wbThisJobIsQueued && execIsBulkApi">
+              <div v-if="!wbThisJobIsRunning && !execJobDone && !execError" class="empty-state" style="padding:32px 16px;">No execution data yet — click ▶ Execute to run this job.</div>
+              <div v-else-if="wbThisJobIsRunning" class="bulk-phase-card">
+                <div class="bulk-phase-row">
+                  <span class="spinner" style="width:14px;height:14px;border-width:2px;flex-shrink:0;"></span>
+                  <template v-if="execBulkPhase === 'uploading'">Uploading to Salesforce… <strong>{{ execBulkUploaded.toLocaleString() }}</strong><template v-if="execSourceRowCount !== null"> / {{ execSourceRowCount.toLocaleString() }}</template> rows sent</template>
+                  <template v-else-if="execBulkPhase === 'processing'">Salesforce processing <span class="badge badge-gray" style="font-size:11px;">{{ execBulkJobState }}</span> — <strong>{{ execBulkProcessed.toLocaleString() }}</strong> processed, <span style="color:var(--danger);">{{ execFailed.toLocaleString() }}</span> failed</template>
+                  <template v-else-if="execBulkPhase === 'downloading'">Downloading results from Salesforce…</template>
+                  <template v-else>Starting Bulk API 2.0 job…</template>
+                </div>
+                <button class="btn btn-danger btn-sm" style="margin-top:12px;" @click="wbCancelRun">Cancel</button>
+              </div>
+              <template v-else-if="execJobDone">
+                <div class="exec-stats">
+                  <span v-if="execSourceRowCount !== null" style="color:var(--text-muted);">{{ execSourceRowCount.toLocaleString() }} total</span>
+                  <span><strong>{{ wbTotalRows.toLocaleString() }}</strong> rows</span>
+                  <span style="color:var(--success);">✓ {{ wbSucceededCount.toLocaleString() }} succeeded</span>
+                  <span style="color:var(--danger);">✗ {{ wbFailedCount.toLocaleString() }} failed</span>
+                  <button class="btn btn-ghost btn-sm" style="margin-left:auto;" @click="wbClearExecState">Clear</button>
+                </div>
+                <div v-if="wbFailedCount > 0 && execFailedTotal > 0" style="flex:1;overflow:hidden;display:flex;flex-direction:column;">
+                  <div class="failed-rows-header">
+                    <span style="font-size:12px;color:var(--text-muted);">Failed records (echoed from Salesforce)</span>
+                    <div v-if="wbDistinctErrors.length > 1" class="error-filter-bar">
+                      <label class="error-filter-label">Filter by error:</label>
+                      <select v-model="failedErrorFilter" class="error-filter-select">
+                        <option value="">All errors ({{ execFailedTotal.toLocaleString() }})</option>
+                        <option v-for="err in wbDistinctErrors" :key="err" :value="err">{{ err.length > 80 ? err.slice(0, 80) + '…' : err }} ({{ wbErrorCounts.get(err) ?? 0 }})</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div style="flex:1;overflow:hidden;">
+                    <DataGrid
+                      :columns="['_Error', ...wbExecDisplayColumns]"
+                      :rows="execFailedPanelRows.map((fr) => [fr.message, ...fr.row])"
+                      :showRowNumbers="true"
+                      :totalRowCount="wbFilteredFailedTotal"
+                      :onPageChange="wbFilteredFailedTotal > EXEC_PAGE ? (off) => wbLoadExecPage(off) : undefined"
+                      :externalOffset="execFailedPageOffset"
+                      :pageSize="EXEC_PAGE"
+                      :onSortChange="wbFilteredFailedTotal > EXEC_PAGE ? wbHandleFailedSortChange : undefined"
+                      :externalSortCriteria="wbFilteredFailedTotal > EXEC_PAGE ? execFailedSort : undefined"
+                      :onCopySubsetRows="wbCopyFailedCsv"
+                      copySubsetRowsLabel="Copy Failed CSV"
+                      :onExportCsv="wbExportFailed"
+                      exportCsvLabel="Export Failed CSV"
+                    />
+                  </div>
+                </div>
+              </template>
+            </template>
+            <template v-else-if="!wbThisJobIsQueued">
+              <div v-if="!wbThisJobIsRunning && !execPageRows.length && !execFailedTotal && !execError" class="empty-state" style="padding:32px 16px;">No execution data yet — click ▶ Execute to run this job.</div>
+              <template v-else>
+                <div class="exec-stats">
+                  <span v-if="execSourceRowCount !== null" style="color:var(--text-muted);">{{ execSourceRowCount.toLocaleString() }} source rows</span>
+                  <span style="color:var(--text-muted);">{{ wbActiveJobData?.rps ?? 0 }} rec/s</span>
+                  <span v-if="wbThisJobIsRunning" style="color:var(--accent);font-size:12px;">⟳ {{ execInFlight.toLocaleString() }} in flight</span>
+                  <div v-if="wbTotalRows > 0" class="exec-status-filter">
+                    <button class="exec-filter-pill" :class="{ active: wbAllFiltersOn }" @click="execFilterSuccess = execFilterError = execFilterPending = true">All <span class="exec-filter-count">{{ wbTotalRows.toLocaleString() }}</span></button>
+                    <button class="exec-filter-pill" :class="{ active: execFilterSuccess, 'exec-filter-pill--ok': wbSucceededCount > 0, 'exec-filter-pill--ok-lit': wbSucceededCount > 0 }" @click="execFilterSuccess = !execFilterSuccess">✓ OK <span class="exec-filter-count">{{ wbSucceededCount.toLocaleString() }}</span></button>
+                    <button class="exec-filter-pill" :class="{ active: execFilterError, 'exec-filter-pill--error': wbFailedCount > 0, 'exec-filter-pill--error-lit': wbFailedCount > 0 }" @click="execFilterError = !execFilterError">✗ Error <span class="exec-filter-count">{{ wbFailedCount.toLocaleString() }}</span></button>
+                    <button class="exec-filter-pill" :class="{ active: execFilterPending, 'exec-filter-pill--pending': wbPendingCount > 0 }" @click="execFilterPending = !execFilterPending">— Pending <span class="exec-filter-count">{{ wbPendingCount.toLocaleString() }}</span></button>
+                  </div>
+                  <button v-if="wbFailedCount > 0 && !wbThisJobIsRunning" class="btn btn-secondary btn-sm" @click="wbRetryFailed">Retry Failed</button>
+                  <button
+                    v-if="execJobDone && wbIsInsert && !execIsBulkApi && wbSucceededCount > 0 && execRunId && !wbThisJobIsRunning"
+                    class="btn btn-primary btn-sm"
+                    @click="wbOpenUpdateIdsModal"
+                  >Update table with created record IDs</button>
+                  <button v-if="!wbThisJobIsRunning" class="btn btn-ghost btn-sm" style="margin-left:auto;" @click="wbClearExecState">Clear</button>
+                </div>
+                <div v-if="wbShowOnlyFailed && execJobDone && wbDistinctErrors.length > 1" class="failed-rows-header" style="padding:4px 12px;">
+                  <div class="error-filter-bar">
+                    <label class="error-filter-label">Filter by error:</label>
+                    <select v-model="failedErrorFilter" class="error-filter-select">
+                      <option value="">All errors ({{ execFailedTotal.toLocaleString() }})</option>
+                      <option v-for="err in wbDistinctErrors" :key="err" :value="err">{{ err.length > 80 ? err.slice(0, 80) + '…' : err }} ({{ wbErrorCounts.get(err) ?? 0 }})</option>
+                    </select>
+                  </div>
+                </div>
+                <div style="flex:1;overflow:hidden;">
+                  <DataGrid
+                    :columns="wbExecVisibleCols"
+                    :rows="wbVisibleExecRows"
+                    :rowNumbers="wbVisibleExecRowNumbers"
+                    :showRowNumbers="true"
+                    :totalRowCount="wbShowOnlyFailed && execJobDone ? wbFilteredFailedTotal : execTotalRows"
+                    :onPageChange="(wbShowOnlyFailed ? wbFilteredFailedTotal : execTotalRows) > EXEC_PAGE ? (off) => wbLoadExecPage(off) : undefined"
+                    :externalOffset="wbShowOnlyFailed ? execFailedPageOffset : execPageOffset"
+                    :pageSize="EXEC_PAGE"
+                    :onSortChange="!wbShowOnlyFailed && execTotalRows > EXEC_PAGE ? wbHandleExecSortChange : wbShowOnlyFailed && wbFilteredFailedTotal > EXEC_PAGE ? wbHandleFailedSortChange : undefined"
+                    :externalSortCriteria="!wbShowOnlyFailed && execTotalRows > EXEC_PAGE ? execSort : wbShowOnlyFailed && wbFilteredFailedTotal > EXEC_PAGE ? execFailedSort : undefined"
+                    :onCopySubsetRows="wbFailedCount > 0 && !wbThisJobIsRunning ? wbCopyFailedCsv : undefined"
+                    copySubsetRowsLabel="Copy Failed CSV"
+                    :onExportCsv="wbFailedCount > 0 && !wbThisJobIsRunning ? wbExportFailed : undefined"
+                    exportCsvLabel="Export Failed CSV"
+                    :onCopyAllRows="wbCopyAllExecRows"
+                  />
+                </div>
+              </template>
+            </template>
+          </div>
+        </div>
+      </div><!-- /.split-right -->
+
+      <!-- Schema panel (writeback only) -->
+      <div v-if="selectedJob?.type === 'writeback' || creating === 'writeback'" class="wb-schema-panel" ref="schemaPanel">
+        <div class="schema-resize-handle" @mousedown="wbStartSchemaResize"></div>
+        <div class="schema-tabs">
+          <button class="schema-tab" :class="{ active: schemaTab === 'sqlite' }" @click="schemaTab = 'sqlite'">SQLite</button>
+          <button class="schema-tab" :class="{ active: schemaTab === 'sf' }" @click="schemaTab = 'sf'">Salesforce</button>
+        </div>
+        <SchemaBrowser v-show="schemaTab === 'sqlite'" :tables="conn.dbTables" @insert="() => {}" @openExplorer="() => $router.push('/explorer')" />
+        <SFSchemaBrowser v-show="schemaTab === 'sf'" :objects="conn.sfObjects" @insert="() => {}" />
+      </div>
+    </div><!-- /.right panel + schema -->
+  </div>
+
+  <div v-else class="empty-state" style="height:100%;">
+    <div class="empty-state-icon">🔌</div>
+    <div>Connect to both Salesforce and a SQLite database first</div>
+    <router-link to="/connections" class="btn btn-primary btn-sm">Go to Connections</router-link>
+  </div>
+
+  <!-- ── "Update table with created record IDs" modal ─────────────────── -->
+  <Teleport to="body">
+    <div v-if="wbUpdateIdsOpen" class="modal-backdrop" @click.self="wbUpdateIdsOpen = false">
+      <div class="modal-box update-ids-modal">
+        <div class="modal-header">
+          <span class="modal-title">Update table with created record IDs</span>
+          <button class="btn btn-ghost btn-sm" @click="wbUpdateIdsOpen = false">✕</button>
+        </div>
+        <template v-if="wbUpdateIdsResult">
+          <div class="modal-body" style="gap:12px;">
+            <div class="update-ids-success">
+              <span style="font-size:22px;">✓</span>
+              <div style="display:flex;flex-direction:column;gap:4px;">
+                <div style="font-weight:600;font-size:14px;">Updated {{ wbUpdateIdsResult.updated.toLocaleString() }} rows</div>
+                <div v-if="wbUpdateIdsResult.idColCreated" style="font-size:12px;color:var(--text-muted);">Column <code>{{ wbUpdateIdsIdColName }}</code> was added to <code>{{ wbUpdateIdsTargetTable }}</code>.</div>
+                <div v-if="wbUpdateIdsResult.indexCreated" style="font-size:12px;color:var(--text-muted);">Index created on <code>{{ wbUpdateIdsTableKeyCol }}</code> in <code>{{ wbUpdateIdsTargetTable }}</code>.</div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer"><button class="btn btn-primary btn-sm" @click="wbUpdateIdsOpen = false">Done</button></div>
+        </template>
+        <template v-else-if="wbUpdateIdsKeyFields.length === 0">
+          <div class="modal-body"><div class="update-ids-error" style="background:color-mix(in srgb, var(--warning,#f59e0b) 12%, var(--surface));color:var(--text);border-color:color-mix(in srgb, var(--warning,#f59e0b) 25%, var(--border));">No unique or External ID fields were detected among the mapped columns for this insert job.</div></div>
+          <div class="modal-footer"><button class="btn btn-secondary btn-sm" @click="wbUpdateIdsOpen = false">Close</button></div>
+        </template>
+        <template v-else>
+          <div class="modal-body">
+            <div v-if="wbUpdateIdsKeyFields.length > 1" class="form-row">
+              <label class="form-label">Key field <span class="form-hint">(unique / External ID field used as the lookup key)</span></label>
+              <select v-model="wbUpdateIdsSfKeyField" class="form-select">
+                <option v-for="f in wbUpdateIdsKeyFields" :key="f.sfField" :value="f.sfField">{{ f.label }} ({{ f.sfField }}) — {{ f.valueCount.toLocaleString() }} values stored</option>
+              </select>
+            </div>
+            <div v-else class="update-ids-info">Key field: <strong>{{ wbUpdateIdsKeyFields[0]?.label }}</strong> <span style="color:var(--text-muted);">({{ wbUpdateIdsKeyFields[0]?.sfField }})</span> — {{ wbUpdateIdsKeyFields[0]?.valueCount.toLocaleString() }} values stored</div>
+            <div class="form-row">
+              <label class="form-label">Target table</label>
+              <select v-model="wbUpdateIdsTargetTable" class="form-select">
+                <option value="">— select a table —</option>
+                <option v-for="t in wbUpdateIdsTables" :key="t" :value="t">{{ t }}</option>
+              </select>
+            </div>
+            <div v-if="wbUpdateIdsTargetTable" class="form-row">
+              <label class="form-label">Key column in table <span class="form-hint">(column whose values match the key field above)</span></label>
+              <select v-model="wbUpdateIdsTableKeyCol" class="form-select">
+                <option value="">— select a column —</option>
+                <option v-for="c in wbUpdateIdsTableCols" :key="c" :value="c">{{ c }}</option>
+              </select>
+              <div v-if="wbUpdateIdsTableKeyCol && wbUpdateIdsKeyColNeedsIndex" class="update-ids-index-note">⚡ No index found on <strong>{{ wbUpdateIdsTableKeyCol }}</strong> — one will be created automatically.</div>
+            </div>
+            <div v-if="wbUpdateIdsTargetTable" class="form-row">
+              <label class="form-label">ID column name <span class="form-hint">(will be created if missing)</span></label>
+              <input v-model="wbUpdateIdsIdColName" class="form-input" placeholder="Id" />
+            </div>
+            <div v-if="wbUpdateIdsTargetTable && wbUpdateIdsTableKeyCol && wbUpdateIdsSfKeyField" class="update-ids-preview">
+              Will set <strong>{{ wbUpdateIdsIdColName || 'Id' }}</strong> = Salesforce ID in <strong>{{ wbUpdateIdsTargetTable }}</strong> where <strong>{{ wbUpdateIdsTableKeyCol }}</strong> matches <strong>{{ wbUpdateIdsSfKeyField }}</strong>.
+            </div>
+            <div v-if="wbUpdateIdsError" class="update-ids-error">{{ wbUpdateIdsError }}</div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary btn-sm" @click="wbUpdateIdsOpen = false">Cancel</button>
+            <button class="btn btn-primary btn-sm" :disabled="wbUpdateIdsLoading || !wbUpdateIdsSfKeyField || !wbUpdateIdsTableKeyCol || !wbUpdateIdsTargetTable" @click="wbConfirmUpdateIds">
+              <span v-if="wbUpdateIdsLoading">Updating…</span><span v-else>Update with IDs</span>
+            </button>
+          </div>
+        </template>
+      </div>
+    </div>
+  </Teleport>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, watch, onMounted, onActivated, onUnmounted, nextTick, toRaw } from 'vue'
+import { useConnectionStore } from '../stores/connection'
+import { useJobStore } from '../stores/job'
+import ObjectPicker from '../components/ObjectPicker.vue'
+import SObjectFieldList from '../components/SObjectFieldList.vue'
+import FieldMapper from '../components/FieldMapper.vue'
+import DataGrid from '../components/DataGrid.vue'
+import SchemaBrowser from '../components/SchemaBrowser.vue'
+import SFSchemaBrowser from '../components/SFSchemaBrowser.vue'
+import ProgressPanel from '../components/ProgressPanel.vue'
+import type {
+  ExtractJob, WritebackJob,
+  FieldDescriptor, FieldMapping,
+  RunHistoryEntry, WritebackRunEntry,
+  SortCriterion
+} from '../../../shared/types'
+
+const conn = useConnectionStore()
+const jobs = useJobStore()
+
+// ── Shared state ─────────────────────────────────────────────────────────────
+const sfRefreshing = ref(false)
+async function refreshObjects(): Promise<void> {
+  sfRefreshing.value = true
+  try { await conn.refreshSFObjects() } finally { sfRefreshing.value = false }
+}
+
+const search = ref('')
+const newJobMenuOpen = ref(false)
+const MAX_PARALLEL = 5
+
+// Unified selection: which job is selected (type + id)
+interface SelectedJob { id: number; type: 'extract' | 'writeback' }
+const selectedJob = ref<SelectedJob | null>(null)
+// Which type of new job is being created (null = not creating)
+const creating = ref<'extract' | 'writeback' | null>(null)
+
+// Resizable split
+const SPLIT_KEY = 'jobs-split-pct'
+const splitPct = ref<number>(Number(localStorage.getItem(SPLIT_KEY)) || 28)
+const splitContainer = ref<HTMLElement | null>(null)
+
+function startDrag(e: MouseEvent): void {
+  const container = splitContainer.value
+  if (!container) return
+  const onMove = (ev: MouseEvent): void => {
+    const rect = container.getBoundingClientRect()
+    splitPct.value = Math.min(80, Math.max(15, ((ev.clientX - rect.left) / rect.width) * 100))
+  }
+  const onUp = (): void => {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+    localStorage.setItem(SPLIT_KEY, String(Math.round(splitPct.value * 10) / 10))
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+// ── Unified left panel list entry ─────────────────────────────────────────────
+interface ListEntry {
+  id: number
+  type: 'extract' | 'writeback'
+  name: string
+  subtitle: string
+}
+
+const filteredJobs = computed((): ListEntry[] => {
+  const q = search.value.toLowerCase()
+  const exEntries: ListEntry[] = exJobs.value
+    .filter((j) => !q || j.name.toLowerCase().includes(q) || j.sfObject.toLowerCase().includes(q) || (j.soqlQuery ?? '').toLowerCase().includes(q))
+    .map((j): ListEntry => ({
+      id: j.id,
+      type: 'extract',
+      name: j.name,
+      subtitle: j.soqlQuery ? '(SOQL)' : `${j.sfObject} → ${j.destTable} · ${j.writeMode}`
+    }))
+  const wbEntries: ListEntry[] = wbJobs.value
+    .filter((j) => !q || j.name.toLowerCase().includes(q) || j.sfObject.toLowerCase().includes(q) || j.sqlQuery.toLowerCase().includes(q))
+    .map((j): ListEntry => ({
+      id: j.id,
+      type: 'writeback',
+      name: j.name,
+      subtitle: `${j.operation} → ${j.sfObject}`
+    }))
+  return [...exEntries, ...wbEntries].sort((a, b) => {
+    const cmp = a.name.localeCompare(b.name)
+    if (cmp !== 0) return cmp
+    // equal names: extract first, writeback last
+    if (a.type === 'extract' && b.type === 'writeback') return -1
+    if (a.type === 'writeback' && b.type === 'extract') return 1
+    return 0
+  })
+})
+
+function isEntryRunning(e: ListEntry): boolean {
+  return e.type === 'extract' ? exActiveRuns.value.has(e.id) : wbActiveRuns.value.has(e.id)
+}
+function isEntryQueued(e: ListEntry): boolean {
+  return e.type === 'extract' ? exJobQueue.value.includes(e.id) : wbJobQueue.value.includes(e.id)
+}
+function entryLastRun(e: ListEntry): RunHistoryEntry | WritebackRunEntry | undefined {
+  if (e.type === 'extract') return (exHistoryMap.value.get(e.id) ?? [])[0]
+  return (wbHistoryMap.value.get(e.id) ?? [])[0]
+}
+function entryRowCount(e: ListEntry): number | null | undefined {
+  const run = entryLastRun(e)
+  if (!run) return undefined
+  if (e.type === 'extract') return (run as RunHistoryEntry).rowsLoaded
+  return (run as WritebackRunEntry).rowsSent
+}
+
+async function selectEntry(e: ListEntry): Promise<void> {
+  if (e.type === 'extract') {
+    await exSelectJob(e.id)
+  } else {
+    await wbSelectJob(e.id)
+  }
+  creating.value = null
+}
+
+function runEntry(e: ListEntry): void {
+  if (e.type === 'extract') {
+    exSelectJob(e.id).then(() => exExecuteJobById(e.id))
+  } else {
+    wbSelectJob(e.id).then(() => wbExecuteJobById(e.id))
+  }
+}
+
+function startNewExtractJob(): void {
+  newJobMenuOpen.value = false
+  selectedJob.value = null
+  creating.value = 'extract'
+  exEditForm.value = { name: '', mode: 'structured', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: '', additionalIndexes: [] }
+  exFields.value = []
+  exSaveError.value = ''
+}
+
+function startNewWbJob(): void {
+  newJobMenuOpen.value = false
+  selectedJob.value = null
+  creating.value = 'writeback'
+  wbEditForm.value = { name: '', sqlQuery: '', sfObject: '', operation: 'insert', fieldMap: [], externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null, useBulkApi: false, customHeaders: '' }
+  wbPreviewResult.value = null
+  wbPreviewError.value = ''
+  wbRowCountResult.value = null
+  wbRowCountError.value = ''
+  wbSaveError.value = ''
+  wbSfFields.value = []
+}
+
+function cancelCreating(): void {
+  creating.value = null
+  // Restore previous selection if any jobs exist
+  const firstEntry = filteredJobs.value[0]
+  if (firstEntry) {
+    selectEntry(firstEntry)
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ─── EXTRACT state & functions ───────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
+const exJobs = ref<ExtractJob[]>([])
+const exHistoryMap = ref<Map<number, RunHistoryEntry[]>>(new Map())
+const exActiveRuns = ref<Map<number, string>>(new Map())
+const exJobQueue = ref<number[]>([])
+const exLastRunIds = ref<Map<number, string>>(new Map())
+const exRunStartTimes = ref<Map<number, number>>(new Map())
+const exDetailTab = ref<'definition' | 'history' | 'execution'>('definition')
+const exSaving = ref(false)
+const exSaveError = ref('')
+const exLoadingFields = ref(false)
+const exFields = ref<FieldDescriptor[]>([])
+const exClearMsg = ref('')
+const exClearMsgError = ref(false)
+const exFieldPickerOpen = ref(false)
+const exAdditionalIndexInput = ref('')
+const exIndexPickerOpen = ref(false)
+const exErrorPopover = ref<{ id: number; msg: string; x: number; y: number } | null>(null)
+
+interface ExEditForm {
+  id?: number
+  name: string
+  mode: 'structured' | 'soql'
+  sfObject: string
+  fields: string[]
+  customExpressions: string[]
+  whereClause: string
+  rowLimit: number | null
+  destTable: string
+  writeMode: 'replace' | 'append'
+  soqlQuery: string
+  additionalIndexes: string[]
+}
+const exEditForm = ref<ExEditForm>({
+  name: '', mode: 'structured', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: '', additionalIndexes: []
+})
+
+const exSelectedJobId = computed(() => selectedJob.value?.type === 'extract' ? selectedJob.value.id : null)
+const exSelectedJobData = computed(() => exJobs.value.find((j) => j.id === exSelectedJobId.value))
+const exHistory = computed(() => exHistoryMap.value.get(exSelectedJobId.value ?? -1) ?? [])
+const exThisJobIsRunning = computed(() => exSelectedJobId.value != null && exActiveRuns.value.has(exSelectedJobId.value))
+const exThisJobIsQueued = computed(() => exSelectedJobId.value != null && exJobQueue.value.includes(exSelectedJobId.value))
+const exSelectedRunId = computed(() => exSelectedJobId.value != null ? exActiveRuns.value.get(exSelectedJobId.value) : undefined)
+const exActiveJobData = computed(() => exSelectedRunId.value ? jobs.getJob(exSelectedRunId.value) : undefined)
+const exLastRunId = computed(() => exSelectedJobId.value != null ? exLastRunIds.value.get(exSelectedJobId.value) : undefined)
+const exLastJobData = computed(() => exLastRunId.value ? jobs.getJob(exLastRunId.value) : undefined)
+const exDisplayedJobData = computed(() => exActiveJobData.value ?? exLastJobData.value)
+const exSelectedRunStartTime = computed(() => exSelectedJobId.value != null ? (exRunStartTimes.value.get(exSelectedJobId.value) ?? 0) : 0)
+
+const exFieldPickerLabel = computed(() => {
+  const total = exFields.value.length
+  const sel = exEditForm.value.fields.length
+  const custom = exEditForm.value.customExpressions.length
+  const customSuffix = custom ? ` + ${custom} custom` : ''
+  if (!total) return 'Fields'
+  if (sel === total && !custom) return `All ${total} fields selected`
+  if (sel === 0 && !custom) return `0 of ${total} fields selected`
+  return `${sel}${customSuffix} of ${total} selected`
+})
+
+const exIndexSuggestions = computed((): string[] => {
+  const q = exAdditionalIndexInput.value.toLowerCase()
+  const already = exEditForm.value.additionalIndexes
+  const fromFields = exFields.value.map((f) => f.name).filter((name) => !already.includes(name) && (!q || name.toLowerCase().includes(q)))
+  const fromCustom = exEditForm.value.customExpressions.filter((e) => !already.includes(e) && (!q || e.toLowerCase().includes(q)))
+  return [...fromFields, ...fromCustom]
+})
+
+function exAddIndex(col: string): void {
+  const name = col.trim()
+  if (name && !exEditForm.value.additionalIndexes.includes(name)) exEditForm.value.additionalIndexes.push(name)
+  exAdditionalIndexInput.value = ''
+}
+function exAddIndexFromInput(): void {
+  const q = exAdditionalIndexInput.value.trim()
+  if (!q) return
+  if (exEditForm.value.mode === 'structured') {
+    const exact = exIndexSuggestions.value.find((name) => name.toLowerCase() === q.toLowerCase())
+    if (exact) { exAddIndex(exact); return }
+    if (exIndexSuggestions.value.length === 1) { exAddIndex(exIndexSuggestions.value[0]); return }
+  }
+  exAddIndex(q)
+}
+function exRemoveIndex(col: string): void {
+  const i = exEditForm.value.additionalIndexes.indexOf(col)
+  if (i !== -1) exEditForm.value.additionalIndexes.splice(i, 1)
+}
+
+async function exLoadJobs(): Promise<void> {
+  exJobs.value = await window.api.listExtractJobs()
+  for (const j of exJobs.value) {
+    exHistoryMap.value.set(j.id, await window.api.getRunHistory(j.id))
+  }
+}
+
+function exSyncEditForm(j: ExtractJob): void {
+  exEditForm.value = {
+    id: j.id, name: j.name, mode: j.soqlQuery ? 'soql' : 'structured',
+    sfObject: j.sfObject, fields: [...j.fields],
+    customExpressions: [...(j.customExpressions ?? [])],
+    whereClause: j.whereClause ?? '', rowLimit: j.rowLimit,
+    destTable: j.destTable, writeMode: j.writeMode,
+    soqlQuery: j.soqlQuery ?? '', additionalIndexes: [...(j.additionalIndexes ?? [])]
+  }
+  if (!j.soqlQuery && j.sfObject) exOnObjectChange(j.sfObject, false)
+}
+
+function exResetForm(): void {
+  const j = exSelectedJobData.value
+  if (j) { exSyncEditForm(j); exSaveError.value = '' }
+}
+
+async function exSelectJob(id: number): Promise<void> {
+  selectedJob.value = { id, type: 'extract' }
+  exDetailTab.value = 'definition'
+  exClearMsg.value = ''
+  exSaveError.value = ''
+  exHistoryMap.value.set(id, await window.api.getRunHistory(id))
+  const j = exJobs.value.find((j) => j.id === id)
+  if (j) exSyncEditForm(j)
+}
+
+async function exOnObjectChange(name: string, resetFields = true): Promise<void> {
+  if (!name) return
+  exLoadingFields.value = true
+  try {
+    exFields.value = await window.api.describeObject(name)
+    if (resetFields) {
+      exEditForm.value.fields = exFields.value.filter((f) => !f.name.includes('.')).map((f) => f.name)
+      exEditForm.value.customExpressions = []
+      exEditForm.value.destTable = name
+    }
+  } finally {
+    exLoadingFields.value = false
+  }
+}
+
+async function exSave(andExecute: boolean): Promise<void> {
+  exSaveError.value = ''
+  if (!exEditForm.value.name.trim()) { exSaveError.value = 'Please enter a job name.'; return }
+  const candidateName = exEditForm.value.name.trim()
+  const duplicate = exJobs.value.find((j) => j.name.toLowerCase() === candidateName.toLowerCase() && j.id !== exEditForm.value.id)
+  if (duplicate) { exSaveError.value = `A job named "${duplicate.name}" already exists.`; return }
+  exSaving.value = true
+  try {
+    const isSoql = exEditForm.value.mode === 'soql'
+    if (isSoql && !exEditForm.value.soqlQuery.trim()) { exSaveError.value = 'Please enter a SOQL query.'; exSaving.value = false; return }
+    const validColumns = isSoql ? null : new Set([...exEditForm.value.fields, ...exEditForm.value.customExpressions])
+    const cleanedIndexes = toRaw(exEditForm.value.additionalIndexes).filter((col) => validColumns === null || validColumns.has(col))
+    const job = await window.api.saveExtractJob({
+      name: exEditForm.value.name.trim(),
+      sfObject: isSoql ? '' : exEditForm.value.sfObject,
+      fields: isSoql ? [] : toRaw(exEditForm.value.fields).slice(),
+      customExpressions: isSoql ? [] : toRaw(exEditForm.value.customExpressions).slice(),
+      whereClause: isSoql ? null : (exEditForm.value.whereClause || null),
+      rowLimit: isSoql ? null : (exEditForm.value.rowLimit != null && exEditForm.value.rowLimit !== ('' as unknown as null) ? Number(exEditForm.value.rowLimit) : null),
+      destTable: exEditForm.value.destTable || (isSoql ? 'sf_results' : exEditForm.value.sfObject),
+      writeMode: exEditForm.value.writeMode,
+      soqlQuery: isSoql ? exEditForm.value.soqlQuery.trim() : null,
+      additionalIndexes: cleanedIndexes,
+      ...(exEditForm.value.id ? { id: exEditForm.value.id } : {})
+    } as Parameters<typeof window.api.saveExtractJob>[0])
+    creating.value = null
+    await exLoadJobs()
+    selectedJob.value = { id: job.id, type: 'extract' }
+    const saved = exJobs.value.find((j) => j.id === job.id)
+    if (saved) exSyncEditForm(saved)
+    if (andExecute) await exExecuteJobById(job.id)
+  } catch (e) {
+    exSaveError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    exSaving.value = false
+  }
+}
+
+async function exClearDestTable(): Promise<void> {
+  const j = exSelectedJobData.value
+  if (!j) return
+  if (!confirm(`Delete all rows from "${j.destTable}"?`)) return
+  exClearMsg.value = ''
+  try {
+    await window.api.executeQuery(`DELETE FROM "${j.destTable}"`)
+    exClearMsg.value = 'Table cleared.'
+    exClearMsgError.value = false
+    conn.refreshDbInfo()
+  } catch (e) {
+    exClearMsg.value = e instanceof Error ? e.message : String(e)
+    exClearMsgError.value = true
+  }
+}
+
+async function exExecuteJob(): Promise<void> {
+  if (!exSelectedJobId.value) return
+  await exExecuteJobById(exSelectedJobId.value)
+}
+
+async function exExecuteJobById(id: number): Promise<void> {
+  if (exActiveRuns.value.has(id) || exJobQueue.value.includes(id)) return
+  if (exActiveRuns.value.size >= MAX_PARALLEL) {
+    exJobQueue.value = [...exJobQueue.value, id]
+    if (exSelectedJobId.value === id) exDetailTab.value = 'execution'
+    return
+  }
+  await exStartJobNow(id)
+}
+
+async function exStartJobNow(id: number): Promise<void> {
+  if (exSelectedJobId.value === id) exDetailTab.value = 'execution'
+  exRunStartTimes.value.set(id, Date.now())
+  const runId = await window.api.startExtract(id)
+  exActiveRuns.value.set(id, runId)
+  exLastRunIds.value.set(id, runId)
+  jobs.startJob(runId, 'extract', id)
+  const off = window.api.onJobComplete((e) => {
+    if (e.runId !== runId) return
+    off()
+    exActiveRuns.value.delete(id)
+    exLoadJobs()
+    conn.refreshDbInfo()
+    if (exJobQueue.value.length > 0) {
+      const nextId = exJobQueue.value[0]
+      exJobQueue.value = exJobQueue.value.slice(1)
+      exStartJobNow(nextId)
+    }
+  })
+}
+
+async function exCancelRun(): Promise<void> {
+  if (!exSelectedJobId.value) return
+  const id = exSelectedJobId.value
+  const qIdx = exJobQueue.value.indexOf(id)
+  if (qIdx !== -1) { exJobQueue.value = exJobQueue.value.filter((jid) => jid !== id); return }
+  const runId = exActiveRuns.value.get(id)
+  if (runId) { await window.api.cancelJob(runId); jobs.removeJob(runId) }
+  exActiveRuns.value.delete(id)
+  exLastRunIds.value.delete(id)
+  exRunStartTimes.value.delete(id)
+}
+
+async function exDuplicateSelectedJob(): Promise<void> {
+  if (!exSelectedJobId.value) return
+  await window.api.duplicateExtractJob(exSelectedJobId.value)
+  await exLoadJobs()
+}
+
+async function exDeleteSelectedJob(): Promise<void> {
+  if (!exSelectedJobId.value) return
+  if (!confirm('Delete this job?')) return
+  await window.api.deleteExtractJob(exSelectedJobId.value)
+  selectedJob.value = null
+  await exLoadJobs()
+}
+
+function exToggleErrorPopover(id: number, msg: string, e: MouseEvent): void {
+  if (exErrorPopover.value?.id === id) { exErrorPopover.value = null; return }
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const viewRect = (e.currentTarget as HTMLElement).closest('.job-detail')!.getBoundingClientRect()
+  exErrorPopover.value = { id, msg, x: Math.min(rect.left - viewRect.left, viewRect.width - 340), y: rect.bottom - viewRect.top + 4 }
+}
+
+watch(selectedJob, () => { exErrorPopover.value = null })
+
+function exApplyPendingSoql(): void {
+  const soql = (window.history.state as Record<string, unknown>)?.pendingSoql
+  if (typeof soql === 'string' && soql.trim()) {
+    window.history.replaceState({ ...window.history.state, pendingSoql: undefined }, '')
+    selectedJob.value = null
+    creating.value = 'extract'
+    exFields.value = []
+    exEditForm.value = { name: '', mode: 'soql', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: soql, additionalIndexes: [] }
+  }
+}
+
+const offExternalQueued = window.api.onExternalJobQueued((e) => {
+  if (e.type !== 'extract') return
+  if (!exJobQueue.value.includes(e.jobId)) exJobQueue.value = [...exJobQueue.value, e.jobId]
+})
+const offExternalStarted = window.api.onExternalJobStarted((e) => {
+  if (e.type !== 'extract') return
+  exJobQueue.value = exJobQueue.value.filter((id) => id !== e.jobId)
+  if (!exActiveRuns.value.has(e.jobId)) {
+    exActiveRuns.value.set(e.jobId, e.runId)
+    const off = window.api.onJobComplete((result) => {
+      if (result.runId !== e.runId) return
+      off()
+      exActiveRuns.value.delete(e.jobId)
+      exLoadJobs()
+      conn.refreshDbInfo()
+    })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ─── WRITEBACK state & functions ─────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
+const wbJobs = ref<WritebackJob[]>([])
+const wbHistoryMap = ref<Map<number, WritebackRunEntry[]>>(new Map())
+const wbActiveRuns = ref<Map<number, string>>(new Map())
+const wbJobQueue = ref<number[]>([])
+const wbDetailTab = ref<'definition' | 'history' | 'execution'>('definition')
+const wbSaving = ref(false)
+const wbSaveError = ref('')
+const wbPreviewLoading = ref(false)
+const wbPreviewResult = ref<{ columns: string[]; rows: unknown[][] } | null>(null)
+const wbPreviewError = ref('')
+const wbRowCountLoading = ref(false)
+const wbRowCountResult = ref<number | null>(null)
+const wbRowCountError = ref('')
+const wbSfFields = ref<FieldDescriptor[]>([])
+const schemaPanel = ref<HTMLElement | null>(null)
+const schemaTab = ref<'sqlite' | 'sf'>('sqlite')
+const wbOperations = ['insert', 'update', 'upsert', 'delete', 'undelete']
+
+interface WbEditForm {
+  id?: number
+  name: string
+  sqlQuery: string
+  sfObject: string
+  operation: string
+  fieldMap: FieldMapping[]
+  externalIdField: string
+  batchSize: number | null
+  threads: number | null
+  distributionKey: string[] | null
+  useBulkApi: boolean
+  customHeaders: string
+}
+const wbEditForm = ref<WbEditForm>({
+  name: '', sqlQuery: '', sfObject: '', operation: 'insert', fieldMap: [],
+  externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null,
+  useBulkApi: false, customHeaders: ''
+})
+
+const wbSelectedJobId = computed(() => selectedJob.value?.type === 'writeback' ? selectedJob.value.id : null)
+const wbSelectedJobData = computed(() => wbJobs.value.find((j) => j.id === wbSelectedJobId.value))
+const wbHistory = computed(() => wbHistoryMap.value.get(wbSelectedJobId.value ?? -1) ?? [])
+const wbThisJobIsRunning = computed(() => wbSelectedJobId.value != null && wbActiveRuns.value.has(wbSelectedJobId.value))
+const wbThisJobIsQueued = computed(() => wbSelectedJobId.value != null && wbJobQueue.value.includes(wbSelectedJobId.value))
+const wbActiveJobData = computed(() => {
+  const runId = wbSelectedJobId.value != null ? wbActiveRuns.value.get(wbSelectedJobId.value) : undefined
+  return runId ? jobs.getJob(runId) : undefined
+})
+
+// ── WB Custom Headers suggestions ─────────────────────────────────────────────
+const wbHeaderSuggestions = [
+  { label: 'OwnerChangeOptions', preview: 'KeepAccountTeam', value: '{"OwnerChangeOptions": {"options": [{"type": "KeepAccountTeam", "execute": true}]}}' },
+  { label: 'AssignmentRuleHeader', preview: 'useDefaultRule: true', value: '{"AssignmentRuleHeader": {"useDefaultRule": true}}' },
+  { label: 'DuplicateRuleHeader', preview: 'allowSave: true', value: '{"DuplicateRuleHeader": {"allowSave": true}}' }
+]
+const wbShowHeaderSuggestions = ref(false)
+const wbActiveSuggestion = ref(-1)
+
+function wbOnHeadersKeydown(e: KeyboardEvent): void {
+  if (e.key === 'ArrowDown') { e.preventDefault(); wbShowHeaderSuggestions.value = true; wbActiveSuggestion.value = (wbActiveSuggestion.value + 1) % wbHeaderSuggestions.length }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); if (wbShowHeaderSuggestions.value) wbActiveSuggestion.value = (wbActiveSuggestion.value - 1 + wbHeaderSuggestions.length) % wbHeaderSuggestions.length }
+  else if (e.key === 'Enter' && wbShowHeaderSuggestions.value && wbActiveSuggestion.value >= 0) { e.preventDefault(); wbSelectHeaderSuggestion(wbActiveSuggestion.value) }
+  else if (e.key === 'Escape') { wbShowHeaderSuggestions.value = false; wbActiveSuggestion.value = -1 }
+}
+function wbSelectHeaderSuggestion(i: number): void { wbEditForm.value.customHeaders = wbHeaderSuggestions[i].value; wbShowHeaderSuggestions.value = false; wbActiveSuggestion.value = -1 }
+function wbHideSuggestionsDelayed(): void { setTimeout(() => { wbShowHeaderSuggestions.value = false; wbActiveSuggestion.value = -1 }, 150) }
+
+// ── Distribution key ──────────────────────────────────────────────────────────
+const wbDistribKeyCols = computed(() => wbEditForm.value.fieldMap.map((m) => m.sqlCol).filter(Boolean))
+const wbDistribKeySearch = ref('')
+const wbDistribKeyDropdownOpen = ref(false)
+const wbDistribKeyOptions = computed(() => {
+  const selected = new Set(wbEditForm.value.distributionKey ?? [])
+  const q = wbDistribKeySearch.value.toLowerCase()
+  return wbDistribKeyCols.value.filter((col) => !selected.has(col) && (!q || col.toLowerCase().includes(q)))
+})
+function wbToggleDistribKey(col: string): void {
+  if ((wbEditForm.value.threads ?? 1) <= 1) return
+  const current = wbEditForm.value.distributionKey ?? []
+  const next = current.includes(col) ? current.filter((c) => c !== col) : [...current, col]
+  wbEditForm.value.distributionKey = next.length ? next : null
+}
+function wbSelectDistribKey(col: string): void {
+  if ((wbEditForm.value.threads ?? 1) <= 1) return
+  const current = wbEditForm.value.distributionKey ?? []
+  if (!current.includes(col)) wbEditForm.value.distributionKey = [...current, col]
+  wbDistribKeySearch.value = ''
+  wbDistribKeyDropdownOpen.value = false
+}
+function wbHideDistribDropdownDelayed(): void { setTimeout(() => { wbDistribKeyDropdownOpen.value = false }, 150) }
+
+// ── WB Execution display state ────────────────────────────────────────────────
+const EXEC_PAGE = 10000
+const execSql = ref('')
+const execOperation = ref('')
+const execColumns = ref<string[]>([])
+const execTotalRows = ref(0)
+const execSourceRowCount = ref<number | null>(null)
+const execSucceeded = ref(0)
+const execFailed = ref(0)
+const execInFlight = ref(0)
+const execRunId = ref<string | null>(null)
+const execJobDone = ref(false)
+const execIsBulkApi = ref(false)
+const execBulkPhase = ref<'uploading' | 'processing' | 'downloading' | ''>('')
+const execBulkUploaded = ref(0)
+const execBulkProcessed = ref(0)
+const execBulkJobState = ref('')
+const execError = ref<string | null>(null)
+const execWarn = ref<string | null>(null)
+const execPageOffset = ref(0)
+const execPageRows = ref<unknown[][]>([])
+const execPageStatuses = ref<Map<number, { status: 'success' | 'error' | 'processing'; message?: string }>>(new Map())
+const execPageIds = ref<Map<number, string>>(new Map())
+const execFailedTotal = ref(0)
+const execFailedDistinctErrors = ref<{ message: string; count: number }[]>([])
+interface ExecFailedRow { index: number; message: string; row: unknown[] }
+const execFailedPanelRows = ref<ExecFailedRow[]>([])
+const execFailedRangeMap = ref<Map<number, ExecFailedRow>>(new Map())
+const execFailedPageOffset = ref(0)
+const failedErrorFilter = ref('')
+const execSort = ref<SortCriterion[]>([])
+const execFailedSort = ref<SortCriterion[]>([])
+const execFilterSuccess = ref(true)
+const execFilterError = ref(true)
+const execFilterPending = ref(true)
+
+const wbAllFiltersOn = computed(() => execFilterSuccess.value && execFilterError.value && execFilterPending.value)
+const wbShowOnlyFailed = computed(() => !execFilterSuccess.value && execFilterError.value && !execFilterPending.value)
+const wbTotalRows = computed(() => execTotalRows.value)
+const wbSucceededCount = computed(() => execSucceeded.value)
+const wbFailedCount = computed(() => execFailed.value)
+const wbPendingCount = computed(() => Math.max(0, execTotalRows.value - execSucceeded.value - execFailed.value))
+const wbIsInsert = computed(() => execOperation.value === 'insert')
+const wbDistinctErrors = computed(() => execFailedDistinctErrors.value.map((e) => e.message).slice(0, 100))
+const wbErrorCounts = computed(() => new Map(execFailedDistinctErrors.value.map((e) => [e.message, e.count])))
+const wbFilteredFailedTotal = computed(() => {
+  if (!failedErrorFilter.value) return execFailedTotal.value
+  return execFailedDistinctErrors.value.find((e) => e.message === failedErrorFilter.value)?.count ?? 0
+})
+const wbExecDisplayColumns = computed((): string[] => {
+  const fm = wbSelectedJobData.value?.fieldMap
+  if (!fm?.length) return execColumns.value
+  const lookup = new Map<string, string>()
+  for (const m of fm) { if (!m.excluded && m.sqlCol && m.sfField) lookup.set(m.sqlCol.toLowerCase(), m.sfField) }
+  return execColumns.value.map((col) => lookup.get(col.toLowerCase()) ?? col)
+})
+const wbExecVisibleCols = computed(() => wbIsInsert.value ? ['_Id', '_Status', ...wbExecDisplayColumns.value] : ['_Status', ...wbExecDisplayColumns.value])
+const wbExecRowsAndNumbers = computed((): { rows: unknown[][]; rowNumbers: number[] } => {
+  if (wbShowOnlyFailed.value && execJobDone.value) {
+    return {
+      rows: execFailedPanelRows.value.map((fr) => wbIsInsert.value ? ['', `Fail: ${fr.message}`, ...fr.row] : [`Fail: ${fr.message}`, ...fr.row]),
+      rowNumbers: execFailedPanelRows.value.map((_, i) => execFailedPageOffset.value + i + 1)
+    }
+  }
+  const allRows: unknown[][] = []
+  const allNums: number[] = []
+  execPageRows.value.forEach((r, pageIdx) => {
+    const absIdx = execPageOffset.value + pageIdx
+    let statusCell: string
+    let idCell = execPageIds.value.get(absIdx) ?? ''
+    if (execJobDone.value) {
+      const failed = execFailedRangeMap.value.get(absIdx)
+      if (failed) {
+        statusCell = `Fail: ${failed.message}`
+        idCell = ''
+      } else {
+        const st = execPageStatuses.value.get(absIdx)
+        if (st?.status === 'success') {
+          statusCell = 'OK'
+        } else if (!execError.value && absIdx < execTotalRows.value) {
+          statusCell = 'OK'
+        } else {
+          statusCell = '—'
+        }
+      }
+    } else {
+      const st = execPageStatuses.value.get(absIdx)
+      if (!st) {
+        statusCell = 'queued'
+      } else if (st.status === 'success') {
+        statusCell = 'OK'
+      } else if (st.status === 'processing') {
+        statusCell = 'processing'
+      } else {
+        statusCell = `Fail: ${st.message ?? ''}`
+      }
+    }
+    allRows.push(wbIsInsert.value ? [idCell, statusCell, ...(r as unknown[])] : [statusCell, ...(r as unknown[])])
+    allNums.push(absIdx + 1)
+  })
+  if (wbAllFiltersOn.value) return { rows: allRows, rowNumbers: allNums }
+  const statusIdx = wbIsInsert.value ? 1 : 0
+  const filteredRows: unknown[][] = []
+  const filteredNums: number[] = []
+  allRows.forEach((row, i) => {
+    const cell = String(row[statusIdx])
+    const include = cell === 'OK' ? execFilterSuccess.value : cell.startsWith('Fail') ? execFilterError.value : execFilterPending.value
+    if (include) { filteredRows.push(row); filteredNums.push(allNums[i]) }
+  })
+  return { rows: filteredRows, rowNumbers: filteredNums }
+})
+const wbVisibleExecRows = computed(() => wbExecRowsAndNumbers.value.rows)
+const wbVisibleExecRowNumbers = computed(() => wbExecRowsAndNumbers.value.rowNumbers)
+
+// ── WB Exec state cache ───────────────────────────────────────────────────────
+const MAX_EXEC_CACHE = 3
+interface SavedExecState {
+  cachedAt: number; sql: string; operation: string; columns: string[]; totalRows: number
+  sourceRowCount: number | null; succeeded: number; failed: number; runId: string | null
+  jobDone: boolean; isBulkApi: boolean; error: string | null; warn: string | null
+  pageRows: unknown[][]; pageStatuses: Map<number, { status: 'success' | 'error' | 'processing'; message?: string }>
+  pageIds: Map<number, string>; failedTotal: number
+  distinctErrors: { message: string; count: number }[]
+  filterSuccess: boolean; filterError: boolean; filterPending: boolean
+  execSort: SortCriterion[]; execFailedSort: SortCriterion[]
+}
+const execStateCache = ref<Map<number, SavedExecState>>(new Map())
+
+function wbCaptureExecState(jobId: number, force = false): void {
+  if (!force && !execJobDone.value && !execError.value) return
+  execStateCache.value.set(jobId, {
+    cachedAt: Date.now(), sql: execSql.value, operation: execOperation.value,
+    columns: execColumns.value.slice(), totalRows: execTotalRows.value,
+    sourceRowCount: execSourceRowCount.value, succeeded: execSucceeded.value,
+    failed: execFailed.value, runId: execRunId.value, jobDone: execJobDone.value,
+    isBulkApi: execIsBulkApi.value, error: execError.value, warn: execWarn.value,
+    pageRows: execPageRows.value.slice(), pageStatuses: new Map(execPageStatuses.value),
+    pageIds: new Map(execPageIds.value), failedTotal: execFailedTotal.value,
+    distinctErrors: execFailedDistinctErrors.value.slice(),
+    filterSuccess: execFilterSuccess.value, filterError: execFilterError.value,
+    filterPending: execFilterPending.value, execSort: execSort.value.slice(),
+    execFailedSort: execFailedSort.value.slice()
+  })
+}
+
+async function wbRestoreExecState(jobId: number): Promise<void> {
+  const s = execStateCache.value.get(jobId)
+  if (!s) { wbClearExecState(); return }
+  s.cachedAt = Date.now()
+  execSql.value = s.sql; execOperation.value = s.operation; execColumns.value = s.columns
+  execTotalRows.value = s.totalRows; execSourceRowCount.value = s.sourceRowCount
+  execSucceeded.value = s.succeeded; execFailed.value = s.failed; execRunId.value = s.runId
+  execJobDone.value = s.jobDone; execIsBulkApi.value = s.isBulkApi
+  execError.value = s.error; execWarn.value = s.warn; execPageRows.value = s.pageRows
+  execPageStatuses.value = s.pageStatuses; execPageIds.value = s.pageIds
+  execFailedTotal.value = s.failedTotal; execFailedDistinctErrors.value = s.distinctErrors
+  execFilterSuccess.value = s.filterSuccess; execFilterError.value = s.filterError; execFilterPending.value = s.filterPending
+  execInFlight.value = 0; execBulkPhase.value = ''; execBulkUploaded.value = 0
+  execBulkProcessed.value = 0; execBulkJobState.value = ''
+  execPageOffset.value = 0; execFailedPageOffset.value = 0; failedErrorFilter.value = ''
+  execFailedPanelRows.value = []; execFailedRangeMap.value = new Map()
+  execSort.value = s.execSort ?? []; execFailedSort.value = s.execFailedSort ?? []
+  if (s.jobDone && s.failedTotal > 0 && s.runId) {
+    const [panelRows, rangeEntries] = await Promise.all([
+      window.api.wbGetFailedRowsPage(s.runId, 0, EXEC_PAGE),
+      window.api.wbGetFailedRowsInRange(s.runId, 0, EXEC_PAGE)
+    ])
+    execFailedPanelRows.value = panelRows
+    execFailedRangeMap.value = new Map(Object.entries(rangeEntries).map(([k, v]) => [Number(k), { index: Number(k), ...v }]))
+  }
+}
+
+function wbEvictOldExecStates(keepJobId: number): void {
+  const cache = execStateCache.value
+  if (cache.size <= MAX_EXEC_CACHE) return
+  const sorted = [...cache.entries()].sort((a, b) => a[1].cachedAt - b[1].cachedAt)
+  for (const [id] of sorted) {
+    if (cache.size <= MAX_EXEC_CACHE) break
+    if (id !== keepJobId && !wbActiveRuns.value.has(id)) cache.delete(id)
+  }
+}
+
+function wbClearExecState(): void {
+  execSql.value = ''; execOperation.value = ''; execColumns.value = []; execTotalRows.value = 0
+  execSourceRowCount.value = null; execSucceeded.value = 0; execFailed.value = 0; execInFlight.value = 0
+  execRunId.value = null; execJobDone.value = false; execIsBulkApi.value = false; execBulkPhase.value = ''
+  execBulkUploaded.value = 0; execBulkProcessed.value = 0; execBulkJobState.value = ''
+  execError.value = null; execWarn.value = null; execPageOffset.value = 0; execPageRows.value = []
+  execPageStatuses.value = new Map(); execPageIds.value = new Map(); execFailedTotal.value = 0
+  execFailedDistinctErrors.value = []; execFailedPanelRows.value = []; execFailedRangeMap.value = new Map()
+  execFailedPageOffset.value = 0; failedErrorFilter.value = ''
+  execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
+  execSort.value = []; execFailedSort.value = []
+}
+
+watch(failedErrorFilter, async () => {
+  execFailedPageOffset.value = 0
+  if (execRunId.value && execJobDone.value) {
+    execFailedPanelRows.value = await window.api.wbGetFailedRowsPage(execRunId.value, 0, EXEC_PAGE, failedErrorFilter.value || undefined, execFailedSort.value.length ? execFailedSort.value : undefined)
+  }
+})
+watch([execFilterSuccess, execFilterError, execFilterPending], () => { execPageOffset.value = 0; execFailedPageOffset.value = 0 })
+
+async function wbLoadJobs(): Promise<void> {
+  wbJobs.value = await window.api.listWritebackJobs()
+  const histories = await Promise.all(wbJobs.value.map((j) => window.api.getWritebackRunHistory(j.id)))
+  wbJobs.value.forEach((j, i) => wbHistoryMap.value.set(j.id, histories[i]))
+}
+
+function wbLoadJobIntoForm(j: WritebackJob): void {
+  wbEditForm.value = {
+    id: j.id, name: j.name, sqlQuery: j.sqlQuery, sfObject: j.sfObject,
+    operation: j.operation, fieldMap: [...j.fieldMap.map((m) => ({ ...m }))],
+    externalIdField: j.externalIdField || 'Id', batchSize: j.batchSize, threads: j.threads,
+    distributionKey: j.distributionKey ? [...j.distributionKey] : null,
+    useBulkApi: j.useBulkApi, customHeaders: j.customHeaders ?? ''
+  }
+  wbPreviewResult.value = null; wbRowCountResult.value = null; wbRowCountError.value = ''
+  wbSfFields.value = []
+  if (j.sfObject) window.api.describeObject(j.sfObject).then((f) => { wbSfFields.value = f })
+}
+
+function wbResetDefinitionForm(): void {
+  const j = wbSelectedJobData.value
+  if (j) { wbLoadJobIntoForm(j); wbPreviewError.value = ''; wbSaveError.value = '' }
+}
+
+async function wbSelectJob(id: number): Promise<void> {
+  if (wbSelectedJobId.value != null && wbSelectedJobId.value !== id) {
+    wbCaptureExecState(wbSelectedJobId.value, true)
+  }
+  selectedJob.value = { id, type: 'writeback' }
+  wbDetailTab.value = 'definition'
+  await wbRestoreExecState(id)
+  const j = wbJobs.value.find((x) => x.id === id)
+  if (j) wbLoadJobIntoForm(j)
+  wbHistoryMap.value.set(id, await window.api.getWritebackRunHistory(id))
+}
+
+async function wbRunPreview(): Promise<void> {
+  wbPreviewError.value = ''; wbPreviewLoading.value = true
+  try { wbPreviewResult.value = await window.api.previewWritebackQuery(wbEditForm.value.sqlQuery); wbInitFieldMap() }
+  catch (e) { wbPreviewError.value = e instanceof Error ? e.message : String(e) }
+  finally { wbPreviewLoading.value = false }
+}
+
+async function wbRunRowCount(): Promise<void> {
+  wbRowCountError.value = ''; wbRowCountResult.value = null; wbRowCountLoading.value = true
+  try { wbRowCountResult.value = await window.api.wbRowCount(wbEditForm.value.sqlQuery) }
+  catch (e) { wbRowCountError.value = e instanceof Error ? e.message : String(e) }
+  finally { wbRowCountLoading.value = false }
+}
+
+async function wbOnObjectChange(name: string): Promise<void> {
+  if (!name) return
+  wbSfFields.value = await window.api.describeObject(name)
+  wbInitFieldMap()
+}
+
+function wbInitFieldMap(): void {
+  if (!wbPreviewResult.value) return
+  const existing = new Map(wbEditForm.value.fieldMap.map((m) => [m.sqlCol.toLowerCase(), m]))
+  wbEditForm.value.fieldMap = wbPreviewResult.value.columns.map((col) => {
+    const prev = existing.get(col.toLowerCase())
+    if (prev) return { ...prev, sqlCol: col }
+    const match = wbSfFields.value.find((f) => f.name.toLowerCase() === col.toLowerCase())
+    return { sqlCol: col, sfField: match?.name ?? '', excluded: !match }
+  })
+  if (wbEditForm.value.distributionKey?.length) {
+    const validCols = new Set(wbEditForm.value.fieldMap.map((m) => m.sqlCol.toLowerCase()))
+    const filtered = wbEditForm.value.distributionKey.filter((c) => validCols.has(c.toLowerCase()))
+    wbEditForm.value.distributionKey = filtered.length ? filtered : null
+  }
+}
+
+async function wbSave(andExecute: boolean): Promise<void> {
+  wbSaveError.value = ''
+  if (wbEditForm.value.operation === 'delete') {
+    const badMappings = wbEditForm.value.fieldMap.filter((m) => !m.excluded && m.sfField && m.sfField !== 'Id')
+    if (badMappings.length > 0) { wbSaveError.value = `Delete operations only send the Id field. Please uncheck: ${badMappings.map((m) => m.sfField).join(', ')}.`; return }
+  }
+  wbSaving.value = true
+  try {
+    const job = await window.api.saveWritebackJob({
+      ...(wbEditForm.value.id ? { id: wbEditForm.value.id } : {}),
+      name: wbEditForm.value.name || wbEditForm.value.sfObject,
+      sqlQuery: wbEditForm.value.sqlQuery, sfObject: wbEditForm.value.sfObject,
+      operation: wbEditForm.value.operation as WritebackJob['operation'],
+      fieldMap: toRaw(wbEditForm.value.fieldMap).map((m) => ({ ...toRaw(m) })),
+      externalIdField: wbEditForm.value.externalIdField || null,
+      batchSize: wbEditForm.value.batchSize, threads: wbEditForm.value.threads,
+      distributionKey: wbEditForm.value.distributionKey?.length ? [...toRaw(wbEditForm.value.distributionKey)] : null,
+      useBulkApi: wbEditForm.value.useBulkApi,
+      customHeaders: wbEditForm.value.customHeaders.trim() || null
+    } as Parameters<typeof window.api.saveWritebackJob>[0])
+    creating.value = null
+    await wbLoadJobs()
+    selectedJob.value = { id: job.id, type: 'writeback' }
+    wbLoadJobIntoForm(job)
+    if (andExecute) await wbExecuteJobById(job.id)
+  } catch (e) {
+    wbSaveError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    wbSaving.value = false
+  }
+}
+
+async function wbExecuteJob(): Promise<void> {
+  if (!wbSelectedJobId.value) return
+  await wbExecuteJobById(wbSelectedJobId.value)
+}
+
+async function wbExecuteJobById(id: number): Promise<void> {
+  if (wbActiveRuns.value.has(id) || wbJobQueue.value.includes(id)) return
+  if (wbActiveRuns.value.size >= MAX_PARALLEL) {
+    wbJobQueue.value = [...wbJobQueue.value, id]
+    if (wbSelectedJobId.value === id) wbDetailTab.value = 'execution'
+    return
+  }
+  await wbStartJobNow(id)
+}
+
+async function wbStartJobNow(id: number): Promise<void> {
+  const j = wbJobs.value.find((x) => x.id === id)
+  if (!j) return
+  execStateCache.value.delete(id)
+  if (wbSelectedJobId.value === id) {
+    wbDetailTab.value = 'execution'
+    const sql = j.sqlQuery
+    execSql.value = sql; execOperation.value = j.operation; execIsBulkApi.value = j.useBulkApi
+    execBulkPhase.value = ''; execBulkUploaded.value = 0; execBulkProcessed.value = 0; execBulkJobState.value = ''
+    execError.value = null; execWarn.value = null; execTotalRows.value = 0; execSourceRowCount.value = null
+    execSucceeded.value = 0; execFailed.value = 0; execInFlight.value = 0; execPageOffset.value = 0
+    execPageRows.value = []; execPageStatuses.value = new Map(); execPageIds.value = new Map()
+    execFailedTotal.value = 0; execFailedDistinctErrors.value = []; execFailedPanelRows.value = []
+    execFailedRangeMap.value = new Map(); execFailedPageOffset.value = 0; execJobDone.value = false
+    execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
+    execSort.value = []; execFailedSort.value = []
+    window.api.wbRowCount(sql).then((count) => { if (execSql.value === sql) execSourceRowCount.value = count }).catch(() => {})
+    if (j.useBulkApi) { execColumns.value = [] } else {
+      const firstPage = await window.api.wbPage(sql, 0, EXEC_PAGE)
+      execColumns.value = firstPage.columns; execPageRows.value = firstPage.rows
+    }
+  }
+  const runId = await window.api.startWriteback(id)
+  if (wbSelectedJobId.value === id) execRunId.value = runId
+  wbActiveRuns.value.set(id, runId)
+  jobs.startJob(runId, 'writeback', id)
+  wbStartRunMonitor(id, runId)
+}
+
+function wbStartRunMonitor(jobId: number, runId: string): void {
+  const isSelected = () => wbSelectedJobId.value === jobId
+  const offProgress = window.api.onJobProgress((e) => {
+    if (e.runId !== runId) return
+    if (e.phase) {
+      if (isSelected()) {
+        execBulkPhase.value = e.phase
+        if (e.bulkUploaded !== undefined) execBulkUploaded.value = e.bulkUploaded
+        if (e.phase === 'processing') {
+          if (e.total !== undefined) execBulkProcessed.value = e.total
+          if (e.succeeded !== undefined) execSucceeded.value = e.succeeded
+          if (e.failed !== undefined) execFailed.value = e.failed
+          if (e.jobState) execBulkJobState.value = e.jobState
+        }
+      }
+    } else {
+      if (isSelected()) {
+        if (e.succeeded !== undefined) execSucceeded.value = e.succeeded
+        if (e.failed !== undefined) execFailed.value = e.failed
+        if (e.inFlight !== undefined) execInFlight.value = e.inFlight
+        if (e.total !== undefined && e.total > execTotalRows.value) execTotalRows.value = e.total
+        if (e.rowStatuses) {
+          const pageEnd = execPageOffset.value + EXEC_PAGE
+          let statusChanged = false; let idChanged = false
+          for (const rs of e.rowStatuses) {
+            if (rs.index >= execPageOffset.value && rs.index < pageEnd) {
+              execPageStatuses.value.set(rs.index, { status: rs.status, message: rs.message })
+              statusChanged = true
+              if (rs.id) { execPageIds.value.set(rs.index, rs.id); idChanged = true }
+            }
+          }
+          if (statusChanged) execPageStatuses.value = new Map(execPageStatuses.value)
+          if (idChanged) execPageIds.value = new Map(execPageIds.value)
+        }
+      }
+    }
+    if (isSelected()) wbCaptureExecState(jobId, true)
+  })
+  const offComplete = window.api.onJobComplete(async (e) => {
+    if (e.runId !== runId) return
+    offProgress(); offComplete()
+    wbActiveRuns.value.delete(jobId)
+    if (isSelected()) {
+      execInFlight.value = 0; execBulkPhase.value = ''; execJobDone.value = true
+      if (e.status === 'cancelled') { execWarn.value = 'Job was cancelled by the user.' }
+      else if (e.status === 'error') { execError.value = e.errorMsg ?? 'The job failed with an unknown error.' }
+      else {
+        execError.value = null; execWarn.value = null
+        if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined) {
+          execTotalRows.value = e.rowsSucceeded + e.rowsFailed
+          execSucceeded.value = e.rowsSucceeded; execFailed.value = e.rowsFailed
+          if (e.rowsSucceeded + e.rowsFailed === 0) execWarn.value = 'The job completed but 0 rows were processed. Check that your SQL query returns rows and that at least one field mapping is active.'
+        }
+      }
+      if (e.columns && e.columns.length > 0) execColumns.value = e.columns
+      if (e.rowsFailed && e.rowsFailed > 0) {
+        const [meta, panelRows, rangeEntries] = await Promise.all([
+          window.api.wbGetFailedRowsMeta(runId),
+          window.api.wbGetFailedRowsPage(runId, 0, EXEC_PAGE),
+          window.api.wbGetFailedRowsInRange(runId, execPageOffset.value, execPageOffset.value + EXEC_PAGE)
+        ])
+        execFailedTotal.value = meta.totalCount; execFailedDistinctErrors.value = meta.distinctErrors
+        execFailedPanelRows.value = panelRows
+        execFailedRangeMap.value = new Map(Object.entries(rangeEntries).map(([k, v]) => [Number(k), { index: Number(k), ...v }]))
+      }
+      wbCaptureExecState(jobId)
+    } else {
+      const cached = execStateCache.value.get(jobId)
+      if (cached) {
+        cached.jobDone = true
+        cached.error = (e.status === 'error') ? (e.errorMsg ?? 'Unknown error') : null
+        if (e.status === 'cancelled') cached.warn = 'Job was cancelled by the user.'
+        else if (e.status !== 'error') cached.warn = null
+        if (e.rowsSucceeded !== undefined) cached.succeeded = e.rowsSucceeded
+        if (e.rowsFailed !== undefined) cached.failed = e.rowsFailed
+        if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined) cached.totalRows = e.rowsSucceeded + e.rowsFailed
+        if (e.columns && e.columns.length > 0) cached.columns = e.columns
+        if (e.rowsFailed && e.rowsFailed > 0) { window.api.wbGetFailedRowsMeta(runId).then((meta) => { cached.failedTotal = meta.totalCount; cached.distinctErrors = meta.distinctErrors }) }
+        cached.cachedAt = Date.now()
+      }
+    }
+    wbLoadJobs()
+    wbEvictOldExecStates(jobId)
+    if (wbJobQueue.value.length > 0) {
+      const nextId = wbJobQueue.value[0]
+      wbJobQueue.value = wbJobQueue.value.slice(1)
+      wbStartJobNow(nextId)
+    }
+  })
+}
+
+async function wbCancelRun(): Promise<void> {
+  if (!wbSelectedJobId.value) return
+  const id = wbSelectedJobId.value
+  const qIdx = wbJobQueue.value.indexOf(id)
+  if (qIdx !== -1) { wbJobQueue.value = wbJobQueue.value.filter((jid) => jid !== id); wbClearExecState(); return }
+  const runId = wbActiveRuns.value.get(id)
+  if (runId) { await window.api.cancelJob(runId); jobs.removeJob(runId) }
+}
+
+async function wbLoadExecPage(offset: number): Promise<void> {
+  execPageOffset.value = offset; execPageStatuses.value = new Map(); execPageIds.value = new Map()
+  if (wbShowOnlyFailed.value) {
+    execFailedPageOffset.value = offset
+    if (execRunId.value) execFailedPanelRows.value = await window.api.wbGetFailedRowsPage(execRunId.value, offset, EXEC_PAGE, failedErrorFilter.value || undefined, execFailedSort.value.length ? execFailedSort.value : undefined)
+    return
+  }
+  const sortOrderBy = wbExecSortToOrderBy()
+  const { rows } = await window.api.wbPage(execSql.value, offset, EXEC_PAGE, sortOrderBy)
+  execPageRows.value = rows
+  if (execJobDone.value && execRunId.value) {
+    const [rangeEntries, ids] = await Promise.all([
+      window.api.wbGetFailedRowsInRange(execRunId.value, offset, offset + EXEC_PAGE),
+      wbIsInsert.value ? window.api.wbGetPageIds(execRunId.value, offset, EXEC_PAGE) : Promise.resolve({} as Record<number, string>)
+    ])
+    execFailedRangeMap.value = new Map(Object.entries(rangeEntries).map(([k, v]) => [Number(k), { index: Number(k), ...v }]))
+    if (wbIsInsert.value) execPageIds.value = new Map(Object.entries(ids).map(([k, v]) => [Number(k), v]))
+  }
+}
+
+function wbExecSortToOrderBy(): { column: string; dir: 'asc' | 'desc' }[] | undefined {
+  if (!execSort.value.length) return undefined
+  const syntheticCount = wbIsInsert.value ? 2 : 1
+  const result = execSort.value.filter((c) => c.colIdx >= syntheticCount).map((c) => ({ column: execColumns.value[c.colIdx - syntheticCount], dir: c.dir }))
+  return result.length ? result : undefined
+}
+
+async function wbHandleExecSortChange(criteria: SortCriterion[]): Promise<void> { execSort.value = criteria; await wbLoadExecPage(0) }
+async function wbHandleFailedSortChange(criteria: SortCriterion[]): Promise<void> {
+  execFailedSort.value = criteria; execFailedPageOffset.value = 0
+  if (execRunId.value) execFailedPanelRows.value = await window.api.wbGetFailedRowsPage(execRunId.value, 0, EXEC_PAGE, failedErrorFilter.value || undefined, criteria.length ? criteria : undefined)
+}
+
+async function wbRetryFailed(): Promise<void> {
+  if (!wbSelectedJobId.value || !execRunId.value) return
+  execTotalRows.value = execFailed.value; execPageOffset.value = 0
+  execPageRows.value = execFailedPanelRows.value.slice(0, EXEC_PAGE).map((fr) => fr.row)
+  execPageStatuses.value = new Map(); execPageIds.value = new Map()
+  execSucceeded.value = 0; execFailed.value = 0; execFailedTotal.value = 0
+  execFailedDistinctErrors.value = []; execFailedPanelRows.value = []; execFailedRangeMap.value = new Map()
+  execJobDone.value = false; execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
+  const id = wbSelectedJobId.value
+  const newRunId = await window.api.retryFailed(execRunId.value, id)
+  execRunId.value = newRunId; wbActiveRuns.value.set(id, newRunId); jobs.startJob(newRunId, 'writeback', id)
+  wbStartRunMonitor(id, newRunId)
+}
+
+async function wbBuildFailedCsv(): Promise<string> {
+  if (!execRunId.value) return ''
+  const runId = execRunId.value; const filter = failedErrorFilter.value || undefined; const total = wbFilteredFailedTotal.value
+  const columns = ['_ErrorMessage', ...wbExecDisplayColumns.value]
+  const csvEscape = (v: unknown): string => { if (v === null || v === undefined) return ''; const s = String(v); return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s }
+  const lines = [columns.map(csvEscape).join(',')]
+  for (let offset = 0; offset < total; offset += EXEC_PAGE) {
+    const page = await window.api.wbGetFailedRowsPage(runId, offset, EXEC_PAGE, filter)
+    for (const fr of page) lines.push([fr.message, ...fr.row].map(csvEscape).join(','))
+  }
+  return lines.join('\n')
+}
+async function wbCopyFailedCsv(): Promise<void> { await navigator.clipboard.writeText(await wbBuildFailedCsv()) }
+async function wbExportFailed(): Promise<void> { await window.api.exportToCsv(await wbBuildFailedCsv()) }
+
+async function wbCopyAllExecRows(): Promise<void> {
+  const csvEscape = (v: unknown): string => { if (v === null || v === undefined) return ''; const s = String(v); return s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r') ? '"' + s.replace(/"/g, '""') + '"' : s }
+  const cols = wbExecVisibleCols.value
+  const lines: string[] = [cols.map(csvEscape).join(',')]
+  const total = execTotalRows.value
+  for (let offset = 0; offset < total; offset += EXEC_PAGE) {
+    const { rows } = await window.api.wbPage(execSql.value, offset, EXEC_PAGE)
+    let ids: Record<number, string> = {}
+    if (wbIsInsert.value && execRunId.value) ids = await window.api.wbGetPageIds(execRunId.value, offset, EXEC_PAGE)
+    let failures: Record<number, { message: string; row: unknown[] }> = {}
+    if (execJobDone.value && execRunId.value) failures = await window.api.wbGetFailedRowsInRange(execRunId.value, offset, offset + EXEC_PAGE)
+    for (let i = 0; i < rows.length; i++) {
+      const absIdx = offset + i; const failed = failures[absIdx]; const statusCell = failed ? `Fail: ${failed.message}` : 'OK'
+      const idCell = failed ? '' : (ids[absIdx] ?? '')
+      const fullRow: unknown[] = wbIsInsert.value ? [idCell, statusCell, ...(rows[i] as unknown[])] : [statusCell, ...(rows[i] as unknown[])]
+      lines.push(fullRow.map(csvEscape).join(','))
+    }
+  }
+  await navigator.clipboard.writeText(lines.join('\n'))
+}
+
+async function wbDuplicateSelectedJob(): Promise<void> {
+  if (!wbSelectedJobId.value) return
+  await window.api.duplicateWritebackJob(wbSelectedJobId.value)
+  await wbLoadJobs()
+}
+
+async function wbDeleteSelectedJob(): Promise<void> {
+  if (!wbSelectedJobId.value || !confirm('Delete this job?')) return
+  await window.api.deleteWritebackJob(wbSelectedJobId.value)
+  selectedJob.value = null; wbClearExecState(); await wbLoadJobs()
+}
+
+function wbStartSchemaResize(e: MouseEvent): void {
+  let resizing = true
+  const startX = e.clientX; const startW = schemaPanel.value?.offsetWidth ?? 220
+  const onMove = (ev: MouseEvent): void => { if (!resizing || !schemaPanel.value) return; schemaPanel.value.style.width = Math.max(120, startW - (ev.clientX - startX)) + 'px' }
+  const onUp = (): void => { resizing = false; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+  window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', onUp)
+}
+
+function wbApplyPendingSql(): void {
+  const sql = (window.history.state as Record<string, unknown>)?.pendingSql
+  if (typeof sql === 'string' && sql.trim()) {
+    window.history.replaceState({ ...window.history.state, pendingSql: undefined }, '')
+    selectedJob.value = null; creating.value = 'writeback'
+    wbPreviewResult.value = null; wbPreviewError.value = ''; wbSaveError.value = ''
+    wbSfFields.value = []
+    wbEditForm.value = { name: '', sqlQuery: sql, sfObject: '', operation: 'insert', fieldMap: [], externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null, useBulkApi: false, customHeaders: '' }
+  }
+}
+
+// ── Update IDs modal ──────────────────────────────────────────────────────────
+interface WbUpdateIdsKeyField { sfField: string; sqlCol: string; label: string; valueCount: number }
+const wbUpdateIdsOpen = ref(false)
+const wbUpdateIdsTables = ref<string[]>([])
+const wbUpdateIdsTargetTable = ref('')
+const wbUpdateIdsTableCols = ref<string[]>([])
+const wbUpdateIdsTableKeyCol = ref('')
+const wbUpdateIdsKeyFields = ref<WbUpdateIdsKeyField[]>([])
+const wbUpdateIdsSfKeyField = ref('')
+const wbUpdateIdsIdColName = ref('Id')
+const wbUpdateIdsLoading = ref(false)
+const wbUpdateIdsResult = ref<{ updated: number; idColCreated: boolean; indexCreated: boolean } | null>(null)
+const wbUpdateIdsError = ref('')
+const wbUpdateIdsKeyColNeedsIndex = ref(false)
+
+watch(wbUpdateIdsTargetTable, async (tbl) => {
+  wbUpdateIdsTableCols.value = tbl ? await window.api.getTableColumnNames(tbl) : []
+  const sfField = wbUpdateIdsKeyFields.value.find((f) => f.sfField === wbUpdateIdsSfKeyField.value)
+  wbUpdateIdsTableKeyCol.value = (sfField && wbUpdateIdsTableCols.value.includes(sfField.sqlCol)) ? sfField.sqlCol : ''
+})
+watch(wbUpdateIdsSfKeyField, () => {
+  const sfField = wbUpdateIdsKeyFields.value.find((f) => f.sfField === wbUpdateIdsSfKeyField.value)
+  wbUpdateIdsTableKeyCol.value = (sfField && wbUpdateIdsTableCols.value.includes(sfField.sqlCol)) ? sfField.sqlCol : ''
+})
+watch([wbUpdateIdsTargetTable, wbUpdateIdsTableKeyCol], async ([tbl, col]) => {
+  wbUpdateIdsKeyColNeedsIndex.value = tbl && col ? !(await window.api.columnHasIndex(tbl, col)) : false
+})
+
+async function wbOpenUpdateIdsModal(): Promise<void> {
+  if (!execRunId.value) return
+  const info = await window.api.wbGetIdUpdateInfo(execRunId.value)
+  wbUpdateIdsKeyFields.value = info?.keyFields ?? []
+  const firstWithValues = wbUpdateIdsKeyFields.value.find((f) => f.valueCount > 0)
+  wbUpdateIdsSfKeyField.value = firstWithValues?.sfField ?? (wbUpdateIdsKeyFields.value[0]?.sfField ?? '')
+  wbUpdateIdsTables.value = await window.api.getUserTableNames()
+  wbUpdateIdsTargetTable.value = ''; wbUpdateIdsTableCols.value = []; wbUpdateIdsTableKeyCol.value = ''
+  wbUpdateIdsIdColName.value = 'Id'; wbUpdateIdsResult.value = null; wbUpdateIdsError.value = ''
+  wbUpdateIdsLoading.value = false; wbUpdateIdsOpen.value = true
+}
+
+async function wbConfirmUpdateIds(): Promise<void> {
+  if (!execRunId.value || !wbUpdateIdsSfKeyField.value || !wbUpdateIdsTableKeyCol.value || !wbUpdateIdsTargetTable.value) return
+  const idColName = wbUpdateIdsIdColName.value.trim() || 'Id'
+  wbUpdateIdsLoading.value = true; wbUpdateIdsError.value = ''; wbUpdateIdsResult.value = null
+  try { wbUpdateIdsResult.value = await window.api.wbUpdateTableWithIds(execRunId.value, wbUpdateIdsSfKeyField.value, wbUpdateIdsTargetTable.value, wbUpdateIdsTableKeyCol.value, idColName) }
+  catch (err) { wbUpdateIdsError.value = err instanceof Error ? err.message : String(err) }
+  finally { wbUpdateIdsLoading.value = false }
+}
+
+const offWbExternalQueued = window.api.onExternalJobQueued((e) => {
+  if (e.type !== 'writeback') return
+  if (!wbJobQueue.value.includes(e.jobId)) wbJobQueue.value = [...wbJobQueue.value, e.jobId]
+})
+const offWbExternalStarted = window.api.onExternalJobStarted((e) => {
+  if (e.type !== 'writeback') return
+  wbJobQueue.value = wbJobQueue.value.filter((id) => id !== e.jobId)
+  if (!wbActiveRuns.value.has(e.jobId)) {
+    wbActiveRuns.value.set(e.jobId, e.runId)
+    const off = window.api.onJobComplete((result) => {
+      if (result.runId !== e.runId) return
+      off(); wbActiveRuns.value.delete(e.jobId); wbLoadJobs()
+    })
+  }
+})
+
+let offRunEvicted: (() => void) | null = null
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ─── Shared lifecycle & utilities ────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+
+function formatDate(d: string): string { return new Date(d).toLocaleString() }
+function formatDuration(ms: number | null): string {
+  if (ms == null) return '—'
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60); const rs = s % 60
+  if (m < 60) return rs > 0 ? `${m}m ${rs}s` : `${m}m`
+  const h = Math.floor(m / 60); const rm = m % 60
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`
+}
+function runStatusBadge(s: string): string {
+  if (s === 'success') return 'badge-green'
+  if (s === 'error') return 'badge-red'
+  if (s === 'partial') return 'badge-amber'
+  if (s === 'running') return 'badge-blue'
+  if (s === 'cancelled') return 'badge-gray'
+  return 'badge-gray'
+}
+
+onMounted(async () => {
+  if (conn.bothConnected) {
+    await Promise.all([exLoadJobs(), wbLoadJobs(), conn.loadSFObjects()])
+  }
+  offRunEvicted = window.api.onWritebackRunEvicted((evictedRunId) => {
+    for (const [jobId, state] of execStateCache.value.entries()) {
+      if (state.runId === evictedRunId) { execStateCache.value.delete(jobId); break }
+    }
+    if (execRunId.value === evictedRunId) wbClearExecState()
+  })
+  document.addEventListener('click', onDocClick)
+  document.addEventListener('keydown', onDocKeydown)
+})
+
+onActivated(async () => {
+  await nextTick()
+  exApplyPendingSoql()
+  wbApplyPendingSql()
+})
+
+onUnmounted(() => {
+  offRunEvicted?.(); offRunEvicted = null
+  offExternalQueued(); offExternalStarted()
+  offWbExternalQueued(); offWbExternalStarted()
+  document.removeEventListener('click', onDocClick)
+  document.removeEventListener('keydown', onDocKeydown)
+})
+
+// Initial connection (either side completes the pair false → true)
+watch(() => conn.bothConnected, async (v) => {
+  if (v) { await Promise.all([exLoadJobs(), wbLoadJobs(), conn.loadSFObjects()]) }
+})
+
+// Database switch: dbPath changes while both connections stay alive.
+// oldPath being non-null distinguishes a switch from the initial open
+// (which is already handled by the bothConnected watcher above).
+watch(() => conn.dbPath, async (newPath, oldPath) => {
+  if (!newPath) {
+    // Database closed — clear job lists and reset selection
+    exJobs.value = []
+    wbJobs.value = []
+    selectedJob.value = null
+    creating.value = null
+    return
+  }
+  if (oldPath && conn.sfConnected) {
+    // Switching from one DB to another while SF is connected
+    selectedJob.value = null
+    creating.value = null
+    await Promise.all([exLoadJobs(), wbLoadJobs()])
+  }
+})
+
+function onDocClick(): void { exErrorPopover.value = null; newJobMenuOpen.value = false }
+function onDocKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') { exErrorPopover.value = null; newJobMenuOpen.value = false } }
+</script>
+
+<style scoped>
+/* ── Split layout ──────────────────────────────────────────────────────────── */
+.split-left { flex-shrink: 0; flex-grow: 0; min-width: 0; overflow-y: auto; }
+.split-right { flex: 1; overflow: hidden; min-width: 0; }
+.split-divider { width: 5px; flex-shrink: 0; cursor: col-resize; position: relative; z-index: 1; background: transparent; }
+.split-divider::after { content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 3px; height: 48px; border-radius: 99px; background: var(--border); transition: background 0.15s, height 0.15s; }
+.split-divider:hover::after, .split-divider:active::after { background: var(--primary); height: 64px; }
+
+/* ── New Job dropdown ──────────────────────────────────────────────────────── */
+.new-job-wrap { position: relative; flex-shrink: 0; }
+.new-job-btn { display: flex; align-items: center; gap: 2px; }
+.new-job-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 50; min-width: 190px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0,0,0,.18); overflow: hidden;
+}
+.new-job-menu-item {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 9px 14px; border: none; background: none; cursor: pointer;
+  font-size: 13px; font-weight: 500; color: var(--text); text-align: left;
+  transition: background 0.1s;
+}
+.new-job-menu-item:hover { background: var(--surface2); }
+.new-job-menu-hint { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: auto; }
+
+/* ── Type icons ────────────────────────────────────────────────────────────── */
+.type-icon-extract { color: #005fa3; font-size: 13px; flex-shrink: 0; }
+.type-icon-wb { color: #a80e00; font-size: 13px; flex-shrink: 0; }
+
+/* ── Job rows ──────────────────────────────────────────────────────────────── */
+.job-row {
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 3px 12px; cursor: pointer; gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+.job-row-extract { border-left: 3px solid #0176d3; border-bottom-color: color-mix(in srgb, #0176d3 25%, var(--border)); }
+.job-row-wb { border-left: 3px solid #166534; border-bottom-color: color-mix(in srgb, #166534 25%, var(--border)); }
+.job-row:hover { background: var(--surface2); }
+.job-row-extract.selected { background: color-mix(in srgb, #0176d3 10%, transparent); }
+.job-row-wb.selected { background: color-mix(in srgb, #653016 10%, transparent); }
+.job-row-extract.running { background: color-mix(in srgb, #0176d3 5%, transparent); }
+.job-row-wb.running { background: color-mix(in srgb, #166534 5%, transparent); }
+.job-row-extract.running.selected { background: color-mix(in srgb, #0176d3 15%, transparent); }
+.job-row-wb.running.selected { background: color-mix(in srgb, #166534 15%, transparent); }
+.job-row-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 5px; color: var(--text); }
+.job-row-spinner { width: 10px; height: 10px; border-width: 1.5px; flex-shrink: 0; }
+.job-row-running-label { font-size: 10px; font-weight: 600; color: var(--primary); text-transform: uppercase; letter-spacing: 0.04em; }
+.job-row-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.job-row-sub { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.job-row-right { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.job-row-rows { font-size: 11px; color: var(--text-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.job-run-btn { width: 22px; height: 22px; padding: 0; display: flex; align-items: center; justify-content: center; background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 11px; flex-shrink: 0; }
+.job-run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.job-run-btn-extract { border-color: color-mix(in srgb, #005fa3 40%, var(--border)); color: #005fa3; }
+.job-run-btn-extract:hover:not(:disabled) { background: color-mix(in srgb, #005fa3 12%, transparent); }
+.job-run-btn-wb { border-color: color-mix(in srgb, #a80e00 40%, var(--border)); color: #a80e00; }
+.job-run-btn-wb:hover:not(:disabled) { background: color-mix(in srgb, #a80e00 12%, transparent); }
+
+/* ── Right panel panels ────────────────────────────────────────────────────── */
+.job-editor, .job-detail { height: 100%; display: flex; flex-direction: column; position: relative; }
+.editor-body { padding: 16px; overflow-y: auto; flex: 1; }
+
+/* ── Tab bar ───────────────────────────────────────────────────────────────── */
+.tab-bar { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+.tab-btn { padding: 7px 16px; font-size: 13px; font-weight: 500; border: none; border-bottom: 2px solid transparent; background: none; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; gap: 4px; margin-bottom: -1px; transition: color 0.15s, border-color 0.15s; }
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* ── Tab panels ────────────────────────────────────────────────────────────── */
+.tab-panel { flex: 1; overflow-y: auto; min-height: 0; }
+.definition-panel { padding: 12px; }
+.history-panel { }
+.execution-panel { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── Form elements ─────────────────────────────────────────────────────────── */
+.form-actions { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.where-textarea { resize: vertical; min-height: 44px; line-height: 1.4; font-family: monospace; width: 100%; box-sizing: border-box; }
+.soql-textarea { resize: vertical; min-height: 120px; line-height: 1.5; font-family: monospace; font-size: 12px; width: 100%; box-sizing: border-box; }
+.sql-query-textarea { font-family: monospace; font-size: 12px; field-sizing: content; min-height: 96px; resize: vertical; width: 100%; }
+.field-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.qs-msg { font-size: 11px; padding: 2px 0; }
+.qs-msg-ok { color: var(--success, #16a34a); }
+.qs-msg-error { color: var(--danger); }
+
+/* ── Mode toggle ───────────────────────────────────────────────────────────── */
+.mode-toggle { display: flex; gap: 6px; }
+.mode-option { display: flex; align-items: center; gap: 5px; padding: 4px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; user-select: none; transition: background 0.12s, border-color 0.12s; }
+.mode-option input[type="radio"] { display: none; }
+.mode-option.active { background: color-mix(in srgb, #0176d3 12%, transparent); border-color: #0176d3; color: #0176d3; font-weight: 600; }
+.mode-option:not(.active):hover { background: var(--surface2); }
+
+/* ── Field & index accordions ──────────────────────────────────────────────── */
+.field-accordion, .index-accordion { border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 2px; }
+.field-accordion-header, .index-accordion-header { display: flex; align-items: center; gap: 6px; width: 100%; background: var(--surface2); border: none; border-radius: var(--radius-sm); padding: 6px 10px; cursor: pointer; text-align: left; font-size: 13px; font-weight: 500; color: var(--text-muted); transition: background 0.1s; }
+.field-accordion-header:hover, .index-accordion-header:hover { background: var(--border); }
+.field-accordion-title, .index-accordion-title { display: flex; align-items: center; gap: 6px; font-weight: 500; color: var(--text-muted); white-space: nowrap; }
+.field-accordion-summary { flex: 1; font-size: 12px; color: var(--primary); font-weight: 500; padding-left: 8px; }
+.field-accordion-body { padding: 6px 4px 8px; }
+.index-accordion-body { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px; }
+.index-accordion-hint { flex: 1; font-size: 11px; color: var(--text-muted); font-weight: 400; padding-left: 4px; }
+.index-accordion-chevron { font-size: 14px; color: var(--text-muted); transition: transform 0.2s; }
+.index-accordion-chevron.open { transform: rotate(180deg); }
+.index-count-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; background: var(--primary); color: var(--primary-text); border-radius: 999px; font-size: 11px; font-weight: 700; line-height: 1; }
+.index-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.index-tag { display: inline-flex; align-items: center; gap: 4px; background: var(--primary); color: var(--primary-text); padding: 2px 6px 2px 8px; border-radius: 999px; font-size: 12px; font-family: monospace; }
+.index-tag-remove { background: none; border: none; color: inherit; cursor: pointer; padding: 0; line-height: 1; font-size: 11px; opacity: 0.75; }
+.index-tag-remove:hover { opacity: 1; }
+.index-input-wrap { position: relative; }
+.index-input { width: 100%; box-sizing: border-box; font-size: 12px; }
+.index-suggestions { position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 50; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin: 0; padding: 4px 0; list-style: none; max-height: 200px; overflow-y: auto; box-shadow: var(--shadow, 0 4px 12px rgba(0,0,0,.12)); color: var(--text); }
+.index-suggestions.index-suggestions-static { position: static; box-shadow: none; margin-top: 4px; border-radius: var(--radius-sm); }
+.index-suggestions li { padding: 5px 12px; font-size: 12px; font-family: monospace; cursor: pointer; color: var(--text); }
+.index-suggestions li:hover { background: var(--surface2); }
+.index-suggestions-empty { color: var(--text-muted) !important; cursor: default !important; font-style: italic; }
+.index-suggestions-empty:hover { background: transparent !important; }
+
+/* ── History ───────────────────────────────────────────────────────────────── */
+.history-table { font-size: 12px; width: 100%; }
+.history-table th, .history-table td { padding: 4px 12px; }
+.history-section { flex: 1; overflow-y: auto; }
+.error-cell { color: var(--danger); cursor: pointer; font-size: 13px; line-height: 1; opacity: 0.8; }
+.error-cell:hover { opacity: 1; }
+.error-popover { position: absolute; z-index: 100; width: 320px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 4px 16px rgba(0,0,0,0.18); font-size: 12px; }
+.error-popover-header { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 11px; color: var(--danger); }
+.error-popover-body { padding: 8px 10px; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; }
+.btn-icon { background: none; border: none; cursor: pointer; font-size: 12px; color: var(--text-muted); padding: 0 2px; line-height: 1; }
+.btn-icon:hover { color: var(--text); }
+
+/* ── WB Execution ──────────────────────────────────────────────────────────── */
+.execution-section { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.exec-stats { padding: 8px 12px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); font-size: 13px; flex-shrink: 0; flex-wrap: wrap; }
+.exec-status-filter { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.exec-filter-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; border: 1px solid var(--border); background: transparent; color: var(--text-muted); font-size: 12px; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s; }
+.exec-filter-pill:hover { background: var(--surface-hover, var(--border)); color: var(--text); }
+.exec-filter-pill.active { background: var(--surface-hover, var(--border)); color: var(--text); border-color: var(--text-muted); }
+.exec-filter-pill--ok-lit { background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
+.exec-filter-pill--error-lit { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+.exec-filter-pill--ok.active, .exec-filter-pill--ok-lit.active { background: color-mix(in srgb, var(--success) 25%, transparent); color: var(--success); border-color: var(--success); }
+.exec-filter-pill--error.active, .exec-filter-pill--error-lit.active { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); border-color: var(--danger); }
+.exec-filter-pill--pending.active { background: color-mix(in srgb, var(--text-muted) 15%, transparent); color: var(--text); border-color: var(--text-muted); }
+.exec-filter-count { font-variant-numeric: tabular-nums; }
+.exec-banner { padding: 10px 14px; display: flex; align-items: flex-start; gap: 12px; font-size: 13px; flex-shrink: 0; border-bottom: 1px solid var(--border); }
+.exec-banner-error { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); color: var(--danger); }
+.exec-banner-warn { background: color-mix(in srgb, var(--warning, #f59e0b) 12%, var(--surface)); color: var(--text); }
+.failed-rows-header { display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; }
+.error-filter-bar { display: flex; align-items: center; gap: 6px; }
+.error-filter-label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+.error-filter-select { font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); max-width: 480px; }
+.row-count-result { font-size: 13px; font-weight: 600; color: var(--text); }
+.row-count-error { font-size: 12px; color: var(--danger, #dc2626); }
+.bulk-phase-card { padding: 24px; display: flex; flex-direction: column; align-items: flex-start; }
+.bulk-phase-row { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text); }
+
+/* ── WB Custom headers ─────────────────────────────────────────────────────── */
+.suggest-wrap { position: relative; }
+.suggest-list { position: absolute; top: 100%; left: 0; right: 0; z-index: 50; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: 0 4px 12px rgba(0,0,0,0.15); overflow: hidden; margin-top: 2px; }
+.suggest-item { display: flex; flex-direction: column; padding: 7px 10px; cursor: pointer; gap: 2px; border-bottom: 1px solid var(--border); }
+.suggest-item:last-child { border-bottom: none; }
+.suggest-item:hover, .suggest-item.active { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+.suggest-name { font-size: 13px; font-weight: 500; color: var(--text); }
+.suggest-preview { font-size: 11px; color: var(--text-muted); font-family: monospace; }
+
+/* ── WB Operation selector ─────────────────────────────────────────────────── */
+.op-selector { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 4px; }
+.radio-label { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px; }
+.checkbox-label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; }
+.checkboxes-group { display: flex; flex-direction: column; gap: 8px; }
+
+/* ── Distribution key ──────────────────────────────────────────────────────── */
+.distrib-key-input { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-height: 34px; padding: 3px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); cursor: text; position: relative; }
+.distrib-key-tag { display: inline-flex; align-items: center; gap: 3px; padding: 2px 4px 2px 8px; background: color-mix(in srgb, var(--primary) 14%, transparent); border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border)); border-radius: 10px; font-size: 12px; color: var(--primary); font-weight: 500; }
+.distrib-key-tag-remove { background: none; border: none; cursor: pointer; color: var(--primary); padding: 0 2px; font-size: 15px; line-height: 1; opacity: 0.6; }
+.distrib-key-tag-remove:hover { opacity: 1; }
+.distrib-key-search { border: none; outline: none; background: transparent; font-size: 13px; color: var(--text); min-width: 90px; flex: 1; padding: 2px 0; }
+.distrib-key-search::placeholder { color: var(--text-muted); }
+.distrib-key-dropdown { position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 50; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-height: 180px; overflow-y: auto; }
+.distrib-key-option { padding: 6px 10px; font-size: 13px; cursor: pointer; color: var(--text); }
+.distrib-key-option:hover { background: color-mix(in srgb, var(--primary) 10%, transparent); }
+.distrib-key-list--disabled { opacity: 0.4; pointer-events: none; }
+.distrib-key-hint { margin: 6px 0 0; font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+.distrib-key-hint code { font-family: monospace; font-size: 11px; background: color-mix(in srgb, var(--primary) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border)); border-radius: 3px; padding: 0 4px; }
+
+/* ── Schema panel ──────────────────────────────────────────────────────────── */
+.wb-schema-panel { width: 220px; flex-shrink: 0; border-left: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; position: relative; overflow: hidden; }
+.schema-resize-handle { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; cursor: col-resize; z-index: 10; background: transparent; }
+.schema-resize-handle::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 3px; height: 48px; border-radius: 99px; background: var(--border); transition: background 0.15s, height 0.15s; }
+.schema-resize-handle:hover::after, .schema-resize-handle:active::after { background: var(--primary); height: 64px; }
+.schema-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.schema-tab { flex: 1; padding: 6px 4px; font-size: 12px; font-weight: 500; background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; color: var(--text-muted); transition: color 0.15s; }
+.schema-tab:hover { color: var(--text); }
+.schema-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* ── Update IDs modal ──────────────────────────────────────────────────────── */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 200; display: flex; align-items: center; justify-content: center; }
+.modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 32px rgba(0,0,0,0.25); display: flex; flex-direction: column; max-height: 90vh; overflow: hidden; }
+.update-ids-modal { width: 520px; }
+.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.modal-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.modal-body { padding: 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 14px; }
+.modal-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); flex-shrink: 0; }
+.form-row { display: flex; flex-direction: column; gap: 5px; }
+.form-label { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.form-hint { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--text-muted); }
+.form-select, .form-input { padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font-size: 13px; width: 100%; }
+.update-ids-preview { background: color-mix(in srgb, var(--primary) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--border)); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; line-height: 1.6; }
+.update-ids-error { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); color: var(--danger); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; }
+.update-ids-success { display: flex; align-items: flex-start; gap: 12px; background: color-mix(in srgb, var(--success) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--success) 25%, var(--border)); border-radius: var(--radius-sm); padding: 16px; color: var(--success); }
+.update-ids-info { background: color-mix(in srgb, var(--primary) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--border)); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; }
+.update-ids-index-note { margin-top: 5px; font-size: 12px; color: color-mix(in srgb, var(--warning, #f59e0b) 90%, var(--text)); background: color-mix(in srgb, var(--warning, #f59e0b) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 25%, var(--border)); border-radius: var(--radius-sm); padding: 6px 10px; }
+</style>

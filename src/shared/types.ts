@@ -209,7 +209,7 @@ export interface JobProgress {
   failed?: number
   rps?: number
   inFlight?: number
-  rowStatuses?: Array<{ index: number; status: 'success' | 'error'; message?: string; id?: string }>
+  rowStatuses?: Array<{ index: number; status: 'success' | 'error' | 'processing'; message?: string; id?: string }>
   // Bulk API 2.0 phases
   phase?: 'uploading' | 'processing' | 'downloading'
   bulkUploaded?: number
