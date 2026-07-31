@@ -5,6 +5,7 @@ import { readFileSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { autoUpdater } from 'electron-updater'
 import { registerIpcHandlers } from './ipc-handlers'
+import { dbWorker } from './DbWorkerClient'
 import {
   applyExtraCaCert,
   setShellCaCertPath,
@@ -311,6 +312,8 @@ app.whenReady().then(() => {
       clearTimeout(draftQuitFallback)
       draftQuitFallback = null
     }
+    dbWorker.closeDb()
+    void dbWorker.terminate()
     db.closeDatabase()
     app.quit()
   }
@@ -321,7 +324,7 @@ app.whenReady().then(() => {
     if (quitAfterDraftSave) return  // second pass — doQuit already called
 
     const wins = BrowserWindow.getAllWindows()
-    if (!wins.length) { db.closeDatabase(); return }  // no window, close directly
+    if (!wins.length) { dbWorker.closeDb(); void dbWorker.terminate(); db.closeDatabase(); return }
 
     e.preventDefault()
     quitAfterDraftSave = true

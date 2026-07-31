@@ -107,6 +107,10 @@ export interface FieldDescriptor {
   externalId: boolean
   unique: boolean
   idLookup: boolean
+  /** Populated for reference (lookup/master-detail) fields: the target object API names. */
+  referenceTo?: string[]
+  /** Relationship name used for the nested Ext-ID syntax (the `__r` form). */
+  relationshipName?: string | null
 }
 
 export interface ExtractJob {
@@ -142,6 +146,12 @@ export interface FieldMapping {
   sqlCol: string
   sfField: string
   excluded: boolean
+  /** When true, use the nested relationship-by-external-ID syntax instead of a direct SF record ID. */
+  useExternalId?: boolean
+  /** The `__r` relationship name (e.g. "Account"). Required when useExternalId is true. */
+  relationshipName?: string
+  /** The external-ID field on the related object (e.g. "AccountNumber"). Required when useExternalId is true. */
+  externalIdFieldName?: string
 }
 
 export interface WritebackJob {
@@ -210,6 +220,8 @@ export interface JobProgress {
   rps?: number
   inFlight?: number
   rowStatuses?: Array<{ index: number; status: 'success' | 'error' | 'processing'; message?: string; id?: string }>
+  /** Updated distinct error prefix list, emitted only when the set of prefixes changes. */
+  distinctErrors?: Array<{ message: string; count: number }>
   // Bulk API 2.0 phases
   phase?: 'uploading' | 'processing' | 'downloading'
   bulkUploaded?: number

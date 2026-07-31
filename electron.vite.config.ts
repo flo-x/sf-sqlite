@@ -10,7 +10,8 @@ export default defineConfig({
         input: {
           index: resolve('src/main/index.ts'),
           'script-runner-worker': resolve('src/main/script-runner-worker.ts'),
-          'script-runner-llm-worker': resolve('src/main/script-runner-llm-worker.ts')
+          'script-runner-llm-worker': resolve('src/main/script-runner-llm-worker.ts'),
+          'db-worker': resolve('src/main/db-worker.ts')
         },
         output: {
           entryFileNames: '[name].js'

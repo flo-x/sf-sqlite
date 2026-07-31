@@ -785,11 +785,16 @@ function onTableWrapScroll(): void {
 }
 
 let _resizeObserver: ResizeObserver | null = null
+/** Set to true while a column (or row-number) resize drag is active.
+ *  Prevents the ResizeObserver from triggering Vue re-renders mid-drag,
+ *  which would reset the directly-patched <col> widths back to stale values. */
+let _colResizeDragging = false
 
 onMounted(() => {
   if (!tableWrap.value) return
   tableWrap.value.addEventListener('scroll', onTableWrapScroll, { passive: true })
   _resizeObserver = new ResizeObserver((entries) => {
+    if (_colResizeDragging) return
     vWrapHeight.value = entries[0]?.contentRect.height ?? 500
   })
   _resizeObserver.observe(tableWrap.value)
@@ -838,6 +843,7 @@ function startResize(e: MouseEvent, origIdx: number): void {
   dragStyle.textContent = '*, *::before, *::after { cursor: col-resize !important; user-select: none !important; }'
   document.head.appendChild(dragStyle)
 
+  _colResizeDragging = true
   let currentW = startW
 
   const onMove = (ev: MouseEvent): void => {
@@ -857,6 +863,9 @@ function startResize(e: MouseEvent, origIdx: number): void {
 
   const onUp = (): void => {
     document.head.removeChild(dragStyle)
+    // Sync any height changes that occurred while the observer was suppressed.
+    if (tableWrap.value) { vWrapHeight.value = tableWrap.value.clientHeight }
+    _colResizeDragging = false
     // Single reactive commit — triggers exactly one Vue re-render to sync state.
     colWidths.value[origIdx] = currentW
     window.removeEventListener('mousemove', onMove)
@@ -877,6 +886,7 @@ function startRnResize(e: MouseEvent): void {
   dragStyle.textContent = '*, *::before, *::after { cursor: col-resize !important; user-select: none !important; }'
   document.head.appendChild(dragStyle)
 
+  _colResizeDragging = true
   let currentW = startW
 
   const onMove = (ev: MouseEvent): void => {
@@ -899,6 +909,9 @@ function startRnResize(e: MouseEvent): void {
 
   const onUp = (): void => {
     document.head.removeChild(dragStyle)
+    // Sync any height changes that occurred while the observer was suppressed.
+    if (tableWrap.value) { vWrapHeight.value = tableWrap.value.clientHeight }
+    _colResizeDragging = false
     // Single reactive commit — triggers exactly one Vue re-render to sync state.
     rnWidth.value = currentW
     window.removeEventListener('mousemove', onMove)

@@ -231,49 +231,36 @@ const api = {
   startWriteback: (jobId: number): Promise<string> =>
     ipcRenderer.invoke('writeback:start', jobId),
 
-  // Row-level access — lets the renderer fetch pages on demand instead of loading all rows.
-  wbRowCount: (sql: string): Promise<number> =>
-    ipcRenderer.invoke('writeback:row-count', sql),
+  // ── Exec-table access (REST writeback) ───────────────────────────────────────
+  /** Polling endpoint: returns total/queued/succeeded/failed counts from the exec table. */
+  wbExecCounts: (runId: string): Promise<{ total: number; queued: number; succeeded: number; failed: number; inFlight: number; loadingPhase: boolean }> =>
+    ipcRenderer.invoke('writeback:exec-counts', runId),
 
-  wbPage: (sql: string, offset: number, limit: number, orderBy?: { column: string; dir: 'asc' | 'desc' }[]): Promise<{ columns: string[]; rows: unknown[][] }> =>
-    ipcRenderer.invoke('writeback:page', sql, offset, limit, orderBy),
+  /** Returns the in-memory distinct error prefix list for live filtering. */
+  wbExecDistinctErrors: (runId: string): Promise<{ message: string; count: number }[]> =>
+    ipcRenderer.invoke('writeback:exec-distinct-errors', runId),
 
-  wbGetFailedRows: (runId: string): Promise<{ index: number; message: string; row: unknown[] }[]> =>
-    ipcRenderer.invoke('writeback:failed-rows', runId),
+  /**
+   * Returns one page of exec-table rows for the DataGrid.
+   * Column order: [...userColumns, '__sf_id', '__status', '__error']
+   */
+  wbExecPage: (
+    runId: string,
+    offset: number,
+    limit: number,
+    filter?: { statuses?: ('success' | 'error' | 'queued')[]; errorPrefix?: string }
+  ): Promise<{ columns: string[]; rows: unknown[][] }> =>
+    ipcRenderer.invoke('writeback:exec-page', runId, offset, limit, filter),
 
-  // ── Paginated failed-row access ────────────────────────────────────────────
-  wbGetFailedRowsMeta: (runId: string): Promise<{ totalCount: number; distinctErrors: { message: string; count: number }[] }> =>
-    ipcRenderer.invoke('writeback:failed-rows-meta', runId),
-
-  wbGetFailedRowsPage: (runId: string, offset: number, limit: number, errorFilter?: string, sortCriteria?: { colIdx: number; dir: 'asc' | 'desc' }[]): Promise<{ index: number; message: string; row: unknown[] }[]> =>
-    ipcRenderer.invoke('writeback:failed-rows-page', runId, offset, limit, errorFilter, sortCriteria),
-
-  wbGetFailedRowsInRange: (runId: string, fromIndex: number, toIndex: number): Promise<Record<number, { message: string; row: unknown[] }>> =>
-    ipcRenderer.invoke('writeback:failed-rows-in-range', runId, fromIndex, toIndex),
-
-  // Returns { [absoluteRowIndex]: sfId } for one page — populated for insert operations only.
-  wbGetPageIds: (runId: string, offset: number, limit: number): Promise<Record<number, string>> =>
-    ipcRenderer.invoke('writeback:page-ids', runId, offset, limit),
+  /** Returns the total row count matching a filter (used for pagination totals). */
+  wbExecCount: (
+    runId: string,
+    filter?: { statuses?: ('success' | 'error' | 'queued')[]; errorPrefix?: string }
+  ): Promise<number> =>
+    ipcRenderer.invoke('writeback:exec-count', runId, filter),
 
   retryFailed: (runId: string, jobId: number): Promise<string> =>
     ipcRenderer.invoke('writeback:retry', runId, jobId),
-
-  // Returns unique/externalId key fields available for writing back IDs.
-  wbGetIdUpdateInfo: (runId: string): Promise<{
-    rowIdCount: number
-    keyFields: Array<{ sfField: string; sqlCol: string; label: string; valueCount: number }>
-  } | null> =>
-    ipcRenderer.invoke('writeback:get-id-update-info', runId),
-
-  // Writes SF IDs to a target table using the stored unique-field value map — no re-query.
-  wbUpdateTableWithIds: (
-    runId: string,
-    sfKeyField: string,
-    targetTable: string,
-    tableKeyCol: string,
-    idColumnName: string
-  ): Promise<{ updated: number; idColCreated: boolean; indexCreated: boolean }> =>
-    ipcRenderer.invoke('writeback:update-table-ids', runId, sfKeyField, targetTable, tableKeyCol, idColumnName),
 
   getUserTableNames: (): Promise<string[]> =>
     ipcRenderer.invoke('db:user-tables'),

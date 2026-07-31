@@ -25,6 +25,10 @@ export interface DebugFlags {
   /** Logs the SQL query for SQLite→SF jobs and the SOQL query for SF→SQLite jobs
    *  at the moment the job starts. */
   jobQueries: boolean
+  /** Logs every SQL statement executed during a writeback job run, including
+   *  the CREATE TABLE AS SELECT sent to the DB worker, plus a summary line for
+   *  each batch read and batch update applied to the exec table. */
+  wbSql: boolean
 }
 
 const MAX_ENTRIES = 500
@@ -37,6 +41,7 @@ let flags: DebugFlags = {
   llmDdl: false,
   llmJavascript: false,
   jobQueries: false,
+  wbSql: false,
 }
 let rendererWindow: BrowserWindow | null = null
 

@@ -36,6 +36,7 @@ export function openDatabase(filePath: string): { path: string } {
   db.pragma('foreign_keys = ON')
   currentPath = filePath
   initMetaTables()
+  cleanupAbandonedExecTables()
   return { path: filePath }
 }
 
@@ -272,7 +273,7 @@ export function getDatabaseInfo(): TableInfo[] {
     .prepare(
       `SELECT name, type FROM sqlite_master
        WHERE type IN ('table','view') AND name NOT LIKE '_sf_bridge_%'
-       ORDER BY type, name`
+       ORDER BY type, name COLLATE NOCASE`
     )
     .all() as { name: string; type: string }[]
 
@@ -1440,4 +1441,208 @@ export function saveAiLlmHttpLog(row: AiLlmHttpLogRow): void {
  */
 export function executeRaw(sql: string): void {
   getDb().prepare(sql).run()
+}
+
+// ─── Writeback Exec Table ─────────────────────────────────────────────────────
+//
+// Each REST API writeback run gets a temporary SQLite table that holds all source
+// rows plus three metadata columns:
+//   __sf_id          — Salesforce record ID returned after a successful write
+//   __status         — 'queued' | 'success' | 'error'
+//   __error          — full error message (for 'error' rows)
+//   __error_prefix   — server-side error prefix (for efficient filtering)
+//
+// The table lives in the TEMP schema (per-connection, auto-dropped on DB close).
+// It is also explicitly dropped when the run state is evicted by addWbRunState.
+
+function wbExecTn(runId: string): string {
+  return `"_wb_exec_${runId.replace(/-/g, '_')}"`
+}
+
+/**
+ * Drop any _wb_exec_* tables left over from a previous session (e.g. after a
+ * crash before cleanup could run).  Called automatically when a database is
+ * opened.
+ */
+function cleanupAbandonedExecTables(): void {
+  const d = getDb()
+  const tables = d
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '_wb_exec_%'")
+    .all() as { name: string }[]
+  for (const { name } of tables) {
+    try { d.exec(`DROP TABLE IF EXISTS ${escapeId(name)}`) } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Build the SQL that the DB worker executes to create the exec table for an
+ * initial writeback run.  The single CREATE TABLE AS SELECT statement runs
+ * entirely in the worker thread so the main event loop stays responsive.
+ *
+ * Column order in the resulting table:
+ *   __sf_id TEXT, __status TEXT, __error TEXT, __error_prefix TEXT,
+ *   <all columns from userSql>
+ */
+export function wbExecBuildCreateSql(runId: string, userSql: string): string {
+  const tn = wbExecTn(runId)
+  return (
+    `CREATE TABLE ${tn} AS ` +
+    `SELECT '000000000000000000' AS __sf_id, 'queued' AS __status, ` +
+    `NULL AS __error, NULL AS __error_prefix, * FROM (${userSql})`
+  )
+}
+
+/**
+ * Build the SQL that the DB worker executes to create the exec table for a
+ * retry run.  Copies only the user-data columns from error rows of the
+ * previous run, resetting the metadata columns to their initial values.
+ */
+export function wbExecBuildRetrySql(newRunId: string, prevRunId: string, columns: string[]): string {
+  const tnNew = wbExecTn(newRunId)
+  const tnPrev = wbExecTn(prevRunId)
+  const colList = columns.map(escapeId).join(', ')
+  return (
+    `CREATE TABLE ${tnNew} AS ` +
+    `SELECT '000000000000000000' AS __sf_id, 'queued' AS __status, ` +
+    `NULL AS __error, NULL AS __error_prefix, ${colList} ` +
+    `FROM ${tnPrev} WHERE __status = 'error'`
+  )
+}
+
+/** Total number of rows in the exec table. */
+export function wbExecGetRowCount(runId: string): number {
+  const tn = wbExecTn(runId)
+  return Number(getDb().prepare(`SELECT COUNT(*) FROM ${tn}`).pluck().get() ?? 0)
+}
+
+/** Aggregated status counts. */
+export function wbExecGetStatusCounts(runId: string): { queued: number; succeeded: number; failed: number } {
+  const tn = wbExecTn(runId)
+  const rows = getDb()
+    .prepare(`SELECT __status, COUNT(*) AS cnt FROM ${tn} GROUP BY __status`)
+    .all() as { __status: string; cnt: number }[]
+  const map = new Map(rows.map((r) => [r.__status, Number(r.cnt)]))
+  return {
+    queued: map.get('queued') ?? 0,
+    succeeded: map.get('success') ?? 0,
+    failed: map.get('error') ?? 0
+  }
+}
+
+/**
+ * Read a batch of raw source-column values for sending to Salesforce.
+ * Returns rows ordered by rowid with their rowid included for later UPDATE.
+ */
+export function wbExecReadBatch(
+  runId: string,
+  columns: string[],
+  offset: number,
+  limit: number
+): { rowid: number; row: unknown[] }[] {
+  const tn = wbExecTn(runId)
+  const colList = columns.map(escapeId).join(', ')
+  const stmt = getDb()
+    .prepare(`SELECT rowid, ${colList} FROM ${tn} ORDER BY rowid LIMIT ? OFFSET ?`)
+    .raw(true)
+  return (stmt.all(limit, offset) as unknown[][]).map((r) => ({
+    rowid: Number(r[0]),
+    row: r.slice(1)
+  }))
+}
+
+export interface WbExecBatchUpdate {
+  rowid: number
+  sfId: string | null
+  status: 'success' | 'error'
+  error: string | null
+  errorPrefix: string | null
+}
+
+/** Write results for one batch back to the exec table in a single transaction. */
+export function wbExecUpdateBatch(runId: string, updates: WbExecBatchUpdate[]): void {
+  if (!updates.length) return
+  const tn = wbExecTn(runId)
+  const stmt = getDb().prepare(
+    `UPDATE ${tn} SET __sf_id = ?, __status = ?, __error = ?, __error_prefix = ? WHERE rowid = ?`
+  )
+  const run = getDb().transaction(() => {
+    for (const u of updates) {
+      stmt.run(u.sfId, u.status, u.error, u.errorPrefix, u.rowid)
+    }
+  })
+  run()
+}
+
+export interface WbExecPageFilter {
+  /** Subset of statuses to include. Omit (or pass all three) to include everything. */
+  statuses?: ('success' | 'error' | 'queued')[]
+  /** When set, further restrict errors to rows whose __error_prefix matches. */
+  errorPrefix?: string
+}
+
+/**
+ * Fetch one page of rows for the DataGrid.
+ * Returned column list: ['__rowid', ...userColumns, '__sf_id', '__status', '__error']
+ * Row layout: row[0] = rowid (1-based source row number), row[row.length-3] = __sf_id,
+ *             row[row.length-2] = __status, row[row.length-1] = __error.
+ * Data values are row.slice(1, row.length - 3).
+ */
+export function wbExecGetPage(
+  runId: string,
+  columns: string[],
+  offset: number,
+  limit: number,
+  filter?: WbExecPageFilter
+): { columns: string[]; rows: unknown[][] } {
+  const tn = wbExecTn(runId)
+  const colList = ['rowid', ...columns.map(escapeId), '__sf_id', '__status', '__error'].join(', ')
+  const { where, params } = buildWbExecWhere(filter)
+  const sql = `SELECT ${colList} FROM ${tn}${where} ORDER BY rowid LIMIT ? OFFSET ?`
+  const rows = getDb()
+    .prepare(sql)
+    .raw(true)
+    .all(...params, limit, offset) as unknown[][]
+  return { columns: ['__rowid', ...columns, '__sf_id', '__status', '__error'], rows }
+}
+
+/** Count rows matching a filter (used for pagination totals). */
+export function wbExecGetPageCount(runId: string, filter?: WbExecPageFilter): number {
+  const tn = wbExecTn(runId)
+  const { where, params } = buildWbExecWhere(filter)
+  const sql = `SELECT COUNT(*) FROM ${tn}${where}`
+  return Number(getDb().prepare(sql).pluck().get(...params) ?? 0)
+}
+
+function buildWbExecWhere(filter?: WbExecPageFilter): { where: string; params: unknown[] } {
+  const conditions: string[] = []
+  const params: unknown[] = []
+  if (filter?.statuses !== undefined) {
+    if (filter.statuses.length === 0) {
+      conditions.push('1 = 0')
+    } else {
+      const placeholders = filter.statuses.map(() => '?').join(', ')
+      conditions.push(`__status IN (${placeholders})`)
+      params.push(...filter.statuses)
+      if (filter.errorPrefix && filter.statuses.includes('error')) {
+        conditions.push(`__error_prefix = ?`)
+        params.push(filter.errorPrefix)
+      }
+    }
+  } else if (filter?.errorPrefix) {
+    conditions.push(`__status = 'error' AND __error_prefix = ?`)
+    params.push(filter.errorPrefix)
+  }
+  return {
+    where: conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '',
+    params
+  }
+}
+
+/** Drop the exec table (called during run-state eviction). Silently ignored if not found. */
+export function wbExecDropTable(runId: string): void {
+  try {
+    getDb().exec(`DROP TABLE IF EXISTS ${wbExecTn(runId)}`)
+  } catch {
+    // Ignore errors (DB might be closed)
+  }
 }

@@ -8,6 +8,7 @@ import * as recent from './recentDbs'
 import * as scriptRunner from './script-runner'
 import { scheduler } from './job-scheduler'
 import { debugLog } from './debug-logger'
+import { dbWorker } from './DbWorkerClient'
 import {
   sendMessage,
   listModels,
@@ -86,22 +87,44 @@ const pendingConfirms = new Map<string, (approved: boolean) => void>()
 const pendingToolCancels = new Map<string, () => void>()
 
 // ── Per-run writeback state ──────────────────────────────────────────────────
-// Stores failed-row data so the renderer can browse results and retry without
-// ever holding millions of rows in the renderer process.
-interface WbFailedEntry { message: string; row: unknown[] }
+// Each REST API run creates a TEMP SQLite table (_wb_exec_<runId>) that holds
+// all source rows plus __sf_id, __status, __error, __error_prefix columns.
+// The in-memory state here only keeps lightweight counters and the error-prefix
+// map (avoids O(N) scans of the exec table for live progress reporting).
 interface WbRunState {
   sql: string
-  columns: string[]
-  totalRows: number
-  failedRows: Map<number, WbFailedEntry>  // key = absolute row index
-  rowIds: Map<number, string>             // key = absolute row index, value = SF record Id (inserts only)
-  // For REST insert jobs: one value→sfId map per unique/externalId SF field that was inserted.
-  // Populated during the job so no re-query is needed when writing IDs back.
-  uniqueKeyMaps: Map<string, Map<unknown, string>>  // sfFieldName → (fieldValue → sfId)
-  uniqueKeyFields: Array<{ sfField: string; sqlCol: string; label: string }>  // ordered list of tracked fields
+  columns: string[]        // source SQL column names
+  totalRows: number        // total rows in the exec table (set after Phase 0 finishes)
+  /** True while Phase 0 (loading source rows into exec table) is still running. */
+  loadingPhase: boolean
+  /** Number of rows currently in-flight to Salesforce across all concurrent workers. */
+  inFlight: number
+  /** In-memory tally of error-prefix → row count. Updated as batches complete. */
+  distinctErrorCounts: Map<string, number>
 }
+
+/**
+ * Returns the error prefix used for grouping/filtering.
+ * - 2+ colons → text up to the second ':'
+ * - 1 colon   → text up to the first ':'
+ * - 0 colons  → the whole message
+ */
+function errorPrefix(msg: string): string {
+  const first = msg.indexOf(':')
+  if (first < 0) return msg
+  const second = msg.indexOf(':', first + 1)
+  return (second >= 0 ? msg.slice(0, second) : msg.slice(0, first)).trim()
+}
+
+/** Snapshot of the in-memory distinctErrorCounts for emitting to the renderer. */
+function distinctErrorsSnapshot(state: WbRunState): Array<{ message: string; count: number }> {
+  return [...state.distinctErrorCounts.entries()].map(([message, count]) => ({ message, count }))
+}
+
 const wbRunStates = new Map<string, WbRunState>()
 const WB_RUN_STATE_CAP = 5
+/** Rows per chunk when streaming data to the Bulk API upload. */
+const CHUNK = 5000
 
 function addWbRunState(runId: string, state: WbRunState): void {
   wbRunStates.set(runId, state)
@@ -109,6 +132,8 @@ function addWbRunState(runId: string, state: WbRunState): void {
     // Map preserves insertion order — first key is always the oldest
     const evictedId = wbRunStates.keys().next().value as string
     wbRunStates.delete(evictedId)
+    // Drop the exec table for the evicted run (frees temp storage)
+    try { db.wbExecDropTable(evictedId) } catch { /* ignore */ }
     send('writeback:run-evicted', evictedId)
   }
 }
@@ -116,13 +141,25 @@ function addWbRunState(runId: string, state: WbRunState): void {
 function mapRowToRecord(
   row: unknown[],
   columns: string[],
-  activeMappings: FieldMapping[]
+  activeMappings: FieldMapping[],
+  mode: 'rest' | 'bulk' = 'rest'
 ): Record<string, unknown> {
   const rec: Record<string, unknown> = {}
   const lowerColumns = columns.map((c) => c.toLowerCase())
   for (const m of activeMappings) {
     const colIdx = lowerColumns.indexOf(m.sqlCol.toLowerCase())
-    if (colIdx >= 0) rec[m.sfField] = row[colIdx] ?? null
+    if (colIdx < 0) continue
+    if (m.useExternalId && m.relationshipName && m.externalIdFieldName) {
+      if (mode === 'bulk') {
+        // Bulk API 2.0 CSV: flat dot-notation header "RelationshipName.ExtIdField"
+        rec[`${m.relationshipName}.${m.externalIdFieldName}`] = row[colIdx] ?? null
+      } else {
+        // REST API: nested object { RelationshipName: { ExtIdField: value } }
+        rec[m.relationshipName] = { [m.externalIdFieldName]: row[colIdx] ?? null }
+      }
+    } else {
+      rec[m.sfField] = row[colIdx] ?? null
+    }
   }
   return rec
 }
@@ -382,6 +419,47 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
   return resultPromise
 }
 
+// ── Writeback SQL helpers (log-and-rethrow on error) ─────────────────────────
+
+function wbReadBatch(
+  runId: string,
+  columns: string[],
+  offset: number,
+  limit: number,
+  phase: string
+): ReturnType<typeof db.wbExecReadBatch> {
+  try {
+    return db.wbExecReadBatch(runId, columns, offset, limit)
+  } catch (err) {
+    debugLog('wbSql', `[${runId}] ${phase} READ ERROR at offset=${offset}: ${String(err)}`)
+    throw err
+  }
+}
+
+function wbUpdateBatch(
+  runId: string,
+  updates: Parameters<typeof db.wbExecUpdateBatch>[1],
+  phase: string
+): void {
+  try {
+    db.wbExecUpdateBatch(runId, updates)
+  } catch (err) {
+    debugLog('wbSql', `[${runId}] ${phase} UPDATE ERROR (${updates.length} rows): ${String(err)}`)
+    throw err
+  }
+}
+
+async function wbRunLoad(opts: { id: string; sql: string; signal: AbortSignal }, phase: string): Promise<void> {
+  try {
+    await dbWorker.runLoad(opts)
+  } catch (err) {
+    debugLog('wbSql', `[${opts.id}] ${phase} db-worker ERROR: ${String(err)}`)
+    throw err
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function startWritebackRun(jobId: number, runId: string): Promise<WritebackScriptResult> {
   const job = db.listWritebackJobs().find((j) => j.id === jobId)
   if (!job) throw new Error(`Writeback job ${jobId} not found`)
@@ -391,23 +469,35 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
 
   const sql = job.sqlQuery
   debugLog('jobQueries', `[SQLite→SF] job="${job.name}" (id=${jobId}) SQL:\n${sql}`)
-  const { columns } = db.queryPage(sql, 0, 0)
+
+  // Start run history before executing SQL so we always have a record,
+  // even if the query itself is invalid.
+  const runHistId = db.startWritebackRunHistory(jobId, job.useBulkApi ?? false)
+
+  let columns: string[]
+  try {
+    columns = db.queryPage(sql, 0, 0).columns
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    debugLog('wbSql', `[${runId}] SQL validation ERROR: ${msg}`)
+    db.finishWritebackRunHistory(runHistId, 'error', 0, 0, 0, 0, msg)
+    const jobResult: JobResult = { runId, type: 'writeback', status: 'error', errorMsg: msg }
+    send('job:complete', jobResult)
+    return { _runId: runId, status: 'error', rowsSucceeded: 0, rowsFailed: 0 }
+  }
 
   const abortCtrl = new AbortController()
   activeJobs.set(runId, abortCtrl)
 
   const state: WbRunState = {
     sql, columns, totalRows: 0,
-    failedRows: new Map(),
-    rowIds: new Map(),
-    uniqueKeyMaps: new Map(),
-    uniqueKeyFields: []
+    loadingPhase: true, inFlight: 0,
+    distinctErrorCounts: new Map()
   }
   addWbRunState(runId, state)
   scheduler.registerRun('writeback', jobId, runId)
   const completionPromise = scheduler.awaitCompletion(runId)
 
-  const runHistId = db.startWritebackRunHistory(jobId, job.useBulkApi ?? false)
   const activeMappings = job.operation === 'delete'
     ? job.fieldMap.filter((m) => !m.excluded && m.sfField === 'Id')
     : job.fieldMap.filter((m) => !m.excluded)
@@ -415,11 +505,6 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
   if (job.customHeaders) {
     try { parsedHeaders = JSON.parse(job.customHeaders) } catch { parsedHeaders = undefined }
   }
-  const distributionSfFields = job.distributionKey?.length
-    ? job.distributionKey
-        .map((sqlCol) => activeMappings.find((m) => m.sqlCol === sqlCol)?.sfField)
-        .filter((f): f is string => Boolean(f))
-    : null
 
   const sfOpts = {
     sfObject: job.sfObject,
@@ -427,27 +512,21 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
     externalIdField: job.externalIdField,
     batchSize: job.batchSize ?? 200,
     threads: job.threads ?? 1,
-    distributionKey: distributionSfFields?.length ? distributionSfFields : null,
     customHeaders: parsedHeaders,
     useBulkApi: job.useBulkApi
   }
 
-  const CHUNK = 10_000
-
   if (job.useBulkApi) {
-    // ── Bulk API 2.0 path ──────────────────────────────────────────────────
+    // ── Bulk API 2.0 path ─────────────────────────────────────────────────────
+    // Bulk API still uses the streaming approach; the exec table is REST-only.
     async function* makeChunks(): AsyncGenerator<Record<string, unknown>[]> {
       let offset = 0
       while (!abortCtrl.signal.aborted) {
         const { rows } = db.queryPage(sql, offset, CHUNK)
         if (rows.length === 0) break
-        // Yield to the macrotask queue after each synchronous SQLite read so that
-        // IPC calls from the renderer (queries, navigation, etc.) can be processed
-        // between chunks. Without this, the for-await loop in sfStreamingPut only
-        // creates microtask suspensions, starving the event loop for the entire
-        // upload duration.
+        // Yield between chunks to keep the event loop responsive.
         await new Promise<void>((resolve) => setImmediate(resolve))
-        yield rows.map((row) => mapRowToRecord(row as unknown[], columns, activeMappings))
+        yield rows.map((row) => mapRowToRecord(row as unknown[], columns, activeMappings, 'bulk'))
         offset += rows.length
         if (rows.length < CHUNK) break
       }
@@ -480,12 +559,6 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
 
         state.columns = result.sfColumns
         state.totalRows = result.succeeded + result.failed
-        for (const e of result.failedEntries) {
-          state.failedRows.set(e.index, { message: e.message, row: e.row })
-        }
-        for (const e of result.insertedIds) {
-          state.rowIds.set(e.index, e.id)
-        }
 
         const histStatus = result.failed === 0 ? 'success'
           : result.succeeded === 0 ? 'error' : 'partial'
@@ -500,121 +573,145 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
       } catch (err) {
         const cancelled = isAbortError(err)
         const msg = cancelled ? 'Cancelled by user' : (err instanceof Error ? err.message : String(err))
-        db.finishWritebackRunHistory(runHistId, cancelled ? 'cancelled' : 'error', 0, 0, 0, Date.now() - startTime, cancelled ? undefined : msg)
+        try {
+          db.finishWritebackRunHistory(runHistId, cancelled ? 'cancelled' : 'error', 0, 0, 0, Date.now() - startTime, cancelled ? undefined : msg)
+        } catch { /* ignore secondary DB error so job:complete always fires */ }
         const jobResult: JobResult = { runId, type: 'writeback', status: cancelled ? 'cancelled' : 'error', errorMsg: cancelled ? undefined : msg }
         send('job:complete', jobResult)
         scheduler.notifyComplete(jobResult)
       } finally {
         activeJobs.delete(runId)
       }
-    })()
+    })().catch((secondaryErr) => {
+      console.error(`[writeback bulk] Unexpected secondary error in run ${runId}:`, secondaryErr)
+    })
   } else {
-    // ── REST Collections API path ──────────────────────────────────────────
-    if (job.operation === 'insert') {
-      sf.describeObject(job.sfObject).then((fields) => {
-        const tracked = activeMappings
-          .map((m) => {
-            const fd = fields.find((f) => f.name === m.sfField)
-            return fd && (fd.unique || fd.externalId) ? { sfField: m.sfField, sqlCol: m.sqlCol, label: fd.label } : null
-          })
-          .filter((x): x is { sfField: string; sqlCol: string; label: string } => x !== null)
-        for (const t of tracked) {
-          state.uniqueKeyMaps.set(t.sfField, new Map())
-        }
-        state.uniqueKeyFields = tracked
-      }).catch(() => { /* non-fatal */ })
-    }
+    // ── REST Collections API path — exec-table architecture ───────────────────
+    // Phase 0: load all source rows into a TEMP SQLite table.
+    // Phase 1: probe (sequential, if threads > 1) — aborts early if all rows fail.
+    // Phase 2: producer-consumer main loop with N concurrent workers.
+    // The renderer polls writeback:exec-counts + writeback:exec-page instead of
+    // listening to rowStatuses on job:progress events.
 
     ;(async () => {
       let succeeded = 0
       let failed = 0
-      let processedRows = 0
-      let inFlight = 0
-      let probeCompleted = false
       const startTime = Date.now()
+      const signal = abortCtrl.signal
       try {
-        let chunkOffset = 0
-        let { rows } = db.queryPage(sql, chunkOffset, CHUNK)
+        // ── Phase 0: load source data via worker thread ───────────────────────
+        // The worker executes a single CREATE TABLE AS SELECT statement so the
+        // main event loop is never blocked during the load.
+        const loadSql = db.wbExecBuildCreateSql(runId, sql)
+        debugLog('wbSql', `[${runId}] Phase 0 — CREATE TABLE AS SELECT (→ db-worker):\n${loadSql}`)
+        await wbRunLoad({ id: runId, sql: loadSql, signal }, 'Phase 0')
+        state.totalRows = db.wbExecGetRowCount(runId)
+        state.loadingPhase = false
 
-        while (rows.length > 0 && !abortCtrl.signal.aborted) {
-          const currentRows = rows
-          const currentChunkOffset = chunkOffset
-          const records = currentRows.map((row) => mapRowToRecord(row as unknown[], columns, activeMappings))
-          chunkOffset += currentRows.length
+        const batchSize = sfOpts.batchSize ?? 200
+        const threads = Math.min(sfOpts.threads ?? 1, 10)
 
-          const sendPromise = sf.writebackBatch(
-            { ...sfOpts, disableProbe: probeCompleted },
-            records,
-            (batchSize, batchStartInChunk) => {
-              inFlight += batchSize
-              const elapsed = (Date.now() - startTime) / 1000
-              const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
-              const processingStatuses = Array.from({ length: batchSize }, (_, i) => ({
-                index: currentChunkOffset + batchStartInChunk + i,
-                status: 'processing' as const
-              }))
-              send('job:progress', {
-                runId, type: 'writeback', succeeded, failed,
-                total: succeeded + failed, rps, inFlight,
-                rowStatuses: processingStatuses
-              } as JobProgress)
-            },
-            (batchResults) => {
-              inFlight -= batchResults.length
-              for (const r of batchResults) {
-                const absIdx = currentChunkOffset + r.index
-                if (r.success) {
-                  succeeded++
-                  if (r.id) {
-                    state.rowIds.set(absIdx, r.id)
-                    for (const [sfField, valueMap] of state.uniqueKeyMaps) {
-                      const val = records[r.index][sfField]
-                      if (val != null) valueMap.set(val, r.id)
-                    }
-                  }
-                } else {
-                  failed++
-                  state.failedRows.set(absIdx, {
-                    message: r.errors[0] ?? '',
-                    row: currentRows[r.index] as unknown[]
-                  })
-                }
+        // ── Phase 1: probe (multi-thread jobs only) ───────────────────────────
+        // Probe thresholds mirror the existing writebackBatch logic.
+        let probeOffset = 0
+        if (threads > 1) {
+          let zeroCount = 0
+          let sub50Count = 0
+
+          while (!signal.aborted) {
+            const batch = wbReadBatch(runId, columns, probeOffset, batchSize, 'Phase 1 (probe)')
+            if (!batch.length) break
+
+            const records = batch.map((b) => mapRowToRecord(b.row, columns, activeMappings))
+            state.inFlight += batch.length
+            const results = await sf.writebackOneBatch(sfOpts, records, signal)
+            state.inFlight -= batch.length
+
+            const batchSucceeded = results.filter((r) => r.success).length
+            succeeded += batchSucceeded
+            failed += results.length - batchSucceeded
+            probeOffset += batch.length
+
+            const updates = results.map((r, i) => ({
+              rowid: batch[i].rowid,
+              sfId: r.id ?? null,
+              status: (r.success ? 'success' : 'error') as 'success' | 'error',
+              error: r.success ? null : (r.errors[0] ?? ''),
+              errorPrefix: r.success ? null : errorPrefix(r.errors[0] ?? '')
+            }))
+            wbUpdateBatch(runId, updates, 'Phase 1 (probe)')
+
+            for (const r of results) {
+              if (!r.success) {
+                const prefix = errorPrefix(r.errors[0] ?? '')
+                state.distinctErrorCounts.set(prefix, (state.distinctErrorCounts.get(prefix) ?? 0) + 1)
               }
-              const elapsed = (Date.now() - startTime) / 1000
-              const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
-              send('job:progress', {
-                runId,
-                type: 'writeback',
-                succeeded,
-                failed,
-                total: succeeded + failed,
-                rps,
-                inFlight,
-                rowStatuses: batchResults.map((r) => ({
-                  index: currentChunkOffset + r.index,
-                  status: r.success ? 'success' : 'error',
-                  message: r.errors[0],
-                  id: r.id
-                }))
-              } as JobProgress)
-            },
-            abortCtrl.signal
-          )
+            }
 
-          const nextFetch = currentRows.length < CHUNK
-            ? { rows: [] as unknown[][] }
-            : db.queryPage(sql, chunkOffset, CHUNK)
+            if (batchSucceeded === 0) {
+              zeroCount++
+              if (zeroCount >= 5) {
+                throw new Error(
+                  'Writeback aborted: 5 consecutive probe batches had 0% success. ' +
+                  'All rows are failing — please check your data, field mappings, and Salesforce validation rules.'
+                )
+              }
+              sub50Count++
+            } else if (batchSucceeded < batch.length * 0.5) {
+              sub50Count++
+            }
 
-          await sendPromise
-          probeCompleted = true
-
-          processedRows = chunkOffset
-          rows = nextFetch.rows
-          if (currentRows.length < CHUNK) break
+            // Probe passes on first batch with ≥50% success, or after 10 sub-50% batches
+            if (batchSucceeded >= batch.length * 0.5 || sub50Count >= 10) break
+          }
         }
 
+        // ── Phase 2: producer-consumer main loop ──────────────────────────────
+        // All workers share a single offset counter (JS is single-threaded so
+        // the increment before the first await is effectively atomic).
+        let mainOffset = probeOffset
+        const nWorkers = threads
+
+        const worker = async (): Promise<void> => {
+          while (!signal.aborted) {
+            const myOffset = mainOffset
+            const batch = wbReadBatch(runId, columns, myOffset, batchSize, 'Phase 2')
+            if (!batch.length) break
+            mainOffset += batch.length   // advance before first await
+
+            state.inFlight += batch.length
+            const records = batch.map((b) => mapRowToRecord(b.row, columns, activeMappings))
+            const results = await sf.writebackOneBatch(sfOpts, records, signal)
+            state.inFlight -= batch.length
+
+            const p2ok = results.filter((r) => r.success).length
+            const p2updates = results.map((r, i) => ({
+              rowid: batch[i].rowid,
+              sfId: r.id ?? null,
+              status: (r.success ? 'success' : 'error') as 'success' | 'error',
+              error: r.success ? null : (r.errors[0] ?? ''),
+              errorPrefix: r.success ? null : errorPrefix(r.errors[0] ?? '')
+            }))
+            wbUpdateBatch(runId, p2updates, 'Phase 2')
+
+            for (const r of results) {
+              if (r.success) {
+                succeeded++
+              } else {
+                failed++
+                const prefix = errorPrefix(r.errors[0] ?? '')
+                state.distinctErrorCounts.set(prefix, (state.distinctErrorCounts.get(prefix) ?? 0) + 1)
+              }
+            }
+          }
+        }
+
+        await Promise.all(Array.from({ length: nWorkers }, () => worker()))
+
         const status = failed === 0 ? 'success' : succeeded === 0 ? 'error' : 'partial'
-        db.finishWritebackRunHistory(runHistId, status, processedRows, succeeded, failed, Date.now() - startTime)
+        try {
+          db.finishWritebackRunHistory(runHistId, status, succeeded + failed, succeeded, failed, Date.now() - startTime)
+        } catch { /* ignore secondary DB error so job:complete always fires */ }
         const jobResult: JobResult = { runId, type: 'writeback', status, rowsSucceeded: succeeded, rowsFailed: failed }
         send('job:complete', jobResult)
         scheduler.notifyComplete(jobResult)
@@ -622,18 +719,21 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
         const cancelled = isAbortError(err)
         const msg = cancelled ? 'Cancelled by user' : (err instanceof Error ? err.message : String(err))
         const errStatus = cancelled ? 'cancelled' : (succeeded > 0 ? 'partial' : 'error')
-        db.finishWritebackRunHistory(runHistId, errStatus, processedRows, succeeded, failed, Date.now() - startTime, cancelled ? undefined : msg)
+        try {
+          db.finishWritebackRunHistory(runHistId, errStatus, succeeded + failed, succeeded, failed, Date.now() - startTime, cancelled ? undefined : msg)
+        } catch { /* ignore secondary DB error so job:complete always fires */ }
         const jobResult: JobResult = { runId, type: 'writeback', status: cancelled ? 'cancelled' : 'error', errorMsg: cancelled ? undefined : msg, rowsSucceeded: succeeded, rowsFailed: failed }
         send('job:complete', jobResult)
         scheduler.notifyComplete(jobResult)
       } finally {
         activeJobs.delete(runId)
       }
-    })()
+    })().catch((secondaryErr) => {
+      console.error(`[writeback rest] Unexpected secondary error in run ${runId}:`, secondaryErr)
+    })
   }
 
-  // Await the basic completion signal from the scheduler; row-level data stays
-  // in wbRunStates and is fetched lazily via getFailedRowsByRunId if needed.
+  // Await the basic completion signal from the scheduler.
   const basicResult = await completionPromise
   return {
     _runId: runId,
@@ -695,32 +795,20 @@ function runWritebackByName(name: string): Promise<WritebackScriptResult> {
   return scheduler.schedule('writeback', job.id, name, runId, () => startWritebackRun(job.id, runId))
 }
 
+/** Stub: "update table with IDs" will be re-implemented later. */
 function runUpdateTableWithIds(
-  runId: string,
-  sfKeyField: string,
-  targetTable: string,
-  tableKeyCol: string,
-  idColumnName: string
+  _runId: string,
+  _sfKeyField: string,
+  _targetTable: string,
+  _tableKeyCol: string,
+  _idColumnName: string
 ): { updated: number; idColCreated: boolean; indexCreated: boolean } {
-  const state = wbRunStates.get(runId)
-  if (!state) throw new Error('Run state not found — the run data may have been cleared.')
-  const valueMap = state.uniqueKeyMaps.get(sfKeyField)
-  if (!valueMap || valueMap.size === 0) throw new Error('No key values stored for that field.')
-  const pairs = [...valueMap.entries()].map(([key, id]) => ({ key, id }))
-  return db.updateTableWithIds(targetTable, tableKeyCol, idColumnName, pairs)
+  throw new Error('Update table with IDs is not yet available in this version.')
 }
 
-function getFailedRowsByRunId(runId: string): WritebackFailedRowsResult {
-  const state = wbRunStates.get(runId)
-  if (!state) throw new Error('Run state not found — the run data may have been cleared.')
-  return {
-    failedRows: [...state.failedRows.entries()].map(([index, data]) => ({
-      index,
-      message: data.message,
-      row: Object.fromEntries(state.columns.map((c, i) => [c, (data.row as unknown[])[i]]))
-    })),
-    keyFields: state.uniqueKeyFields ?? []
-  }
+/** Stub: script-runner compat — returns empty result. */
+function getFailedRowsByRunId(_runId: string): WritebackFailedRowsResult {
+  return { failedRows: [], keyFields: [] }
 }
 
 // ── SF CLI path settings ──────────────────────────────────────────────────────
@@ -776,6 +864,7 @@ export function registerIpcHandlers(): void {
     }
     const opened = db.openDatabase(filePath)
     recent.addRecentDatabase(filePath)
+    void dbWorker.openDb(filePath)
     // Return the opened DB immediately so the UI is not blocked by SF CLI detection.
     // Auto-connect runs in the background; result arrives via the sf:auto-connected event.
     autoConnectAfterDbOpen()
@@ -790,6 +879,7 @@ export function registerIpcHandlers(): void {
     if (result.canceled || !result.filePath) return null
     const opened = db.openDatabase(result.filePath)
     recent.addRecentDatabase(result.filePath)
+    void dbWorker.openDb(result.filePath)
     autoConnectAfterDbOpen()
     return opened
   })
@@ -1073,140 +1163,69 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('writeback:history', (_e, jobId: number) => db.getWritebackRunHistory(jobId))
   ipcMain.handle('writeback:preview', (_e, sql: string) => db.previewWritebackQuery(sql))
 
-  // ── Row-level access for the renderer (avoids shipping millions of rows upfront) ──
-  ipcMain.handle('writeback:row-count', (_e, sql: string) => db.queryRowCount(sql))
-  ipcMain.handle('writeback:page', (
-    _e, sql: string, offset: number, limit: number,
-    orderBy?: { column: string; dir: 'asc' | 'desc' }[]
-  ) => db.queryPage(sql, offset, limit, orderBy))
-  ipcMain.handle('writeback:failed-rows', (_e, runId: string) => {
-    const state = wbRunStates.get(runId)
-    if (!state) return []
-    return [...state.failedRows.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([index, data]) => ({ index, message: data.message, row: data.row }))
-  })
+  // ── Exec-table access (REST API writeback) ────────────────────────────────────
 
-  // ── Paginated failed-row access ────────────────────────────────────────────
-
-  /** Returns total failed count + distinct error messages with per-message counts. */
-  ipcMain.handle('writeback:failed-rows-meta', (_e, runId: string) => {
+  /** Returns aggregated counts from the exec table for live polling by the renderer. */
+  ipcMain.handle('writeback:exec-counts', (_e, runId: string) => {
     const state = wbRunStates.get(runId)
-    if (!state) return { totalCount: 0, distinctErrors: [] }
-    const counts = new Map<string, number>()
-    for (const [, data] of state.failedRows) {
-      counts.set(data.message, (counts.get(data.message) ?? 0) + 1)
-    }
-    const distinctErrors = [...counts.entries()].map(([message, count]) => ({ message, count }))
-    return { totalCount: state.failedRows.size, distinctErrors }
-  })
-
-  /**
-   * Returns one page of failed rows.
-   * Default sort is by original absolute row index.
-   * When `errorFilter` is provided, only rows whose message exactly matches it are returned.
-   * When `sortCriteria` is provided, rows are sorted server-side before slicing.
-   * Column mapping: colIdx 0 → message, colIdx 1+ → row[colIdx - 1].
-   */
-  ipcMain.handle('writeback:failed-rows-page', (
-    _e, runId: string, offset: number, limit: number,
-    errorFilter?: string,
-    sortCriteria?: { colIdx: number; dir: 'asc' | 'desc' }[]
-  ) => {
-    const state = wbRunStates.get(runId)
-    if (!state) return []
-    let entries = [...state.failedRows.entries()].sort((a, b) => a[0] - b[0])
-    if (errorFilter) {
-      entries = entries.filter(([, data]) => data.message === errorFilter)
-    }
-    if (sortCriteria?.length) {
-      entries.sort((a, b) => {
-        for (const { colIdx, dir } of sortCriteria) {
-          const va: unknown = colIdx === 0 ? a[1].message : (a[1].row as unknown[])[colIdx - 1]
-          const vb: unknown = colIdx === 0 ? b[1].message : (b[1].row as unknown[])[colIdx - 1]
-          const cmp = va == null && vb == null ? 0
-            : va == null ? -1
-            : vb == null ? 1
-            : typeof va === 'number' && typeof vb === 'number' ? va - vb
-            : String(va).localeCompare(String(vb))
-          if (cmp !== 0) {
-            return dir === 'asc' ? cmp : -cmp
-          }
-        }
-        return 0
-      })
-    }
-    return entries.slice(offset, offset + limit).map(([index, data]) => ({
-      index,
-      message: data.message,
-      row: data.row
-    }))
-  })
-
-  /**
-   * Returns a map of absolute row index → { message, row } for all failed rows
-   * whose index falls within [fromIndex, toIndex). Used to annotate the all-rows view
-   * after a job completes without fetching every failed row to the renderer.
-   */
-  ipcMain.handle('writeback:failed-rows-in-range', (
-    _e, runId: string, fromIndex: number, toIndex: number
-  ) => {
-    const state = wbRunStates.get(runId)
-    if (!state) return {}
-    const result: Record<number, { message: string; row: unknown[] }> = {}
-    for (let i = fromIndex; i < toIndex; i++) {
-      const entry = state.failedRows.get(i)
-      if (entry) {
-        result[i] = { message: entry.message, row: entry.row }
+    if (!state) return { total: 0, queued: 0, succeeded: 0, failed: 0, inFlight: 0, loadingPhase: false }
+    try {
+      const counts = db.wbExecGetStatusCounts(runId)
+      return {
+        total: state.totalRows,
+        queued: counts.queued,
+        succeeded: counts.succeeded,
+        failed: counts.failed,
+        inFlight: state.inFlight,
+        loadingPhase: state.loadingPhase
       }
+    } catch {
+      return { total: state.totalRows, queued: 0, succeeded: 0, failed: 0, inFlight: state.inFlight, loadingPhase: state.loadingPhase }
     }
-    return result
   })
 
-  // Returns a { [absoluteRowIndex]: sfId } map for one page — insert operations only.
-  ipcMain.handle('writeback:page-ids', (_e, runId: string, offset: number, limit: number) => {
+  /** Returns the in-memory distinct error map for live filtering/display. */
+  ipcMain.handle('writeback:exec-distinct-errors', (_e, runId: string) => {
     const state = wbRunStates.get(runId)
-    if (!state) return {}
-    const result: Record<number, string> = {}
-    for (let i = offset; i < offset + limit; i++) {
-      const id = state.rowIds.get(i)
-      if (id) result[i] = id
-    }
-    return result
+    if (!state) return []
+    return distinctErrorsSnapshot(state)
   })
 
-  // Returns the unique/externalId key fields and their stored value counts for the modal.
-  ipcMain.handle('writeback:get-id-update-info', (_e, runId: string) => {
-    const state = wbRunStates.get(runId)
-    if (!state) return null
-    return {
-      rowIdCount: state.rowIds.size,
-      keyFields: state.uniqueKeyFields.map((f) => ({
-        sfField: f.sfField,
-        sqlCol: f.sqlCol,
-        label: f.label,
-        valueCount: state.uniqueKeyMaps.get(f.sfField)?.size ?? 0
-      }))
-    }
-  })
-
-  // Looks up (key value → sfId) from the in-memory uniqueKeyMaps — no re-query needed.
+  /** Returns one page of exec-table rows for the DataGrid. */
   ipcMain.handle(
-    'writeback:update-table-ids',
+    'writeback:exec-page',
     (
       _e,
       runId: string,
-      sfKeyField: string,
-      targetTable: string,
-      tableKeyCol: string,
-      idColumnName: string
+      offset: number,
+      limit: number,
+      filter?: { statuses?: ('success' | 'error' | 'queued')[]; errorPrefix?: string }
     ) => {
       const state = wbRunStates.get(runId)
-      if (!state) throw new Error('Run state not found — the run data may have been cleared.')
-      const valueMap = state.uniqueKeyMaps.get(sfKeyField)
-      if (!valueMap || valueMap.size === 0) throw new Error('No key values stored for that field.')
-      const pairs = [...valueMap.entries()].map(([key, id]) => ({ key, id }))
-      return db.updateTableWithIds(targetTable, tableKeyCol, idColumnName, pairs)
+      if (!state) return { columns: [], rows: [] }
+      try {
+        return db.wbExecGetPage(runId, state.columns, offset, limit, filter)
+      } catch {
+        return { columns: state.columns, rows: [] }
+      }
+    }
+  )
+
+  /** Returns the total row count matching a filter (for pagination). */
+  ipcMain.handle(
+    'writeback:exec-count',
+    (
+      _e,
+      runId: string,
+      filter?: { statuses?: ('success' | 'error' | 'queued')[]; errorPrefix?: string }
+    ) => {
+      const state = wbRunStates.get(runId)
+      if (!state) return 0
+      try {
+        return db.wbExecGetPageCount(runId, filter)
+      } catch {
+        return 0
+      }
     }
   )
 
@@ -1226,7 +1245,13 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('writeback:start', async (_e, jobId: number): Promise<string> => {
     const runId = randomUUID()
-    startWritebackRun(jobId, runId)  // fire-and-forget; scheduler.registerRun called inside
+    startWritebackRun(jobId, runId).catch((err) => {
+      // Safety net: startWritebackRun should handle all errors internally,
+      // but if something escapes (e.g. ensureConnected throws) at least notify the renderer.
+      const msg = err instanceof Error ? err.message : String(err)
+      const jobResult: JobResult = { runId, type: 'writeback', status: 'error', errorMsg: msg }
+      send('job:complete', jobResult)
+    })
     return runId
   })
 
@@ -1235,17 +1260,34 @@ export function registerIpcHandlers(): void {
     if (!job) throw new Error(`Writeback job ${jobId} not found`)
 
     const prevState = wbRunStates.get(prevRunId)
-    if (!prevState || prevState.failedRows.size === 0) {
-      throw new Error('No failed rows found for this run')
-    }
+    if (!prevState) throw new Error('Previous run state not found — the run data may have been cleared.')
 
-    // Sort by original absolute index so retried-row indices stay deterministic.
-    const failedEntries = [...prevState.failedRows.entries()].sort((a, b) => a[0] - b[0])
+    // Read failed rows from the exec table
+    let failedCount = 0
+    try {
+      failedCount = db.wbExecGetPageCount(prevRunId, { statuses: ['error'] })
+    } catch {
+      throw new Error('Failed to read error rows from exec table.')
+    }
+    if (failedCount === 0) throw new Error('No failed rows found for this run.')
+
     const { columns } = prevState
     const activeMappings = job.operation === 'delete'
       ? job.fieldMap.filter((m) => !m.excluded && m.sfField === 'Id')
       : job.fieldMap.filter((m) => !m.excluded)
-    const records = failedEntries.map(([, data]) => mapRowToRecord(data.row, columns, activeMappings))
+    let parsedHeadersRetry: Record<string, string> | undefined
+    if (job.customHeaders) {
+      try { parsedHeadersRetry = JSON.parse(job.customHeaders) } catch { parsedHeadersRetry = undefined }
+    }
+
+    const sfOpts = {
+      sfObject: job.sfObject,
+      operation: job.operation,
+      externalIdField: job.externalIdField,
+      batchSize: job.batchSize ?? 200,
+      threads: job.threads ?? 1,
+      customHeaders: parsedHeadersRetry
+    }
 
     const newRunId = randomUUID()
     const abortCtrl = new AbortController()
@@ -1255,110 +1297,85 @@ export function registerIpcHandlers(): void {
     const newState: WbRunState = {
       sql: prevState.sql,
       columns,
-      totalRows: failedEntries.length,
-      failedRows: new Map(),
-      rowIds: new Map(),
-      uniqueKeyMaps: new Map(),
-      uniqueKeyFields: []
+      totalRows: 0,
+      loadingPhase: true, inFlight: 0,
+      distinctErrorCounts: new Map()
     }
     addWbRunState(newRunId, newState)
-
-    const runHistId = db.startWritebackRunHistory(jobId, false) // retry always uses REST
-    let parsedHeadersRetry: Record<string, string> | undefined
-    if (job.customHeaders) {
-      try { parsedHeadersRetry = JSON.parse(job.customHeaders) } catch { parsedHeadersRetry = undefined }
-    }
-    const retryDistributionSfFields = job.distributionKey?.length
-      ? job.distributionKey
-          .map((sqlCol) => activeMappings.find((m) => m.sqlCol === sqlCol)?.sfField)
-          .filter((f): f is string => Boolean(f))
-      : null
-
-    const sfOpts = {
-      sfObject: job.sfObject,
-      operation: job.operation,
-      externalIdField: job.externalIdField,
-      batchSize: job.batchSize ?? 200,
-      threads: job.threads ?? 1,
-      distributionKey: retryDistributionSfFields?.length ? retryDistributionSfFields : null,
-      customHeaders: parsedHeadersRetry
-    }
-    const totalRows = failedEntries.length
+    const runHistId = db.startWritebackRunHistory(jobId, false)
 
     ;(async () => {
       let succeeded = 0
       let failed = 0
-      let inFlight = 0
       const startTime = Date.now()
+      const signal = abortCtrl.signal
       try {
-        await sf.writebackBatch(
-          sfOpts,
-          records,
-          (batchSize, batchStartInRecords, origIndices) => {
-            inFlight += batchSize
-            const elapsed = (Date.now() - startTime) / 1000
-            const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
-            const processingStatuses = Array.from({ length: batchSize }, (_, i) => {
-              const recIdx = origIndices ? origIndices[i] : batchStartInRecords + i
-              return { index: recIdx, status: 'processing' as const }
-            })
-            send('job:progress', {
-              runId: newRunId, type: 'writeback', succeeded, failed,
-              total: totalRows, rps, inFlight,
-              rowStatuses: processingStatuses
-            } as JobProgress)
-          },
-          (batchResults) => {
-            inFlight -= batchResults.length
-            for (const r of batchResults) {
+        // Copy failed rows from the previous exec table into a new one via worker thread
+        const retrySql = db.wbExecBuildRetrySql(newRunId, prevRunId, columns)
+        debugLog('wbSql', `[${newRunId}] Retry Phase 0 — CREATE TABLE AS SELECT (→ db-worker):\n${retrySql}`)
+        await wbRunLoad({ id: newRunId, sql: retrySql, signal }, 'Retry Phase 0')
+        newState.totalRows = db.wbExecGetRowCount(newRunId)
+        newState.loadingPhase = false
+
+        const batchSize = sfOpts.batchSize ?? 200
+        const threads = Math.min(sfOpts.threads ?? 1, 10)
+        let mainOffset = 0
+
+        const worker = async (): Promise<void> => {
+          while (!signal.aborted) {
+            const myOffset = mainOffset
+            const batchRows = wbReadBatch(newRunId, columns, myOffset, batchSize, 'Retry Phase 2')
+            if (!batchRows.length) break
+            mainOffset += batchRows.length
+            newState.inFlight += batchRows.length
+            const records = batchRows.map((b) => mapRowToRecord(b.row, columns, activeMappings))
+            const results = await sf.writebackOneBatch(sfOpts, records, signal)
+            newState.inFlight -= batchRows.length
+            const rtOk = results.filter((r) => r.success).length
+            const rtUpdates = results.map((r, i) => ({
+              rowid: batchRows[i].rowid,
+              sfId: r.id ?? null,
+              status: (r.success ? 'success' : 'error') as 'success' | 'error',
+              error: r.success ? null : (r.errors[0] ?? ''),
+              errorPrefix: r.success ? null : errorPrefix(r.errors[0] ?? '')
+            }))
+            wbUpdateBatch(newRunId, rtUpdates, 'Retry Phase 2')
+            for (const r of results) {
               if (r.success) {
                 succeeded++
-                if (r.id) newState.rowIds.set(r.index, r.id)
               } else {
                 failed++
-                newState.failedRows.set(r.index, {
-                  message: r.errors[0] ?? '',
-                  row: failedEntries[r.index][1].row
-                })
+                const prefix = errorPrefix(r.errors[0] ?? '')
+                newState.distinctErrorCounts.set(prefix, (newState.distinctErrorCounts.get(prefix) ?? 0) + 1)
               }
             }
-            const elapsed = (Date.now() - startTime) / 1000
-            const rps = elapsed > 0 ? Math.round((succeeded + failed) / elapsed) : 0
-            send('job:progress', {
-              runId: newRunId,
-              type: 'writeback',
-              succeeded,
-              failed,
-              total: totalRows,
-              rps,
-              inFlight,
-              rowStatuses: batchResults.map((r) => ({
-                index: r.index,
-                status: r.success ? 'success' : 'error',
-                message: r.errors[0],
-                id: r.id
-              }))
-            } as JobProgress)
-          },
-          abortCtrl.signal
-        )
+          }
+        }
+
+        await Promise.all(Array.from({ length: threads }, () => worker()))
 
         const status = failed === 0 ? 'success' : succeeded === 0 ? 'error' : 'partial'
-        db.finishWritebackRunHistory(runHistId, status, totalRows, succeeded, failed, Date.now() - startTime)
+        try {
+          db.finishWritebackRunHistory(runHistId, status, succeeded + failed, succeeded, failed, Date.now() - startTime)
+        } catch { /* ignore secondary DB error so job:complete always fires */ }
         const retryResult: JobResult = { runId: newRunId, type: 'writeback', status, rowsSucceeded: succeeded, rowsFailed: failed }
         send('job:complete', retryResult)
         scheduler.notifyComplete(retryResult)
       } catch (err) {
         const cancelled = isAbortError(err)
         const msg = cancelled ? 'Cancelled by user' : (err instanceof Error ? err.message : String(err))
-        db.finishWritebackRunHistory(runHistId, cancelled ? 'cancelled' : 'error', 0, 0, 0, Date.now() - startTime, cancelled ? undefined : msg)
+        try {
+          db.finishWritebackRunHistory(runHistId, cancelled ? 'cancelled' : 'error', succeeded + failed, succeeded, failed, Date.now() - startTime, cancelled ? undefined : msg)
+        } catch { /* ignore secondary DB error so job:complete always fires */ }
         const retryResult: JobResult = { runId: newRunId, type: 'writeback', status: cancelled ? 'cancelled' : 'error', errorMsg: cancelled ? undefined : msg }
         send('job:complete', retryResult)
         scheduler.notifyComplete(retryResult)
       } finally {
         activeJobs.delete(newRunId)
       }
-    })()
+    })().catch((secondaryErr) => {
+      console.error(`[writeback retry] Unexpected secondary error in run ${newRunId}:`, secondaryErr)
+    })
 
     return newRunId
   })

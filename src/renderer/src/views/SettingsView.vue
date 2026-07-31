@@ -14,6 +14,11 @@
       <div class="settings-top-tabs">
         <button
           class="settings-top-tab"
+          :class="{ active: settingsTab === 'ui' }"
+          @click="settingsTab = 'ui'"
+        >UI</button>
+        <button
+          class="settings-top-tab"
           :class="{ active: settingsTab === 'provider' }"
           @click="settingsTab = 'provider'"
         >AI Provider</button>
@@ -38,6 +43,21 @@
           @click="settingsTab = 'diagnostics'"
         >Diagnostics</button>
       </div>
+
+      <!-- UI Settings Section -->
+      <section v-if="settingsTab === 'ui'" class="settings-section">
+        <h3 class="settings-section-title">Job List</h3>
+        <div class="settings-row">
+          <label class="settings-checkbox-label">
+            <input type="checkbox" v-model="uiPrefs.showJobDetails" />
+            Show job details in the job list
+          </label>
+          <div class="settings-hint">
+            When enabled, each job displays a second line showing the Salesforce object,
+            the target table (for extraction jobs), or the operation (for writeback jobs).
+          </div>
+        </div>
+      </section>
 
       <!-- LLM Provider Section -->
       <section v-if="settingsTab === 'provider'" class="settings-section">
@@ -544,6 +564,11 @@
             <span class="diag-flag-label">Job queries</span>
             <span class="diag-flag-hint">Logs the SQL query at the start of each SQLite→SF job and the SOQL query at the start of each SF→SQLite job.</span>
           </label>
+          <label class="diag-flag-row">
+            <input type="checkbox" :checked="diagFlags.wbSql" @change="toggleFlag('wbSql', ($event.target as HTMLInputElement).checked)" />
+            <span class="diag-flag-label">Writeback SQL</span>
+            <span class="diag-flag-hint">Logs every SQL statement during a writeback run: the CREATE TABLE AS SELECT (including when sent to the DB worker), and a summary line for each batch read and batch update on the exec table.</span>
+          </label>
         </div>
 
         <div class="diag-toolbar">
@@ -587,6 +612,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { useUiPrefs } from '../composables/useUiPrefs'
 
 interface LlmSettings {
   provider: 'openai' | 'anthropic' | 'mistral' | 'ollama' | 'litellm'
@@ -614,7 +640,8 @@ const providers = [
   { id: 'litellm' as const, label: 'LiteLLM' }
 ]
 
-const settingsTab = ref<'provider' | 'prompt' | 'network' | 'about' | 'diagnostics'>('provider')
+const uiPrefs = useUiPrefs()
+const settingsTab = ref<'ui' | 'provider' | 'prompt' | 'network' | 'about' | 'diagnostics'>('ui')
 const encryptionAvailable = ref(true)
 const saving = ref(false)
 const saved = ref(false)

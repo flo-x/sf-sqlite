@@ -23,6 +23,7 @@
         <input v-model="search" type="text" placeholder="Search jobs…" style="flex:1; font-size:12px;" />
       </div>
 
+      <div class="job-list-scroll">
       <div v-if="!filteredJobs.length" class="empty-state" style="padding: 32px 16px; gap:10px;">
         <div style="font-size:28px; line-height:1;">⬇⬆</div>
         <div>No jobs yet</div>
@@ -38,40 +39,40 @@
           entry.type === 'extract' ? 'job-row-extract' : 'job-row-wb',
           {
             selected: selectedJob?.type === entry.type && selectedJob?.id === entry.id,
-            running: isEntryRunning(entry)
+            running: isEntryRunning(entry),
+            'job-row-detailed': uiPrefs.showJobDetails
           }
         ]"
         @click="selectEntry(entry)"
       >
-        <div class="job-row-name">
-          <span :class="entry.type === 'extract' ? 'type-icon-extract' : 'type-icon-wb'">
-            {{ entry.type === 'extract' ? '⬇' : '⬆' }}
-          </span>
-          <span class="spinner job-row-spinner" v-if="isEntryRunning(entry)"></span>
-          {{ entry.name }}
-        </div>
-        <div class="job-row-meta">
-          <span class="job-row-sub">{{ entry.subtitle }}</span>
-          <span class="job-row-right">
-            <span v-if="isEntryRunning(entry)" class="job-row-running-label">running</span>
-            <span v-else-if="isEntryQueued(entry)" class="job-row-running-label" style="color:var(--text-muted);">queued</span>
-            <template v-else-if="entryLastRun(entry)">
-              <span class="badge" :class="runStatusBadge(entryLastRun(entry)!.status)">{{ entryLastRun(entry)!.status }}</span>
-              <span v-if="entryRowCount(entry) != null" class="job-row-rows">{{ entryRowCount(entry)!.toLocaleString() }}</span>
-            </template>
-            <button
-              class="job-run-btn"
-              :class="entry.type === 'extract' ? 'job-run-btn-extract' : 'job-run-btn-wb'"
-              :disabled="isEntryRunning(entry) || isEntryQueued(entry)"
-              :title="isEntryRunning(entry) ? 'Running…' : isEntryQueued(entry) ? 'Queued…' : 'Run job'"
-              @click.stop="runEntry(entry)"
-            >
-              <span v-if="isEntryRunning(entry)" class="spinner" style="width:10px;height:10px;border-width:1.5px;"></span>
-              <span v-else>▶</span>
-            </button>
-          </span>
-        </div>
+        <span :class="entry.type === 'extract' ? 'type-icon-extract' : 'type-icon-wb'" class="job-row-icon">
+          {{ entry.type === 'extract' ? '⬇' : '⬆' }}
+        </span>
+        <span class="job-row-main">
+          <span class="job-row-name">{{ entry.name }}</span>
+          <span v-if="uiPrefs.showJobDetails" class="job-row-subtitle">{{ entry.subtitle }}</span>
+        </span>
+        <span class="job-row-status">
+          <span v-if="isEntryRunning(entry)" class="spinner job-row-spinner"></span>
+          <span v-if="isEntryRunning(entry)" class="job-row-running-label">running</span>
+          <span v-else-if="isEntryQueued(entry)" class="job-row-running-label job-row-queued-label">queued</span>
+          <template v-else-if="entryLastRun(entry)">
+            <span class="badge badge-icon" :class="runStatusBadge(entryLastRun(entry)!.status)" :title="entryLastRun(entry)!.status">{{ runStatusIcon(entryLastRun(entry)!.status) }}</span>
+            <span v-if="entryRowCount(entry) != null" class="job-row-rows">{{ entryRowCount(entry)!.toLocaleString() }}</span>
+          </template>
+        </span>
+        <button
+          class="job-run-btn"
+          :class="entry.type === 'extract' ? 'job-run-btn-extract' : 'job-run-btn-wb'"
+          :disabled="isEntryRunning(entry) || isEntryQueued(entry)"
+          :title="isEntryRunning(entry) ? 'Running…' : isEntryQueued(entry) ? 'Queued…' : 'Run job'"
+          @click.stop="runEntry(entry)"
+        >
+          <span v-if="isEntryRunning(entry)" class="spinner" style="width:10px;height:10px;border-width:1.5px;"></span>
+          <span v-else>▶</span>
+        </button>
       </div>
+      </div><!-- end job-list-scroll -->
     </div>
 
     <!-- Draggable divider -->
@@ -139,11 +140,9 @@
                   <label>WHERE Clause (optional)</label>
                   <textarea v-model="exEditForm.whereClause" placeholder="e.g. CreatedDate = TODAY" rows="2" class="where-textarea" />
                 </div>
-                <div class="form-row">
-                  <div class="form-group" style="flex:0 0 140px;">
-                    <label>LIMIT (optional)</label>
-                    <input v-model.number="exEditForm.rowLimit" type="number" placeholder="e.g. 10000" />
-                  </div>
+                <div class="form-group" style="flex:0 0 140px;">
+                  <label>LIMIT (optional)</label>
+                  <input v-model.number="exEditForm.rowLimit" type="number" placeholder="e.g. 10000" />
                 </div>
               </template>
             </template>
@@ -259,9 +258,7 @@
                   </div>
                 </div>
                 <div class="form-group"><label>WHERE Clause (optional)</label><textarea v-model="exEditForm.whereClause" placeholder="e.g. CreatedDate = TODAY" rows="2" class="where-textarea" /></div>
-                <div class="form-row">
-                  <div class="form-group" style="flex:0 0 140px;"><label>LIMIT (optional)</label><input v-model.number="exEditForm.rowLimit" type="number" placeholder="e.g. 10000" /></div>
-                </div>
+                <div class="form-group" style="flex:0 0 140px;"><label>LIMIT (optional)</label><input v-model.number="exEditForm.rowLimit" type="number" placeholder="e.g. 10000" /></div>
               </template>
             </template>
             <template v-else>
@@ -366,6 +363,10 @@
           <div class="editor-body">
             <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="e.g. Sync EU Accounts" /></div>
             <div class="form-group">
+              <label>Operation</label>
+              <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
+            </div>
+            <div class="form-group">
               <label>SQL Query (source data)</label>
               <textarea v-model="wbEditForm.sqlQuery" class="sql-query-textarea" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
               <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
@@ -386,10 +387,6 @@
             </div>
             <div v-if="wbPreviewError" class="alert alert-error">{{ wbPreviewError }}</div>
             <div class="form-group"><label>Target Salesforce Object</label><ObjectPicker v-model="wbEditForm.sfObject" :objects="conn.sfObjects" :refreshing="sfRefreshing" @update:modelValue="wbOnObjectChange" @refresh="refreshObjects" /></div>
-            <div class="form-group">
-              <label>Operation</label>
-              <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
-            </div>
             <template v-if="wbSfFields.length">
               <div class="form-group"><FieldMapper v-model="wbEditForm.fieldMap" :sfFields="wbSfFields" /></div>
               <div v-if="wbEditForm.operation === 'upsert'" class="form-group"><label>External ID Field (SF)</label><input v-model="wbEditForm.externalIdField" type="text" placeholder="Id" /></div>
@@ -471,6 +468,10 @@
             <div v-if="wbSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ wbSaveError }}</div>
             <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="e.g. Sync EU Accounts" /></div>
             <div class="form-group">
+              <label>Operation</label>
+              <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
+            </div>
+            <div class="form-group">
               <label>SQL Query (source data)</label>
               <textarea v-model="wbEditForm.sqlQuery" class="sql-query-textarea" placeholder="SELECT Id, Name, Industry FROM Account WHERE BillingCountry = 'FR'" />
               <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
@@ -491,10 +492,6 @@
             </div>
             <div v-if="wbPreviewError" class="alert alert-error">{{ wbPreviewError }}</div>
             <div class="form-group"><label>Target Salesforce Object</label><ObjectPicker v-model="wbEditForm.sfObject" :objects="conn.sfObjects" :refreshing="sfRefreshing" @update:modelValue="wbOnObjectChange" @refresh="refreshObjects" /></div>
-            <div class="form-group">
-              <label>Operation</label>
-              <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
-            </div>
             <template v-if="wbSfFields.length">
               <div class="form-group"><FieldMapper v-model="wbEditForm.fieldMap" :sfFields="wbSfFields" /></div>
               <div v-if="wbEditForm.operation === 'upsert'" class="form-group"><label>External ID Field (SF)</label><input v-model="wbEditForm.externalIdField" type="text" placeholder="Id" /></div>
@@ -578,7 +575,7 @@
               <div v-else-if="wbThisJobIsRunning" class="bulk-phase-card">
                 <div class="bulk-phase-row">
                   <span class="spinner" style="width:14px;height:14px;border-width:2px;flex-shrink:0;"></span>
-                  <template v-if="execBulkPhase === 'uploading'">Uploading to Salesforce… <strong>{{ execBulkUploaded.toLocaleString() }}</strong><template v-if="execSourceRowCount !== null"> / {{ execSourceRowCount.toLocaleString() }}</template> rows sent</template>
+                  <template v-if="execBulkPhase === 'uploading'">Uploading to Salesforce… <strong>{{ execBulkUploaded.toLocaleString() }}</strong> rows sent</template>
                   <template v-else-if="execBulkPhase === 'processing'">Salesforce processing <span class="badge badge-gray" style="font-size:11px;">{{ execBulkJobState }}</span> — <strong>{{ execBulkProcessed.toLocaleString() }}</strong> processed, <span style="color:var(--danger);">{{ execFailed.toLocaleString() }}</span> failed</template>
                   <template v-else-if="execBulkPhase === 'downloading'">Downloading results from Salesforce…</template>
                   <template v-else>Starting Bulk API 2.0 job…</template>
@@ -587,89 +584,59 @@
               </div>
               <template v-else-if="execJobDone">
                 <div class="exec-stats">
-                  <span v-if="execSourceRowCount !== null" style="color:var(--text-muted);">{{ execSourceRowCount.toLocaleString() }} total</span>
                   <span><strong>{{ wbTotalRows.toLocaleString() }}</strong> rows</span>
                   <span style="color:var(--success);">✓ {{ wbSucceededCount.toLocaleString() }} succeeded</span>
                   <span style="color:var(--danger);">✗ {{ wbFailedCount.toLocaleString() }} failed</span>
                   <button class="btn btn-ghost btn-sm" style="margin-left:auto;" @click="wbClearExecState">Clear</button>
                 </div>
-                <div v-if="wbFailedCount > 0 && execFailedTotal > 0" style="flex:1;overflow:hidden;display:flex;flex-direction:column;">
-                  <div class="failed-rows-header">
-                    <span style="font-size:12px;color:var(--text-muted);">Failed records (echoed from Salesforce)</span>
-                    <div v-if="wbDistinctErrors.length > 1" class="error-filter-bar">
-                      <label class="error-filter-label">Filter by error:</label>
-                      <select v-model="failedErrorFilter" class="error-filter-select">
-                        <option value="">All errors ({{ execFailedTotal.toLocaleString() }})</option>
-                        <option v-for="err in wbDistinctErrors" :key="err" :value="err">{{ err.length > 80 ? err.slice(0, 80) + '…' : err }} ({{ wbErrorCounts.get(err) ?? 0 }})</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div style="flex:1;overflow:hidden;">
-                    <DataGrid
-                      :columns="['_Error', ...wbExecDisplayColumns]"
-                      :rows="execFailedPanelRows.map((fr) => [fr.message, ...fr.row])"
-                      :showRowNumbers="true"
-                      :totalRowCount="wbFilteredFailedTotal"
-                      :onPageChange="wbFilteredFailedTotal > EXEC_PAGE ? (off) => wbLoadExecPage(off) : undefined"
-                      :externalOffset="execFailedPageOffset"
-                      :pageSize="EXEC_PAGE"
-                      :onSortChange="wbFilteredFailedTotal > EXEC_PAGE ? wbHandleFailedSortChange : undefined"
-                      :externalSortCriteria="wbFilteredFailedTotal > EXEC_PAGE ? execFailedSort : undefined"
-                      :onCopySubsetRows="wbCopyFailedCsv"
-                      copySubsetRowsLabel="Copy Failed CSV"
-                      :onExportCsv="wbExportFailed"
-                      exportCsvLabel="Export Failed CSV"
-                    />
-                  </div>
-                </div>
               </template>
             </template>
             <template v-else-if="!wbThisJobIsQueued">
-              <div v-if="!wbThisJobIsRunning && !execPageRows.length && !execFailedTotal && !execError" class="empty-state" style="padding:32px 16px;">No execution data yet — click ▶ Execute to run this job.</div>
+              <!-- No run yet -->
+              <div v-if="!wbThisJobIsRunning && !execLoadingPhase && !wbTotalRows && !execJobDone && !execError" class="empty-state" style="padding:32px 16px;">No execution data yet — click ▶ Execute to run this job.</div>
               <template v-else>
-                <div class="exec-stats">
-                  <span v-if="execSourceRowCount !== null" style="color:var(--text-muted);">{{ execSourceRowCount.toLocaleString() }} source rows</span>
-                  <span style="color:var(--text-muted);">{{ wbActiveJobData?.rps ?? 0 }} rec/s</span>
-                  <span v-if="wbThisJobIsRunning" style="color:var(--accent);font-size:12px;">⟳ {{ execInFlight.toLocaleString() }} in flight</span>
-                  <div v-if="wbTotalRows > 0" class="exec-status-filter">
-                    <button class="exec-filter-pill" :class="{ active: wbAllFiltersOn }" @click="execFilterSuccess = execFilterError = execFilterPending = true">All <span class="exec-filter-count">{{ wbTotalRows.toLocaleString() }}</span></button>
-                    <button class="exec-filter-pill" :class="{ active: execFilterSuccess, 'exec-filter-pill--ok': wbSucceededCount > 0, 'exec-filter-pill--ok-lit': wbSucceededCount > 0 }" @click="execFilterSuccess = !execFilterSuccess">✓ OK <span class="exec-filter-count">{{ wbSucceededCount.toLocaleString() }}</span></button>
-                    <button class="exec-filter-pill" :class="{ active: execFilterError, 'exec-filter-pill--error': wbFailedCount > 0, 'exec-filter-pill--error-lit': wbFailedCount > 0 }" @click="execFilterError = !execFilterError">✗ Error <span class="exec-filter-count">{{ wbFailedCount.toLocaleString() }}</span></button>
-                    <button class="exec-filter-pill" :class="{ active: execFilterPending, 'exec-filter-pill--pending': wbPendingCount > 0 }" @click="execFilterPending = !execFilterPending">— Pending <span class="exec-filter-count">{{ wbPendingCount.toLocaleString() }}</span></button>
+                <!-- Row 1: status text (left) + pills (right, flushed) + Cancel button -->
+                <div class="exec-phase-bar">
+                  <div class="bulk-phase-row">
+                    <template v-if="execLoadingPhase">
+                      <span class="spinner" style="width:14px;height:14px;border-width:2px;flex-shrink:0;"></span>
+                      Loading source data into execution table…
+                    </template>
+                    <template v-else-if="wbTotalRows > 0">
+                      <span v-if="wbThisJobIsRunning" class="spinner" style="width:14px;height:14px;border-width:2px;flex-shrink:0;"></span>
+                      {{ wbThisJobIsRunning ? 'Processing' : 'Processed' }} <strong>{{ (wbThisJobIsRunning ? wbTotalRows : (wbSucceededCount + wbFailedCount)).toLocaleString() }}</strong>
+                      rows<template v-if="execInFlight > 0 && wbThisJobIsRunning">, <strong>{{ execInFlight.toLocaleString() }}</strong> in flight</template>
+                      <template v-if="execRowsPerSec > 0">, <strong>{{ execRowsPerSec.toLocaleString() }}</strong> rows/sec</template>
+                    </template>
                   </div>
-                  <button v-if="wbFailedCount > 0 && !wbThisJobIsRunning" class="btn btn-secondary btn-sm" @click="wbRetryFailed">Retry Failed</button>
-                  <button
-                    v-if="execJobDone && wbIsInsert && !execIsBulkApi && wbSucceededCount > 0 && execRunId && !wbThisJobIsRunning"
-                    class="btn btn-primary btn-sm"
-                    @click="wbOpenUpdateIdsModal"
-                  >Update table with created record IDs</button>
-                  <button v-if="!wbThisJobIsRunning" class="btn btn-ghost btn-sm" style="margin-left:auto;" @click="wbClearExecState">Clear</button>
-                </div>
-                <div v-if="wbShowOnlyFailed && execJobDone && wbDistinctErrors.length > 1" class="failed-rows-header" style="padding:4px 12px;">
-                  <div class="error-filter-bar">
-                    <label class="error-filter-label">Filter by error:</label>
-                    <select v-model="failedErrorFilter" class="error-filter-select">
-                      <option value="">All errors ({{ execFailedTotal.toLocaleString() }})</option>
-                      <option v-for="err in wbDistinctErrors" :key="err" :value="err">{{ err.length > 80 ? err.slice(0, 80) + '…' : err }} ({{ wbErrorCounts.get(err) ?? 0 }})</option>
-                    </select>
+                  <div v-if="wbTotalRows > 0" class="exec-status-filter" style="margin-left:auto;">
+                    <button class="exec-filter-pill" :class="{ active: wbAllFiltersOn }" @click="execFilterSuccess = execFilterError = execFilterPending = execFilterQueued = true; failedErrorFilter = ''">All <span class="exec-filter-count">{{ wbTotalRows.toLocaleString() }}</span></button>
+                    <button class="exec-filter-pill" :class="{ active: execFilterSuccess, 'exec-filter-pill--ok': true }" @click="execFilterSuccess = !execFilterSuccess">✓ OK <span class="exec-filter-count">{{ wbSucceededCount.toLocaleString() }}</span></button>
+                    <button class="exec-filter-pill" :class="{ active: execFilterError, 'exec-filter-pill--error': true }" @click="execFilterError = !execFilterError">✗ Error <span class="exec-filter-count">{{ wbFailedCount.toLocaleString() }}</span></button>
+                    <button class="exec-filter-pill" :class="{ active: execFilterQueued, 'exec-filter-pill--queued': true }" @click="execFilterQueued = !execFilterQueued">◷ Queued <span class="exec-filter-count">{{ wbQueuedCount.toLocaleString() }}</span></button>
                   </div>
+                  <button v-if="wbThisJobIsRunning" class="btn btn-danger btn-sm" @click="wbCancelRun">Cancel</button>
                 </div>
+                <!-- Row 2: error-type filter + Retry (after job) + Clear (after job) -->
+                <div v-if="wbFailedCount > 0 || execJobDone" class="exec-error-bar">
+                  <select v-if="wbDistinctErrors.length >= 1" v-model="failedErrorFilter" class="error-filter-select error-filter-inline">
+                    <option value="">All error types</option>
+                    <option v-for="err in wbDistinctErrors" :key="err" :value="err">{{ err.length > 60 ? err.slice(0, 60) + '…' : err }} ({{ wbErrorCounts.get(err) ?? 0 }})</option>
+                  </select>
+                  <button v-if="execJobDone && !wbThisJobIsRunning && wbFailedCount > 0" class="btn btn-secondary btn-sm" @click="wbRetryFailed">Retry Failed</button>
+                  <button v-if="execJobDone && !wbThisJobIsRunning" class="btn btn-ghost btn-sm" style="margin-left:auto;" @click="wbClearExecState">Clear</button>
+                </div>
+                <!-- DataGrid -->
                 <div style="flex:1;overflow:hidden;">
                   <DataGrid
                     :columns="wbExecVisibleCols"
                     :rows="wbVisibleExecRows"
                     :rowNumbers="wbVisibleExecRowNumbers"
                     :showRowNumbers="true"
-                    :totalRowCount="wbShowOnlyFailed && execJobDone ? wbFilteredFailedTotal : execTotalRows"
-                    :onPageChange="(wbShowOnlyFailed ? wbFilteredFailedTotal : execTotalRows) > EXEC_PAGE ? (off) => wbLoadExecPage(off) : undefined"
-                    :externalOffset="wbShowOnlyFailed ? execFailedPageOffset : execPageOffset"
+                    :totalRowCount="wbEffectiveTotalCount"
+                    :onPageChange="wbEffectiveTotalCount > EXEC_PAGE ? (off) => wbLoadExecPage(off) : undefined"
+                    :externalOffset="execPageOffset"
                     :pageSize="EXEC_PAGE"
-                    :onSortChange="!wbShowOnlyFailed && execTotalRows > EXEC_PAGE ? wbHandleExecSortChange : wbShowOnlyFailed && wbFilteredFailedTotal > EXEC_PAGE ? wbHandleFailedSortChange : undefined"
-                    :externalSortCriteria="!wbShowOnlyFailed && execTotalRows > EXEC_PAGE ? execSort : wbShowOnlyFailed && wbFilteredFailedTotal > EXEC_PAGE ? execFailedSort : undefined"
-                    :onCopySubsetRows="wbFailedCount > 0 && !wbThisJobIsRunning ? wbCopyFailedCsv : undefined"
-                    copySubsetRowsLabel="Copy Failed CSV"
-                    :onExportCsv="wbFailedCount > 0 && !wbThisJobIsRunning ? wbExportFailed : undefined"
-                    exportCsvLabel="Export Failed CSV"
                     :onCopyAllRows="wbCopyAllExecRows"
                   />
                 </div>
@@ -770,6 +737,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onActivated, onUnmounted, nextTick, toRaw } from 'vue'
+import { useUiPrefs } from '../composables/useUiPrefs'
 import { useConnectionStore } from '../stores/connection'
 import { useJobStore } from '../stores/job'
 import ObjectPicker from '../components/ObjectPicker.vue'
@@ -788,6 +756,7 @@ import type {
 
 const conn = useConnectionStore()
 const jobs = useJobStore()
+const uiPrefs = useUiPrefs()
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 const sfRefreshing = ref(false)
@@ -832,7 +801,12 @@ interface ListEntry {
   id: number
   type: 'extract' | 'writeback'
   name: string
+  /** One-line detail shown below the name when uiPrefs.showJobDetails is on. */
   subtitle: string
+  /** Raw SF object name (or 'SOQL') used for sorting. */
+  sortObject: string
+  /** Raw job name as entered by the user, used for sorting. */
+  sortName: string
 }
 
 const filteredJobs = computed((): ListEntry[] => {
@@ -842,24 +816,33 @@ const filteredJobs = computed((): ListEntry[] => {
     .map((j): ListEntry => ({
       id: j.id,
       type: 'extract',
-      name: j.name,
-      subtitle: j.soqlQuery ? '(SOQL)' : `${j.sfObject} → ${j.destTable} · ${j.writeMode}`
+      name: j.soqlQuery
+        ? (j.name ? `SOQL: ${j.name}` : 'SOQL')
+        : (j.name ? `${j.sfObject}: ${j.name}` : j.sfObject),
+      subtitle: j.soqlQuery
+        ? `SOQL → ${j.destTable || 'sf_results'}`
+        : `${j.sfObject} → ${j.destTable || j.sfObject}`,
+      sortObject: j.soqlQuery ? 'SOQL' : j.sfObject,
+      sortName: j.name
     }))
   const wbEntries: ListEntry[] = wbJobs.value
     .filter((j) => !q || j.name.toLowerCase().includes(q) || j.sfObject.toLowerCase().includes(q) || j.sqlQuery.toLowerCase().includes(q))
     .map((j): ListEntry => ({
       id: j.id,
       type: 'writeback',
-      name: j.name,
-      subtitle: `${j.operation} → ${j.sfObject}`
+      name: j.name ? `${j.sfObject}: ${j.name}` : j.sfObject,
+      subtitle: `${j.sfObject}  ${j.operation}`,
+      sortObject: j.sfObject,
+      sortName: j.name
     }))
   return [...exEntries, ...wbEntries].sort((a, b) => {
-    const cmp = a.name.localeCompare(b.name)
-    if (cmp !== 0) return cmp
-    // equal names: extract first, writeback last
-    if (a.type === 'extract' && b.type === 'writeback') return -1
-    if (a.type === 'writeback' && b.type === 'extract') return 1
-    return 0
+    // 1) SF object name
+    const objCmp = a.sortObject.localeCompare(b.sortObject, undefined, { sensitivity: 'base' })
+    if (objCmp !== 0) return objCmp
+    // 2) Extract before writeback
+    if (a.type !== b.type) return a.type === 'extract' ? -1 : 1
+    // 3) Job name (as entered by the user)
+    return a.sortName.localeCompare(b.sortName, undefined, { sensitivity: 'base' })
   })
 })
 
@@ -1070,13 +1053,23 @@ async function exOnObjectChange(name: string, resetFields = true): Promise<void>
 
 async function exSave(andExecute: boolean): Promise<void> {
   exSaveError.value = ''
-  if (!exEditForm.value.name.trim()) { exSaveError.value = 'Please enter a job name.'; return }
   const candidateName = exEditForm.value.name.trim()
-  const duplicate = exJobs.value.find((j) => j.name.toLowerCase() === candidateName.toLowerCase() && j.id !== exEditForm.value.id)
-  if (duplicate) { exSaveError.value = `A job named "${duplicate.name}" already exists.`; return }
   exSaving.value = true
   try {
     const isSoql = exEditForm.value.mode === 'soql'
+    const candidatePrefix = isSoql ? 'soql' : exEditForm.value.sfObject.toLowerCase()
+    const duplicate = exJobs.value.find((j) => {
+      if (j.id === exEditForm.value.id) return false
+      const jPrefix = j.soqlQuery ? 'soql' : j.sfObject.toLowerCase()
+      return jPrefix === candidatePrefix && j.name.toLowerCase() === candidateName.toLowerCase()
+    })
+    if (duplicate) {
+      exSaveError.value = candidateName
+        ? `A job named "${candidateName}" already exists for ${candidatePrefix === 'soql' ? 'SOQL' : candidatePrefix}.`
+        : `An unnamed job already exists for ${candidatePrefix === 'soql' ? 'SOQL' : candidatePrefix}.`
+      exSaving.value = false
+      return
+    }
     if (isSoql && !exEditForm.value.soqlQuery.trim()) { exSaveError.value = 'Please enter a SOQL query.'; exSaving.value = false; return }
     const validColumns = isSoql ? null : new Set([...exEditForm.value.fields, ...exEditForm.value.customExpressions])
     const cleanedIndexes = toRaw(exEditForm.value.additionalIndexes).filter((col) => validColumns === null || validColumns.has(col))
@@ -1323,10 +1316,8 @@ const execSql = ref('')
 const execOperation = ref('')
 const execColumns = ref<string[]>([])
 const execTotalRows = ref(0)
-const execSourceRowCount = ref<number | null>(null)
 const execSucceeded = ref(0)
 const execFailed = ref(0)
-const execInFlight = ref(0)
 const execRunId = ref<string | null>(null)
 const execJobDone = ref(false)
 const execIsBulkApi = ref(false)
@@ -1337,34 +1328,121 @@ const execBulkJobState = ref('')
 const execError = ref<string | null>(null)
 const execWarn = ref<string | null>(null)
 const execPageOffset = ref(0)
+// execPageRows: rows from the exec table. Layout: [rowid, ...dataValues, __sf_id, __status, __error]
+// rowid is at index 0, __sf_id at row.length-3, __status at row.length-2, __error at row.length-1.
 const execPageRows = ref<unknown[][]>([])
-const execPageStatuses = ref<Map<number, { status: 'success' | 'error' | 'processing'; message?: string }>>(new Map())
-const execPageIds = ref<Map<number, string>>(new Map())
 const execFailedTotal = ref(0)
 const execFailedDistinctErrors = ref<{ message: string; count: number }[]>([])
-interface ExecFailedRow { index: number; message: string; row: unknown[] }
-const execFailedPanelRows = ref<ExecFailedRow[]>([])
-const execFailedRangeMap = ref<Map<number, ExecFailedRow>>(new Map())
-const execFailedPageOffset = ref(0)
 const failedErrorFilter = ref('')
-const execSort = ref<SortCriterion[]>([])
-const execFailedSort = ref<SortCriterion[]>([])
 const execFilterSuccess = ref(true)
 const execFilterError = ref(true)
 const execFilterPending = ref(true)
+const execFilterQueued = ref(true)
+const execLoadingPhase = ref(false)
+const execInFlight = ref(0)
 
-const wbAllFiltersOn = computed(() => execFilterSuccess.value && execFilterError.value && execFilterPending.value)
-const wbShowOnlyFailed = computed(() => !execFilterSuccess.value && execFilterError.value && !execFilterPending.value)
+// Polling for REST writeback exec state (replaces rowStatuses IPC events)
+let execPollTimer: ReturnType<typeof setInterval> | null = null
+let execPollLastDone = -1
+let rpsLastDone = 0
+let rpsLastTime = 0
+const execRowsPerSec = ref(0)
+
+function startExecPoll(runId: string): void {
+  stopExecPoll()
+  execPollLastDone = -1
+  rpsLastDone = 0
+  rpsLastTime = 0
+  execRowsPerSec.value = 0
+  execLoadingPhase.value = true
+  execPollTimer = setInterval(async () => {
+    const rid = execRunId.value
+    if (!rid || execJobDone.value) { stopExecPoll(); return }
+    try {
+      const counts = await window.api.wbExecCounts(rid)
+      if (execRunId.value !== rid) return
+      const wasLoading = execLoadingPhase.value
+      execLoadingPhase.value = counts.loadingPhase
+      execInFlight.value = counts.inFlight
+      execTotalRows.value = counts.total
+      execSucceeded.value = counts.succeeded
+      execFailed.value = counts.failed
+      const doneNow = counts.succeeded + counts.failed
+      // Compute rows/sec (EMA, alpha=0.25) once out of loading phase
+      if (!counts.loadingPhase) {
+        const now = Date.now()
+        if (rpsLastTime > 0) {
+          const elapsed = now - rpsLastTime
+          if (elapsed > 0) {
+            const instant = ((doneNow - rpsLastDone) / elapsed) * 1000
+            execRowsPerSec.value = Math.round(
+              execRowsPerSec.value === 0 ? instant : 0.25 * instant + 0.75 * execRowsPerSec.value
+            )
+          }
+        }
+        rpsLastDone = doneNow
+        rpsLastTime = now
+      }
+      // Refresh page when loading phase ends or when progress changes
+      if (wasLoading && !counts.loadingPhase) {
+        execPollLastDone = doneNow
+        const de = await window.api.wbExecDistinctErrors(rid)
+        if (execRunId.value !== rid) return
+        execFailedDistinctErrors.value = de
+        await wbRefreshExecPage()
+      } else if (doneNow !== execPollLastDone) {
+        execPollLastDone = doneNow
+        const de = await window.api.wbExecDistinctErrors(rid)
+        if (execRunId.value !== rid) return
+        execFailedDistinctErrors.value = de
+        await wbRefreshExecPage()
+      }
+    } catch { /* ignore during shutdown or job switch */ }
+  }, 333)
+}
+function stopExecPoll(): void {
+  if (execPollTimer !== null) { clearInterval(execPollTimer); execPollTimer = null }
+}
+
+const wbAllFiltersOn = computed(() => execFilterSuccess.value && execFilterError.value && execFilterQueued.value)
+const wbShowOnlyFailed = computed(() => !execFilterSuccess.value && execFilterError.value && !execFilterQueued.value)
 const wbTotalRows = computed(() => execTotalRows.value)
 const wbSucceededCount = computed(() => execSucceeded.value)
 const wbFailedCount = computed(() => execFailed.value)
-const wbPendingCount = computed(() => Math.max(0, execTotalRows.value - execSucceeded.value - execFailed.value))
+/** Rows not yet processed (queued = total - succeeded - failed). */
+const wbQueuedCount = computed(() => Math.max(0, execTotalRows.value - execSucceeded.value - execFailed.value))
 const wbIsInsert = computed(() => execOperation.value === 'insert')
+/** Mirrors the server-side errorPrefix logic for client-side grouping. */
+function clientErrorPrefix(msg: string): string {
+  const first = msg.indexOf(':')
+  if (first < 0) return msg
+  const second = msg.indexOf(':', first + 1)
+  return (second >= 0 ? msg.slice(0, second) : msg.slice(0, first)).trim()
+}
+
+// execFailedDistinctErrors is updated from the in-memory distinctErrorCounts map via polling
+// (wbExecDistinctErrors IPC call) and on job completion.
 const wbDistinctErrors = computed(() => execFailedDistinctErrors.value.map((e) => e.message).slice(0, 100))
 const wbErrorCounts = computed(() => new Map(execFailedDistinctErrors.value.map((e) => [e.message, e.count])))
 const wbFilteredFailedTotal = computed(() => {
   if (!failedErrorFilter.value) return execFailedTotal.value
   return execFailedDistinctErrors.value.find((e) => e.message === failedErrorFilter.value)?.count ?? 0
+})
+/**
+ * The total row count to display and use for pagination, accounting for all active filters.
+ * - Prefix filter active → count for that prefix from distinctErrors
+ * - Status pills partially active → sum of counts for the active statuses
+ * - All pills on (no filter) → full total
+ */
+const wbEffectiveTotalCount = computed(() => {
+  if (failedErrorFilter.value) return wbFilteredFailedTotal.value
+  if (wbAllFiltersOn.value) return execTotalRows.value
+  if (wbShowOnlyFailed.value) return execFailed.value
+  let count = 0
+  if (execFilterSuccess.value) count += execSucceeded.value
+  if (execFilterError.value) count += execFailed.value
+  if (execFilterQueued.value) count += wbQueuedCount.value
+  return count
 })
 const wbExecDisplayColumns = computed((): string[] => {
   const fm = wbSelectedJobData.value?.fieldMap
@@ -1375,58 +1453,32 @@ const wbExecDisplayColumns = computed((): string[] => {
 })
 const wbExecVisibleCols = computed(() => wbIsInsert.value ? ['_Id', '_Status', ...wbExecDisplayColumns.value] : ['_Status', ...wbExecDisplayColumns.value])
 const wbExecRowsAndNumbers = computed((): { rows: unknown[][]; rowNumbers: number[] } => {
-  if (wbShowOnlyFailed.value && execJobDone.value) {
-    return {
-      rows: execFailedPanelRows.value.map((fr) => wbIsInsert.value ? ['', `Fail: ${fr.message}`, ...fr.row] : [`Fail: ${fr.message}`, ...fr.row]),
-      rowNumbers: execFailedPanelRows.value.map((_, i) => execFailedPageOffset.value + i + 1)
-    }
+  // Exec-table row layout from wbExecGetPage:
+  // [rowid, ...dataValues, __sf_id, __status, __error]
+  // rowid  → index 0 (= 1-based source row number)
+  // __sf_id → row.length - 3
+  // __status → row.length - 2
+  // __error → row.length - 1
+  // data values → slice(1, row.length - 3)
+  const rawRows = execPageRows.value
+  const isInsert = wbIsInsert.value
+  const displayRows: unknown[][] = []
+  const rowNums: number[] = []
+  for (const row of rawRows) {
+    const rowid = Number(row[0])
+    const sfIdRaw = row[row.length - 3] as string | null
+    const status = row[row.length - 2] as string
+    const error = row[row.length - 1] as string | null
+    const dataVals = (row as unknown[]).slice(1, row.length - 3)
+    const statusDisplay = status === 'success' ? 'OK'
+      : status === 'error' ? `Fail: ${error ?? ''}`
+      : status  // 'queued'
+    // Blank out the 18-zero placeholder that marks a row as not yet written to Salesforce
+    const sfId = (sfIdRaw && sfIdRaw !== '000000000000000000') ? sfIdRaw : ''
+    displayRows.push(isInsert ? [sfId, statusDisplay, ...dataVals] : [statusDisplay, ...dataVals])
+    rowNums.push(rowid)
   }
-  const allRows: unknown[][] = []
-  const allNums: number[] = []
-  execPageRows.value.forEach((r, pageIdx) => {
-    const absIdx = execPageOffset.value + pageIdx
-    let statusCell: string
-    let idCell = execPageIds.value.get(absIdx) ?? ''
-    if (execJobDone.value) {
-      const failed = execFailedRangeMap.value.get(absIdx)
-      if (failed) {
-        statusCell = `Fail: ${failed.message}`
-        idCell = ''
-      } else {
-        const st = execPageStatuses.value.get(absIdx)
-        if (st?.status === 'success') {
-          statusCell = 'OK'
-        } else if (!execError.value && absIdx < execTotalRows.value) {
-          statusCell = 'OK'
-        } else {
-          statusCell = '—'
-        }
-      }
-    } else {
-      const st = execPageStatuses.value.get(absIdx)
-      if (!st) {
-        statusCell = 'queued'
-      } else if (st.status === 'success') {
-        statusCell = 'OK'
-      } else if (st.status === 'processing') {
-        statusCell = 'processing'
-      } else {
-        statusCell = `Fail: ${st.message ?? ''}`
-      }
-    }
-    allRows.push(wbIsInsert.value ? [idCell, statusCell, ...(r as unknown[])] : [statusCell, ...(r as unknown[])])
-    allNums.push(absIdx + 1)
-  })
-  if (wbAllFiltersOn.value) return { rows: allRows, rowNumbers: allNums }
-  const statusIdx = wbIsInsert.value ? 1 : 0
-  const filteredRows: unknown[][] = []
-  const filteredNums: number[] = []
-  allRows.forEach((row, i) => {
-    const cell = String(row[statusIdx])
-    const include = cell === 'OK' ? execFilterSuccess.value : cell.startsWith('Fail') ? execFilterError.value : execFilterPending.value
-    if (include) { filteredRows.push(row); filteredNums.push(allNums[i]) }
-  })
-  return { rows: filteredRows, rowNumbers: filteredNums }
+  return { rows: displayRows, rowNumbers: rowNums }
 })
 const wbVisibleExecRows = computed(() => wbExecRowsAndNumbers.value.rows)
 const wbVisibleExecRowNumbers = computed(() => wbExecRowsAndNumbers.value.rowNumbers)
@@ -1435,13 +1487,11 @@ const wbVisibleExecRowNumbers = computed(() => wbExecRowsAndNumbers.value.rowNum
 const MAX_EXEC_CACHE = 3
 interface SavedExecState {
   cachedAt: number; sql: string; operation: string; columns: string[]; totalRows: number
-  sourceRowCount: number | null; succeeded: number; failed: number; runId: string | null
+  succeeded: number; failed: number; runId: string | null
   jobDone: boolean; isBulkApi: boolean; error: string | null; warn: string | null
-  pageRows: unknown[][]; pageStatuses: Map<number, { status: 'success' | 'error' | 'processing'; message?: string }>
-  pageIds: Map<number, string>; failedTotal: number
+  pageOffset: number; failedTotal: number
   distinctErrors: { message: string; count: number }[]
-  filterSuccess: boolean; filterError: boolean; filterPending: boolean
-  execSort: SortCriterion[]; execFailedSort: SortCriterion[]
+  filterSuccess: boolean; filterError: boolean; filterPending: boolean; filterQueued: boolean
 }
 const execStateCache = ref<Map<number, SavedExecState>>(new Map())
 
@@ -1450,15 +1500,13 @@ function wbCaptureExecState(jobId: number, force = false): void {
   execStateCache.value.set(jobId, {
     cachedAt: Date.now(), sql: execSql.value, operation: execOperation.value,
     columns: execColumns.value.slice(), totalRows: execTotalRows.value,
-    sourceRowCount: execSourceRowCount.value, succeeded: execSucceeded.value,
-    failed: execFailed.value, runId: execRunId.value, jobDone: execJobDone.value,
+    succeeded: execSucceeded.value, failed: execFailed.value,
+    runId: execRunId.value, jobDone: execJobDone.value,
     isBulkApi: execIsBulkApi.value, error: execError.value, warn: execWarn.value,
-    pageRows: execPageRows.value.slice(), pageStatuses: new Map(execPageStatuses.value),
-    pageIds: new Map(execPageIds.value), failedTotal: execFailedTotal.value,
+    pageOffset: execPageOffset.value, failedTotal: execFailedTotal.value,
     distinctErrors: execFailedDistinctErrors.value.slice(),
     filterSuccess: execFilterSuccess.value, filterError: execFilterError.value,
-    filterPending: execFilterPending.value, execSort: execSort.value.slice(),
-    execFailedSort: execFailedSort.value.slice()
+    filterPending: execFilterPending.value, filterQueued: execFilterQueued.value
   })
 }
 
@@ -1467,25 +1515,22 @@ async function wbRestoreExecState(jobId: number): Promise<void> {
   if (!s) { wbClearExecState(); return }
   s.cachedAt = Date.now()
   execSql.value = s.sql; execOperation.value = s.operation; execColumns.value = s.columns
-  execTotalRows.value = s.totalRows; execSourceRowCount.value = s.sourceRowCount
-  execSucceeded.value = s.succeeded; execFailed.value = s.failed; execRunId.value = s.runId
+  execTotalRows.value = s.totalRows; execSucceeded.value = s.succeeded
+  execFailed.value = s.failed; execRunId.value = s.runId
   execJobDone.value = s.jobDone; execIsBulkApi.value = s.isBulkApi
-  execError.value = s.error; execWarn.value = s.warn; execPageRows.value = s.pageRows
-  execPageStatuses.value = s.pageStatuses; execPageIds.value = s.pageIds
+  execError.value = s.error; execWarn.value = s.warn
+  execPageOffset.value = 0; failedErrorFilter.value = ''
   execFailedTotal.value = s.failedTotal; execFailedDistinctErrors.value = s.distinctErrors
-  execFilterSuccess.value = s.filterSuccess; execFilterError.value = s.filterError; execFilterPending.value = s.filterPending
-  execInFlight.value = 0; execBulkPhase.value = ''; execBulkUploaded.value = 0
+  execFilterSuccess.value = s.filterSuccess; execFilterError.value = s.filterError
+  execFilterPending.value = s.filterPending; execFilterQueued.value = s.filterQueued ?? true
+  execBulkPhase.value = ''; execBulkUploaded.value = 0
   execBulkProcessed.value = 0; execBulkJobState.value = ''
-  execPageOffset.value = 0; execFailedPageOffset.value = 0; failedErrorFilter.value = ''
-  execFailedPanelRows.value = []; execFailedRangeMap.value = new Map()
-  execSort.value = s.execSort ?? []; execFailedSort.value = s.execFailedSort ?? []
-  if (s.jobDone && s.failedTotal > 0 && s.runId) {
-    const [panelRows, rangeEntries] = await Promise.all([
-      window.api.wbGetFailedRowsPage(s.runId, 0, EXEC_PAGE),
-      window.api.wbGetFailedRowsInRange(s.runId, 0, EXEC_PAGE)
-    ])
-    execFailedPanelRows.value = panelRows
-    execFailedRangeMap.value = new Map(Object.entries(rangeEntries).map(([k, v]) => [Number(k), { index: Number(k), ...v }]))
+  execPageRows.value = []
+  // Restore the page data from the exec table if a run exists
+  if (s.runId && !s.isBulkApi) {
+    await wbLoadExecPage(0)
+    // If job was still running, start polling to continue receiving updates
+    if (!s.jobDone) startExecPoll(s.runId)
   }
 }
 
@@ -1500,25 +1545,32 @@ function wbEvictOldExecStates(keepJobId: number): void {
 }
 
 function wbClearExecState(): void {
+  stopExecPoll()
   execSql.value = ''; execOperation.value = ''; execColumns.value = []; execTotalRows.value = 0
-  execSourceRowCount.value = null; execSucceeded.value = 0; execFailed.value = 0; execInFlight.value = 0
+  execSucceeded.value = 0; execFailed.value = 0
   execRunId.value = null; execJobDone.value = false; execIsBulkApi.value = false; execBulkPhase.value = ''
   execBulkUploaded.value = 0; execBulkProcessed.value = 0; execBulkJobState.value = ''
   execError.value = null; execWarn.value = null; execPageOffset.value = 0; execPageRows.value = []
-  execPageStatuses.value = new Map(); execPageIds.value = new Map(); execFailedTotal.value = 0
-  execFailedDistinctErrors.value = []; execFailedPanelRows.value = []; execFailedRangeMap.value = new Map()
-  execFailedPageOffset.value = 0; failedErrorFilter.value = ''
-  execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
-  execSort.value = []; execFailedSort.value = []
+  execFailedTotal.value = 0; execFailedDistinctErrors.value = []; failedErrorFilter.value = ''
+  execFilterSuccess.value = execFilterError.value = execFilterPending.value = execFilterQueued.value = true
+  execLoadingPhase.value = false
+  execInFlight.value = 0
+  execRowsPerSec.value = 0
 }
 
-watch(failedErrorFilter, async () => {
-  execFailedPageOffset.value = 0
-  if (execRunId.value && execJobDone.value) {
-    execFailedPanelRows.value = await window.api.wbGetFailedRowsPage(execRunId.value, 0, EXEC_PAGE, failedErrorFilter.value || undefined, execFailedSort.value.length ? execFailedSort.value : undefined)
+watch(failedErrorFilter, async (newVal) => {
+  if (newVal) {
+    execFilterSuccess.value = false
+    execFilterQueued.value = false
+  } else {
+    execFilterSuccess.value = true
+    execFilterQueued.value = true
   }
+  await wbLoadExecPage(0)
 })
-watch([execFilterSuccess, execFilterError, execFilterPending], () => { execPageOffset.value = 0; execFailedPageOffset.value = 0 })
+watch([execFilterSuccess, execFilterError, execFilterQueued], () => {
+  wbLoadExecPage(0)
+})
 
 async function wbLoadJobs(): Promise<void> {
   wbJobs.value = await window.api.listWritebackJobs()
@@ -1565,7 +1617,7 @@ async function wbRunPreview(): Promise<void> {
 
 async function wbRunRowCount(): Promise<void> {
   wbRowCountError.value = ''; wbRowCountResult.value = null; wbRowCountLoading.value = true
-  try { wbRowCountResult.value = await window.api.wbRowCount(wbEditForm.value.sqlQuery) }
+  try { wbRowCountResult.value = await window.api.executeQuery(`SELECT COUNT(*) FROM (${wbEditForm.value.sqlQuery})`).then((r) => r.rows[0]?.[0] as number ?? 0) }
   catch (e) { wbRowCountError.value = e instanceof Error ? e.message : String(e) }
   finally { wbRowCountLoading.value = false }
 }
@@ -1598,11 +1650,23 @@ async function wbSave(andExecute: boolean): Promise<void> {
     const badMappings = wbEditForm.value.fieldMap.filter((m) => !m.excluded && m.sfField && m.sfField !== 'Id')
     if (badMappings.length > 0) { wbSaveError.value = `Delete operations only send the Id field. Please uncheck: ${badMappings.map((m) => m.sfField).join(', ')}.`; return }
   }
+  const wbCandidateName = wbEditForm.value.name.trim()
+  const wbCandidateObj = wbEditForm.value.sfObject.toLowerCase()
+  const wbDuplicate = wbJobs.value.find((j) => {
+    if (j.id === wbEditForm.value.id) return false
+    return j.sfObject.toLowerCase() === wbCandidateObj && j.name.toLowerCase() === wbCandidateName.toLowerCase()
+  })
+  if (wbDuplicate) {
+    wbSaveError.value = wbCandidateName
+      ? `A job named "${wbCandidateName}" already exists for ${wbEditForm.value.sfObject}.`
+      : `An unnamed job already exists for ${wbEditForm.value.sfObject}.`
+    return
+  }
   wbSaving.value = true
   try {
     const job = await window.api.saveWritebackJob({
       ...(wbEditForm.value.id ? { id: wbEditForm.value.id } : {}),
-      name: wbEditForm.value.name || wbEditForm.value.sfObject,
+      name: wbCandidateName,
       sqlQuery: wbEditForm.value.sqlQuery, sfObject: wbEditForm.value.sfObject,
       operation: wbEditForm.value.operation as WritebackJob['operation'],
       fieldMap: toRaw(wbEditForm.value.fieldMap).map((m) => ({ ...toRaw(m) })),
@@ -1645,24 +1709,21 @@ async function wbStartJobNow(id: number): Promise<void> {
   execStateCache.value.delete(id)
   if (wbSelectedJobId.value === id) {
     wbDetailTab.value = 'execution'
-    const sql = j.sqlQuery
-    execSql.value = sql; execOperation.value = j.operation; execIsBulkApi.value = j.useBulkApi
+    execSql.value = j.sqlQuery; execOperation.value = j.operation; execIsBulkApi.value = j.useBulkApi
     execBulkPhase.value = ''; execBulkUploaded.value = 0; execBulkProcessed.value = 0; execBulkJobState.value = ''
-    execError.value = null; execWarn.value = null; execTotalRows.value = 0; execSourceRowCount.value = null
-    execSucceeded.value = 0; execFailed.value = 0; execInFlight.value = 0; execPageOffset.value = 0
-    execPageRows.value = []; execPageStatuses.value = new Map(); execPageIds.value = new Map()
-    execFailedTotal.value = 0; execFailedDistinctErrors.value = []; execFailedPanelRows.value = []
-    execFailedRangeMap.value = new Map(); execFailedPageOffset.value = 0; execJobDone.value = false
-    execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
-    execSort.value = []; execFailedSort.value = []
-    window.api.wbRowCount(sql).then((count) => { if (execSql.value === sql) execSourceRowCount.value = count }).catch(() => {})
-    if (j.useBulkApi) { execColumns.value = [] } else {
-      const firstPage = await window.api.wbPage(sql, 0, EXEC_PAGE)
-      execColumns.value = firstPage.columns; execPageRows.value = firstPage.rows
-    }
+    execError.value = null; execWarn.value = null; execTotalRows.value = 0
+    execSucceeded.value = 0; execFailed.value = 0; execPageOffset.value = 0
+    execPageRows.value = []; execColumns.value = []; execFailedTotal.value = 0
+    execFailedDistinctErrors.value = []; execJobDone.value = false
+    execFilterSuccess.value = execFilterError.value = execFilterPending.value = execFilterQueued.value = true
+    failedErrorFilter.value = ''
   }
   const runId = await window.api.startWriteback(id)
-  if (wbSelectedJobId.value === id) execRunId.value = runId
+  if (wbSelectedJobId.value === id) {
+    execRunId.value = runId
+    // For REST jobs start polling; Bulk API uses job:progress events
+    if (!j.useBulkApi) startExecPoll(runId)
+  }
   wbActiveRuns.value.set(id, runId)
   jobs.startJob(runId, 'writeback', id)
   wbStartRunMonitor(id, runId)
@@ -1670,68 +1731,58 @@ async function wbStartJobNow(id: number): Promise<void> {
 
 function wbStartRunMonitor(jobId: number, runId: string): void {
   const isSelected = () => wbSelectedJobId.value === jobId
+  // Progress events are only used for Bulk API (REST uses polling instead)
   const offProgress = window.api.onJobProgress((e) => {
-    if (e.runId !== runId) return
-    if (e.phase) {
-      if (isSelected()) {
-        execBulkPhase.value = e.phase
-        if (e.bulkUploaded !== undefined) execBulkUploaded.value = e.bulkUploaded
-        if (e.phase === 'processing') {
-          if (e.total !== undefined) execBulkProcessed.value = e.total
-          if (e.succeeded !== undefined) execSucceeded.value = e.succeeded
-          if (e.failed !== undefined) execFailed.value = e.failed
-          if (e.jobState) execBulkJobState.value = e.jobState
-        }
-      }
-    } else {
-      if (isSelected()) {
+    if (e.runId !== runId || !e.phase) return
+    if (isSelected()) {
+      execBulkPhase.value = e.phase
+      if (e.bulkUploaded !== undefined) execBulkUploaded.value = e.bulkUploaded
+      if (e.phase === 'processing') {
+        if (e.total !== undefined) execBulkProcessed.value = e.total
         if (e.succeeded !== undefined) execSucceeded.value = e.succeeded
         if (e.failed !== undefined) execFailed.value = e.failed
-        if (e.inFlight !== undefined) execInFlight.value = e.inFlight
-        if (e.total !== undefined && e.total > execTotalRows.value) execTotalRows.value = e.total
-        if (e.rowStatuses) {
-          const pageEnd = execPageOffset.value + EXEC_PAGE
-          let statusChanged = false; let idChanged = false
-          for (const rs of e.rowStatuses) {
-            if (rs.index >= execPageOffset.value && rs.index < pageEnd) {
-              execPageStatuses.value.set(rs.index, { status: rs.status, message: rs.message })
-              statusChanged = true
-              if (rs.id) { execPageIds.value.set(rs.index, rs.id); idChanged = true }
-            }
-          }
-          if (statusChanged) execPageStatuses.value = new Map(execPageStatuses.value)
-          if (idChanged) execPageIds.value = new Map(execPageIds.value)
-        }
+        if (e.jobState) execBulkJobState.value = e.jobState
       }
     }
-    if (isSelected()) wbCaptureExecState(jobId, true)
   })
   const offComplete = window.api.onJobComplete(async (e) => {
     if (e.runId !== runId) return
     offProgress(); offComplete()
+    stopExecPoll()
     wbActiveRuns.value.delete(jobId)
     if (isSelected()) {
-      execInFlight.value = 0; execBulkPhase.value = ''; execJobDone.value = true
+      execBulkPhase.value = ''; execJobDone.value = true; execLoadingPhase.value = false
       if (e.status === 'cancelled') { execWarn.value = 'Job was cancelled by the user.' }
       else if (e.status === 'error') { execError.value = e.errorMsg ?? 'The job failed with an unknown error.' }
       else {
         execError.value = null; execWarn.value = null
+      }
+      if (e.columns && e.columns.length > 0) execColumns.value = e.columns
+      // Fetch final counts + errors + page from exec table
+      if (!execIsBulkApi.value) {
+        try {
+          const [counts, de] = await Promise.all([
+            window.api.wbExecCounts(runId),
+            window.api.wbExecDistinctErrors(runId)
+          ])
+          execTotalRows.value = counts.total
+          execSucceeded.value = counts.succeeded
+          execFailed.value = counts.failed
+          execFailedTotal.value = counts.failed
+          execFailedDistinctErrors.value = de
+          if (counts.total === 0 && e.status !== 'error' && e.status !== 'cancelled') {
+            execWarn.value = 'The job completed but 0 rows were processed. Check that your SQL query returns rows and that at least one field mapping is active.'
+          }
+          await wbLoadExecPage(execPageOffset.value)
+        } catch { /* ignore */ }
+      } else {
+        // Bulk API: set counts from job result
         if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined) {
           execTotalRows.value = e.rowsSucceeded + e.rowsFailed
           execSucceeded.value = e.rowsSucceeded; execFailed.value = e.rowsFailed
+          execFailedTotal.value = e.rowsFailed
           if (e.rowsSucceeded + e.rowsFailed === 0) execWarn.value = 'The job completed but 0 rows were processed. Check that your SQL query returns rows and that at least one field mapping is active.'
         }
-      }
-      if (e.columns && e.columns.length > 0) execColumns.value = e.columns
-      if (e.rowsFailed && e.rowsFailed > 0) {
-        const [meta, panelRows, rangeEntries] = await Promise.all([
-          window.api.wbGetFailedRowsMeta(runId),
-          window.api.wbGetFailedRowsPage(runId, 0, EXEC_PAGE),
-          window.api.wbGetFailedRowsInRange(runId, execPageOffset.value, execPageOffset.value + EXEC_PAGE)
-        ])
-        execFailedTotal.value = meta.totalCount; execFailedDistinctErrors.value = meta.distinctErrors
-        execFailedPanelRows.value = panelRows
-        execFailedRangeMap.value = new Map(Object.entries(rangeEntries).map(([k, v]) => [Number(k), { index: Number(k), ...v }]))
       }
       wbCaptureExecState(jobId)
     } else {
@@ -1742,10 +1793,9 @@ function wbStartRunMonitor(jobId: number, runId: string): void {
         if (e.status === 'cancelled') cached.warn = 'Job was cancelled by the user.'
         else if (e.status !== 'error') cached.warn = null
         if (e.rowsSucceeded !== undefined) cached.succeeded = e.rowsSucceeded
-        if (e.rowsFailed !== undefined) cached.failed = e.rowsFailed
+        if (e.rowsFailed !== undefined) { cached.failed = e.rowsFailed; cached.failedTotal = e.rowsFailed }
         if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined) cached.totalRows = e.rowsSucceeded + e.rowsFailed
         if (e.columns && e.columns.length > 0) cached.columns = e.columns
-        if (e.rowsFailed && e.rowsFailed > 0) { window.api.wbGetFailedRowsMeta(runId).then((meta) => { cached.failedTotal = meta.totalCount; cached.distinctErrors = meta.distinctErrors }) }
         cached.cachedAt = Date.now()
       }
     }
@@ -1768,83 +1818,85 @@ async function wbCancelRun(): Promise<void> {
   if (runId) { await window.api.cancelJob(runId); jobs.removeJob(runId) }
 }
 
+/** Build the exec-page filter from the current pill + prefix filter state. */
+function buildExecFilter(): { statuses?: ('success' | 'error' | 'queued')[]; errorPrefix?: string } | undefined {
+  const prefixFilter = failedErrorFilter.value || undefined
+
+  const statuses: ('success' | 'error' | 'queued')[] = []
+  if (execFilterSuccess.value) { statuses.push('success') }
+  if (execFilterError.value) { statuses.push('error') }
+  if (execFilterQueued.value) { statuses.push('queued') }
+
+  const allOn = statuses.length === 3
+
+  // When prefix filter is active it always restricts to errors only
+  if (prefixFilter) {
+    return { statuses: ['error'], errorPrefix: prefixFilter }
+  }
+
+  // All pills on, no prefix → no filter needed (show everything)
+  if (allOn) { return undefined }
+
+  return { statuses }
+}
+
 async function wbLoadExecPage(offset: number): Promise<void> {
-  execPageOffset.value = offset; execPageStatuses.value = new Map(); execPageIds.value = new Map()
-  if (wbShowOnlyFailed.value) {
-    execFailedPageOffset.value = offset
-    if (execRunId.value) execFailedPanelRows.value = await window.api.wbGetFailedRowsPage(execRunId.value, offset, EXEC_PAGE, failedErrorFilter.value || undefined, execFailedSort.value.length ? execFailedSort.value : undefined)
-    return
-  }
-  const sortOrderBy = wbExecSortToOrderBy()
-  const { rows } = await window.api.wbPage(execSql.value, offset, EXEC_PAGE, sortOrderBy)
-  execPageRows.value = rows
-  if (execJobDone.value && execRunId.value) {
-    const [rangeEntries, ids] = await Promise.all([
-      window.api.wbGetFailedRowsInRange(execRunId.value, offset, offset + EXEC_PAGE),
-      wbIsInsert.value ? window.api.wbGetPageIds(execRunId.value, offset, EXEC_PAGE) : Promise.resolve({} as Record<number, string>)
-    ])
-    execFailedRangeMap.value = new Map(Object.entries(rangeEntries).map(([k, v]) => [Number(k), { index: Number(k), ...v }]))
-    if (wbIsInsert.value) execPageIds.value = new Map(Object.entries(ids).map(([k, v]) => [Number(k), v]))
-  }
+  if (!execRunId.value) return
+  execPageOffset.value = offset
+  try {
+    const filter = buildExecFilter()
+    const result = await window.api.wbExecPage(execRunId.value, offset, EXEC_PAGE, filter)
+    execPageRows.value = result.rows
+    // Derive column names from exec-table response (strip __rowid and meta cols)
+    if (result.columns.length > 3 && execColumns.value.length === 0) {
+      execColumns.value = result.columns.slice(1, result.columns.length - 3)
+    }
+  } catch { /* ignore */ }
 }
 
-function wbExecSortToOrderBy(): { column: string; dir: 'asc' | 'desc' }[] | undefined {
-  if (!execSort.value.length) return undefined
-  const syntheticCount = wbIsInsert.value ? 2 : 1
-  const result = execSort.value.filter((c) => c.colIdx >= syntheticCount).map((c) => ({ column: execColumns.value[c.colIdx - syntheticCount], dir: c.dir }))
-  return result.length ? result : undefined
+/** Refresh the current page in place (used by polling). */
+async function wbRefreshExecPage(): Promise<void> {
+  if (!execRunId.value || execJobDone.value) return
+  await wbLoadExecPage(execPageOffset.value)
 }
 
-async function wbHandleExecSortChange(criteria: SortCriterion[]): Promise<void> { execSort.value = criteria; await wbLoadExecPage(0) }
-async function wbHandleFailedSortChange(criteria: SortCriterion[]): Promise<void> {
-  execFailedSort.value = criteria; execFailedPageOffset.value = 0
-  if (execRunId.value) execFailedPanelRows.value = await window.api.wbGetFailedRowsPage(execRunId.value, 0, EXEC_PAGE, failedErrorFilter.value || undefined, criteria.length ? criteria : undefined)
-}
 
 async function wbRetryFailed(): Promise<void> {
   if (!wbSelectedJobId.value || !execRunId.value) return
-  execTotalRows.value = execFailed.value; execPageOffset.value = 0
-  execPageRows.value = execFailedPanelRows.value.slice(0, EXEC_PAGE).map((fr) => fr.row)
-  execPageStatuses.value = new Map(); execPageIds.value = new Map()
-  execSucceeded.value = 0; execFailed.value = 0; execFailedTotal.value = 0
-  execFailedDistinctErrors.value = []; execFailedPanelRows.value = []; execFailedRangeMap.value = new Map()
-  execJobDone.value = false; execFilterSuccess.value = execFilterError.value = execFilterPending.value = true
   const id = wbSelectedJobId.value
+  execTotalRows.value = 0; execPageOffset.value = 0; execPageRows.value = []
+  execSucceeded.value = 0; execFailed.value = 0; execFailedTotal.value = 0
+  execFailedDistinctErrors.value = []; execJobDone.value = false
+  execFilterSuccess.value = execFilterError.value = execFilterPending.value = execFilterQueued.value = true
+  failedErrorFilter.value = ''
   const newRunId = await window.api.retryFailed(execRunId.value, id)
   execRunId.value = newRunId; wbActiveRuns.value.set(id, newRunId); jobs.startJob(newRunId, 'writeback', id)
+  startExecPoll(newRunId)
   wbStartRunMonitor(id, newRunId)
 }
 
-async function wbBuildFailedCsv(): Promise<string> {
-  if (!execRunId.value) return ''
-  const runId = execRunId.value; const filter = failedErrorFilter.value || undefined; const total = wbFilteredFailedTotal.value
-  const columns = ['_ErrorMessage', ...wbExecDisplayColumns.value]
-  const csvEscape = (v: unknown): string => { if (v === null || v === undefined) return ''; const s = String(v); return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s }
-  const lines = [columns.map(csvEscape).join(',')]
-  for (let offset = 0; offset < total; offset += EXEC_PAGE) {
-    const page = await window.api.wbGetFailedRowsPage(runId, offset, EXEC_PAGE, filter)
-    for (const fr of page) lines.push([fr.message, ...fr.row].map(csvEscape).join(','))
-  }
-  return lines.join('\n')
-}
-async function wbCopyFailedCsv(): Promise<void> { await navigator.clipboard.writeText(await wbBuildFailedCsv()) }
-async function wbExportFailed(): Promise<void> { await window.api.exportToCsv(await wbBuildFailedCsv()) }
-
 async function wbCopyAllExecRows(): Promise<void> {
-  const csvEscape = (v: unknown): string => { if (v === null || v === undefined) return ''; const s = String(v); return s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r') ? '"' + s.replace(/"/g, '""') + '"' : s }
+  if (!execRunId.value) return
+  const csvEscape = (v: unknown): string => {
+    if (v === null || v === undefined) return ''
+    const s = String(v)
+    return s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r') ? '"' + s.replace(/"/g, '""') + '"' : s
+  }
   const cols = wbExecVisibleCols.value
   const lines: string[] = [cols.map(csvEscape).join(',')]
-  const total = execTotalRows.value
+  const filter = buildExecFilter()
+  const total = wbEffectiveTotalCount.value
+  const isInsert = wbIsInsert.value
   for (let offset = 0; offset < total; offset += EXEC_PAGE) {
-    const { rows } = await window.api.wbPage(execSql.value, offset, EXEC_PAGE)
-    let ids: Record<number, string> = {}
-    if (wbIsInsert.value && execRunId.value) ids = await window.api.wbGetPageIds(execRunId.value, offset, EXEC_PAGE)
-    let failures: Record<number, { message: string; row: unknown[] }> = {}
-    if (execJobDone.value && execRunId.value) failures = await window.api.wbGetFailedRowsInRange(execRunId.value, offset, offset + EXEC_PAGE)
-    for (let i = 0; i < rows.length; i++) {
-      const absIdx = offset + i; const failed = failures[absIdx]; const statusCell = failed ? `Fail: ${failed.message}` : 'OK'
-      const idCell = failed ? '' : (ids[absIdx] ?? '')
-      const fullRow: unknown[] = wbIsInsert.value ? [idCell, statusCell, ...(rows[i] as unknown[])] : [statusCell, ...(rows[i] as unknown[])]
+    const result = await window.api.wbExecPage(execRunId.value, offset, EXEC_PAGE, filter)
+    for (const row of result.rows) {
+      const sfIdRaw = row[row.length - 3] as string | null
+      const status = row[row.length - 2] as string
+      const error = row[row.length - 1] as string | null
+      const dataVals = (row as unknown[]).slice(1, row.length - 3)
+      const statusDisplay = status === 'success' ? 'OK' : status === 'error' ? `Fail: ${error ?? ''}` : status
+      const sfId = (sfIdRaw && sfIdRaw !== '000000000000000000') ? sfIdRaw : ''
+      const fullRow = isInsert ? [sfId, statusDisplay, ...dataVals] : [statusDisplay, ...dataVals]
       lines.push(fullRow.map(csvEscape).join(','))
     }
   }
@@ -1911,22 +1963,13 @@ watch([wbUpdateIdsTargetTable, wbUpdateIdsTableKeyCol], async ([tbl, col]) => {
 })
 
 async function wbOpenUpdateIdsModal(): Promise<void> {
-  if (!execRunId.value) return
-  const info = await window.api.wbGetIdUpdateInfo(execRunId.value)
-  wbUpdateIdsKeyFields.value = info?.keyFields ?? []
-  const firstWithValues = wbUpdateIdsKeyFields.value.find((f) => f.valueCount > 0)
-  wbUpdateIdsSfKeyField.value = firstWithValues?.sfField ?? (wbUpdateIdsKeyFields.value[0]?.sfField ?? '')
-  wbUpdateIdsTables.value = await window.api.getUserTableNames()
-  wbUpdateIdsTargetTable.value = ''; wbUpdateIdsTableCols.value = []; wbUpdateIdsTableKeyCol.value = ''
-  wbUpdateIdsIdColName.value = 'Id'; wbUpdateIdsResult.value = null; wbUpdateIdsError.value = ''
-  wbUpdateIdsLoading.value = false; wbUpdateIdsOpen.value = true
+  // "Update table with IDs" will be re-implemented in a future version.
+  alert('This feature will be available in a future version.')
 }
 
 async function wbConfirmUpdateIds(): Promise<void> {
-  if (!execRunId.value || !wbUpdateIdsSfKeyField.value || !wbUpdateIdsTableKeyCol.value || !wbUpdateIdsTargetTable.value) return
-  const idColName = wbUpdateIdsIdColName.value.trim() || 'Id'
   wbUpdateIdsLoading.value = true; wbUpdateIdsError.value = ''; wbUpdateIdsResult.value = null
-  try { wbUpdateIdsResult.value = await window.api.wbUpdateTableWithIds(execRunId.value, wbUpdateIdsSfKeyField.value, wbUpdateIdsTargetTable.value, wbUpdateIdsTableKeyCol.value, idColName) }
+  try { throw new Error('Not yet implemented.') }
   catch (err) { wbUpdateIdsError.value = err instanceof Error ? err.message : String(err) }
   finally { wbUpdateIdsLoading.value = false }
 }
@@ -1970,6 +2013,13 @@ function runStatusBadge(s: string): string {
   if (s === 'running') return 'badge-blue'
   if (s === 'cancelled') return 'badge-gray'
   return 'badge-gray'
+}
+function runStatusIcon(s: string): string {
+  if (s === 'success') return '✓'
+  if (s === 'error') return '✗'
+  if (s === 'partial') return '⚠'
+  if (s === 'cancelled') return '⊘'
+  return '?'
 }
 
 onMounted(async () => {
@@ -2031,7 +2081,8 @@ function onDocKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') { exErro
 
 <style scoped>
 /* ── Split layout ──────────────────────────────────────────────────────────── */
-.split-left { flex-shrink: 0; flex-grow: 0; min-width: 0; overflow-y: auto; }
+.split-left { flex-shrink: 0; flex-grow: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.job-list-scroll { flex: 1; overflow-y: auto; min-height: 0; }
 .split-right { flex: 1; overflow: hidden; min-width: 0; }
 .split-divider { width: 5px; flex-shrink: 0; cursor: col-resize; position: relative; z-index: 1; background: transparent; }
 .split-divider::after { content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 3px; height: 48px; border-radius: 99px; background: var(--border); transition: background 0.15s, height 0.15s; }
@@ -2060,10 +2111,11 @@ function onDocKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') { exErro
 
 /* ── Job rows ──────────────────────────────────────────────────────────────── */
 .job-row {
-  display: flex; flex-direction: column; justify-content: center;
-  padding: 3px 12px; cursor: pointer; gap: 0;
+  display: flex; flex-direction: row; align-items: center;
+  padding: 2px 8px 2px 6px; cursor: pointer; gap: 5px;
   border-bottom: 1px solid var(--border);
 }
+.job-row-detailed { align-items: flex-start; padding-top: 4px; padding-bottom: 4px; }
 .job-row-extract { border-left: 3px solid #0176d3; border-bottom-color: color-mix(in srgb, #0176d3 25%, var(--border)); }
 .job-row-wb { border-left: 3px solid #166534; border-bottom-color: color-mix(in srgb, #166534 25%, var(--border)); }
 .job-row:hover { background: var(--surface2); }
@@ -2073,14 +2125,20 @@ function onDocKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') { exErro
 .job-row-wb.running { background: color-mix(in srgb, #166534 5%, transparent); }
 .job-row-extract.running.selected { background: color-mix(in srgb, #0176d3 15%, transparent); }
 .job-row-wb.running.selected { background: color-mix(in srgb, #166534 15%, transparent); }
-.job-row-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 5px; color: var(--text); }
+.job-row-icon { font-size: 12px; flex-shrink: 0; }
+.job-row-detailed .job-row-icon { align-self: flex-start; margin-top: 2px; }
+.job-row-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.job-row-name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.job-row-subtitle { font-size: 10px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.job-row-status { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.job-row-detailed .job-row-status { align-self: flex-start; margin-top: 2px; }
+.badge-icon { padding: 1px 5px; font-size: 12px; line-height: 1; }
 .job-row-spinner { width: 10px; height: 10px; border-width: 1.5px; flex-shrink: 0; }
 .job-row-running-label { font-size: 10px; font-weight: 600; color: var(--primary); text-transform: uppercase; letter-spacing: 0.04em; }
-.job-row-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.job-row-sub { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.job-row-right { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.job-row-queued-label { color: var(--text-muted); }
 .job-row-rows { font-size: 11px; color: var(--text-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .job-run-btn { width: 22px; height: 22px; padding: 0; display: flex; align-items: center; justify-content: center; background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 11px; flex-shrink: 0; }
+.job-row-detailed .job-run-btn { align-self: flex-start; margin-top: 1px; }
 .job-run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .job-run-btn-extract { border-color: color-mix(in srgb, #005fa3 40%, var(--border)); color: #005fa3; }
 .job-run-btn-extract:hover:not(:disabled) { background: color-mix(in srgb, #005fa3 12%, transparent); }
@@ -2159,16 +2217,17 @@ function onDocKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') { exErro
 
 /* ── WB Execution ──────────────────────────────────────────────────────────── */
 .execution-section { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.exec-phase-bar { padding: 6px 12px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; font-size: 13px; min-height: 34px; flex-wrap: wrap; }
 .exec-stats { padding: 8px 12px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); font-size: 13px; flex-shrink: 0; flex-wrap: wrap; }
+.exec-action-bar { padding: 4px 12px 6px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.exec-error-bar { padding: 4px 12px 6px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .exec-status-filter { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .exec-filter-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 12px; border: 1px solid var(--border); background: transparent; color: var(--text-muted); font-size: 12px; cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s; }
 .exec-filter-pill:hover { background: var(--surface-hover, var(--border)); color: var(--text); }
 .exec-filter-pill.active { background: var(--surface-hover, var(--border)); color: var(--text); border-color: var(--text-muted); }
-.exec-filter-pill--ok-lit { background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
-.exec-filter-pill--error-lit { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
-.exec-filter-pill--ok.active, .exec-filter-pill--ok-lit.active { background: color-mix(in srgb, var(--success) 25%, transparent); color: var(--success); border-color: var(--success); }
-.exec-filter-pill--error.active, .exec-filter-pill--error-lit.active { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); border-color: var(--danger); }
-.exec-filter-pill--pending.active { background: color-mix(in srgb, var(--text-muted) 15%, transparent); color: var(--text); border-color: var(--text-muted); }
+.exec-filter-pill--ok.active { background: color-mix(in srgb, var(--success) 25%, transparent); color: var(--success); border-color: var(--success); }
+.exec-filter-pill--error.active { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); border-color: var(--danger); }
+.exec-filter-pill--queued.active { background: color-mix(in srgb, #1a7fc4 25%, transparent); color: #1a7fc4; border-color: #1a7fc4; }
 .exec-filter-count { font-variant-numeric: tabular-nums; }
 .exec-banner { padding: 10px 14px; display: flex; align-items: flex-start; gap: 12px; font-size: 13px; flex-shrink: 0; border-bottom: 1px solid var(--border); }
 .exec-banner-error { background: color-mix(in srgb, var(--danger) 12%, var(--surface)); color: var(--danger); }
@@ -2177,10 +2236,11 @@ function onDocKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') { exErro
 .error-filter-bar { display: flex; align-items: center; gap: 6px; }
 .error-filter-label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
 .error-filter-select { font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); max-width: 480px; }
+.error-filter-inline { font-size: 11px; padding: 1px 4px; max-width: 220px; border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
 .row-count-result { font-size: 13px; font-weight: 600; color: var(--text); }
 .row-count-error { font-size: 12px; color: var(--danger, #dc2626); }
 .bulk-phase-card { padding: 24px; display: flex; flex-direction: column; align-items: flex-start; }
-.bulk-phase-row { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text); }
+.bulk-phase-row { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text); }
 
 /* ── WB Custom headers ─────────────────────────────────────────────────────── */
 .suggest-wrap { position: relative; }

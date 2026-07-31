@@ -797,7 +797,9 @@ export async function describeObject(name: string): Promise<FieldDescriptor[]> {
         updateable: f.updateable,
         externalId: f.externalId,
         unique: f.unique,
-        idLookup: f.idLookup
+        idLookup: f.idLookup,
+        referenceTo: (f.referenceTo as string[] | undefined)?.length ? (f.referenceTo as string[]) : undefined,
+        relationshipName: (f.relationshipName as string | null | undefined) ?? null
       })
     )
   })
@@ -1005,6 +1007,55 @@ export type WritebackResult = {
   id?: string
   success: boolean
   errors: string[]
+}
+
+/**
+ * Send exactly one batch of records to Salesforce and return per-row results.
+ * `index` in each result is the 0-based position within `records`.
+ * Throws on network/auth errors; per-row Salesforce errors are surfaced via `results[i].errors`.
+ */
+export async function writebackOneBatch(
+  opts: WritebackOptions,
+  records: Record<string, unknown>[],
+  signal: AbortSignal
+): Promise<WritebackResult[]> {
+  if (signal.aborted || !records.length) return []
+  const conn = getConnection()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const dmlOpts: any = opts.customHeaders ? { headers: opts.customHeaders } : {}
+  const sobject = conn.sobject(opts.sfObject)
+
+  let rawResults: SfSaveResult[]
+  if (opts.operation === 'insert') {
+    rawResults = await sobject.insert(records as SfRecord[], dmlOpts)
+  } else if (opts.operation === 'update') {
+    rawResults = await sobject.update(records as SfRecord[], dmlOpts)
+  } else if (opts.operation === 'upsert') {
+    rawResults = await sobject.upsert(records as SfRecord[], opts.externalIdField || 'Id', dmlOpts)
+  } else if (opts.operation === 'delete') {
+    const ids = records.map((r) => r['Id'] as string).filter(Boolean)
+    rawResults = await sobject.delete(ids, dmlOpts)
+  } else {
+    // undelete
+    const ids = records.map((r) => r['Id'] as string).filter(Boolean)
+    type RawResultArr = SfSaveResult[]
+    const resp = await conn.requestPost<RawResultArr>('/composite/sobjects', {
+      allOrNone: false,
+      records: ids.map((id) => ({ attributes: { type: opts.sfObject }, Id: id }))
+    }, { headers: opts.customHeaders })
+    rawResults = (Array.isArray(resp) ? resp : []) as SfSaveResult[]
+  }
+
+  type RawResult = { id?: string; success: boolean; errors?: Array<string | { message: string }> }
+  return (Array.isArray(rawResults) ? rawResults : [rawResults]).map((r, i): WritebackResult => {
+    const raw = r as RawResult
+    return {
+      index: i,
+      id: raw.id,
+      success: raw.success,
+      errors: raw.success ? [] : (raw.errors ?? []).map((e) => (typeof e === 'string' ? e : e.message))
+    }
+  })
 }
 
 export async function writebackBatch(
