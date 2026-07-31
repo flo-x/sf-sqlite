@@ -35,7 +35,6 @@
                 @click.stop
               />
               <span v-else class="tree-name">{{ t.name }}</span>
-              <span class="tree-count">{{ t.rowCount }}</span>
             </div>
           </div>
           <div v-if="!allItems.length" class="empty-state" style="padding: 24px 12px; font-size:13px;">
@@ -209,7 +208,8 @@
       <template v-else>
         <div class="toolbar">
           <span style="font-weight:600; font-size:15px;">{{ selectedTable.name }}</span>
-          <span class="badge badge-gray" style="margin-left: 4px;">{{ selectedTable.rowCount.toLocaleString() }} rows</span>
+          <span v-if="selectedRowCount !== null" class="badge badge-gray" style="margin-left: 4px;">{{ selectedRowCount.toLocaleString() }} rows</span>
+          <span v-else-if="rowCountLoading" class="badge badge-gray" style="margin-left: 4px;">counting…</span>
           <div class="toolbar-right">
             <button class="btn btn-ghost btn-sm" @click="openInQuery">Open in Query Editor</button>
             <button class="btn btn-ghost btn-sm" @click="startRename">Rename</button>
@@ -365,7 +365,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onDeactivated, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useConnectionStore } from '../stores/connection'
 import { useQueryStore } from '../stores/query'
@@ -625,6 +625,7 @@ async function importCsv(): Promise<void> {
       count = await window.api.csvImport(csvPreview.value.filePath, tableName, ifExists)
     }
     csvSuccess.value = `Imported ${count.toLocaleString()} rows into "${tableName}"`
+    rowCountCache.delete(tableName)
     await conn.refreshDbInfo()
     await nextTick()
     csvPreview.value = null
@@ -651,6 +652,7 @@ async function directImportCsv(): Promise<void> {
     const tableName = csvTableName.value.trim()
     const count = await window.api.csvDirectImport(csvDirectFile.value.filePath, tableName, ifExists)
     csvSuccess.value = `Imported ${count.toLocaleString()} rows into "${tableName}"`
+    rowCountCache.delete(tableName)
     await conn.refreshDbInfo()
     await nextTick()
     csvDirectFile.value = null
@@ -660,6 +662,7 @@ async function directImportCsv(): Promise<void> {
     if (msg === 'Import aborted') {
       const committed = (err as { rowsCommitted?: number }).rowsCommitted ?? csvImportProgress.value
       csvCancelled.value = `Import cancelled — ${committed.toLocaleString()} rows were committed before stopping.`
+      rowCountCache.delete(tableName)
       await conn.refreshDbInfo()
     } else {
       csvError.value = msg
@@ -680,6 +683,36 @@ const selectedTable = computed(() =>
     ? (conn.dbTables.find((t) => t.name === selectedTableName.value) ?? null)
     : null
 )
+
+// ── On-demand row count ────────────────────────────────────────────────────────
+// Fetched only when a table is selected in this view; cached to avoid re-running
+// COUNT(*) on subsequent visits to the same table within one Explorer session.
+const rowCountCache = new Map<string, number>()
+const selectedRowCount = ref<number | null>(null)
+const rowCountLoading = ref(false)
+
+async function fetchRowCount(tableName: string): Promise<void> {
+  if (rowCountCache.has(tableName)) {
+    selectedRowCount.value = rowCountCache.get(tableName)!
+    return
+  }
+  rowCountLoading.value = true
+  try {
+    const count = await window.api.getTableRowCount(tableName)
+    rowCountCache.set(tableName, count)
+    if (selectedTableName.value === tableName) {
+      selectedRowCount.value = count
+    }
+  } finally {
+    rowCountLoading.value = false
+  }
+}
+
+onDeactivated(() => {
+  rowCountCache.clear()
+  selectedRowCount.value = null
+})
+
 // Clear stale preview when the selected table changes.
 watch(selectedTable, () => {
   previewRows.value = []
@@ -731,11 +764,27 @@ async function refreshSchema(): Promise<void> {
   }
 }
 
-onMounted(() => { document.addEventListener('click', () => { ctxMenu.value = null }) })
+onMounted(() => {
+  document.addEventListener('click', () => { ctxMenu.value = null })
+
+  // When a job completes, the SQLite database may have changed (extract jobs write
+  // new rows). Clear the row count cache and re-fetch for the currently selected table.
+  const offJobComplete = window.api.onJobComplete(() => {
+    rowCountCache.clear()
+    if (selectedTableName.value && selectedTable.value?.type === 'table') {
+      void fetchRowCount(selectedTableName.value)
+    }
+  })
+  onUnmounted(() => offJobComplete())
+})
 
 function selectTable(t: TableInfo): void {
   selectedTableName.value = t.name
+  selectedRowCount.value = rowCountCache.get(t.name) ?? null
   activeTab.value = 'columns'
+  if (t.type === 'table') {
+    void fetchRowCount(t.name)
+  }
 }
 
 async function loadPreview(): Promise<void> {
@@ -838,6 +887,7 @@ async function confirmRename(): Promise<void> {
   renaming.value = false
   if (!oldName || !newName || newName === oldName) return
   await window.api.renameTable(oldName, newName)
+  rowCountCache.delete(oldName)
   await conn.refreshDbInfo()
   selectedTableName.value = newName
 }
@@ -974,7 +1024,6 @@ async function confirmColRename(): Promise<void> {
 .tree-item.selected { background: #eff6ff; font-weight: 600; }
 .tree-icon { font-size: 13px; }
 .tree-name { flex: 1; }
-.tree-count { font-size: 11px; color: var(--text-muted); background: var(--surface2); padding: 1px 5px; border-radius: 999px; }
 .tab-content { flex: 1; overflow: auto; }
 .ctx-menu { position: fixed; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-md); z-index: 500; min-width: 180px; }
 .ctx-item { padding: 8px 14px; font-size: 13px; cursor: pointer; }

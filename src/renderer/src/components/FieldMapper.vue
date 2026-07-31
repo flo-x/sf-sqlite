@@ -247,12 +247,12 @@ tr.excluded td { opacity: 0.45; text-decoration: line-through; }
 tr.excluded td:first-child { opacity: 1; text-decoration: none; }
 .mono { font-family: monospace; font-size: 12px; }
 .text-muted { color: var(--text-muted); }
-.sf-field-cell { display: flex; flex-direction: column; gap: 4px; padding: 4px 6px; }
-.sf-field-cell select { width: 100%; }
+.sf-field-cell { display: flex; flex-direction: column; gap: 3px; padding: 2px 6px; }
+.sf-field-cell select { width: 100%; padding: 2px 6px; font-size: 12px; }
 .ext-id-row { display: flex; align-items: center; gap: 6px; }
 .ext-id-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted); cursor: pointer; user-select: none; }
 .ext-id-toggle input { cursor: pointer; }
-.ext-id-field-select { width: 100%; font-size: 12px; }
+.ext-id-field-select { width: 100%; font-size: 12px; padding: 2px 6px; }
 .ext-id-loading { font-size: 11px; color: var(--text-muted); font-style: italic; }
 
 .info-icon-wrap {

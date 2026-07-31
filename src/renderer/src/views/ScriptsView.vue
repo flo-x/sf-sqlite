@@ -305,6 +305,7 @@ if (result.rowsFailed > 0) {
 import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, nextTick } from 'vue'
 import * as monaco from 'monaco-editor'
 import { EDITOR_BASE_OPTIONS } from '../utils/monaco'
+import { registerQuitHandler } from '../composables/useQuitHandlers'
 import { useConnectionStore } from '../stores/connection'
 import { useJobStore } from '../stores/job'
 import type { SavedScript, ScriptLog, ScriptComplete, ScriptDraft } from '../../../shared/types'
@@ -423,7 +424,7 @@ function markDirty(): void {
 // ── Draft autosave ────────────────────────────────────────────────────────────
 const IDLE_DRAFT_MS = 60_000
 let idleDraftTimer: ReturnType<typeof setTimeout> | null = null
-let cleanupBeforeQuit: (() => void) | null = null
+let unregisterQuitHandler: (() => void) | null = null
 
 function draftKey(savedId: number | null): string {
   return savedId === null ? 'new' : String(savedId)
@@ -741,7 +742,7 @@ async function restoreDrafts(): Promise<void> {
 onMounted(async () => {
   window.addEventListener('blur', onWindowBlur)
 
-  cleanupBeforeQuit = window.api.onBeforeQuit(() => { void saveDraftAll() })
+  unregisterQuitHandler = registerQuitHandler(() => saveDraftAll())
 
   if (!conn.dbConnected) return
   await loadScripts()
@@ -785,7 +786,7 @@ onBeforeUnmount(() => {
   if (idleDraftTimer !== null) {
     clearTimeout(idleDraftTimer)
   }
-  cleanupBeforeQuit?.()
+  unregisterQuitHandler?.()
   window.removeEventListener('blur', onWindowBlur)
   editor?.dispose()
   editor = null

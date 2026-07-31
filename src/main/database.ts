@@ -31,12 +31,18 @@ export function openDatabase(filePath: string): { path: string } {
   }
   const dir = dirname(filePath)
   mkdirSync(dir, { recursive: true })
+  let t = Date.now()
   db = new Database(filePath)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
+  console.log(`[db] open took ${Date.now() - t} ms`)
   currentPath = filePath
+  t = Date.now()
   initMetaTables()
+  console.log(`[db] initMetaTables took ${Date.now() - t} ms`)
+  t = Date.now()
   cleanupAbandonedExecTables()
+  console.log(`[db] cleanupAbandonedExecTables took ${Date.now() - t} ms`)
   return { path: filePath }
 }
 
@@ -302,16 +308,9 @@ export function getDatabaseInfo(): TableInfo[] {
       }
     })
 
-    let rowCount = 0
-    if (t.type === 'table') {
-      const row = d.prepare(`SELECT COUNT(*) as cnt FROM ${escapeId(t.name)}`).get() as { cnt: number }
-      rowCount = row.cnt
-    }
-
     return {
       name: t.name,
       type: t.type as 'table' | 'view',
-      rowCount,
       columns: columns.map(
         (c): TableColumn => ({
           name: c.name,
@@ -324,6 +323,12 @@ export function getDatabaseInfo(): TableInfo[] {
       indexes
     }
   })
+}
+
+export function getTableRowCount(tableName: string): number {
+  const d = getDb()
+  const row = d.prepare(`SELECT COUNT(*) as cnt FROM ${escapeId(tableName)}`).get() as { cnt: number }
+  return row.cnt
 }
 
 export function executeQuery(sql: string): QueryResult {

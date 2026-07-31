@@ -39,6 +39,9 @@ const api = {
   getDatabaseInfo: (): Promise<TableInfo[]> =>
     ipcRenderer.invoke('db:info'),
 
+  getTableRowCount: (tableName: string): Promise<number> =>
+    ipcRenderer.invoke('db:table-row-count', tableName),
+
   executeQuery: (sql: string): Promise<QueryResult> =>
     ipcRenderer.invoke('db:query', sql),
 

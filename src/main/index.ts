@@ -329,7 +329,7 @@ app.whenReady().then(() => {
     e.preventDefault()
     quitAfterDraftSave = true
     wins[0].webContents.send('app:before-quit')
-    draftQuitFallback = setTimeout(() => { doQuit() }, 2000)
+    draftQuitFallback = setTimeout(() => { doQuit() }, 500)
   })
 
   createWindow()

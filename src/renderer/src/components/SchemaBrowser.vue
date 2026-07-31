@@ -20,7 +20,6 @@
           <span class="sb-chevron">{{ expanded.has(table.name) ? '▼' : '▶' }}</span>
           <span class="sb-icon">{{ table.type === 'view' ? '👁' : '▦' }}</span>
           <span class="sb-tname">{{ table.name }}</span>
-          <span class="sb-rcount">{{ table.rowCount }}</span>
         </div>
         <template v-if="expanded.has(table.name)">
           <div
@@ -151,7 +150,6 @@ onUnmounted(() => document.removeEventListener('click', closeCtx))
 .sb-chevron { font-size: 9px; color: var(--text-muted); width: 10px; }
 .sb-icon { font-size: 13px; }
 .sb-tname { flex: 1; }
-.sb-rcount { font-size: 11px; color: var(--text-muted); background: var(--surface2); padding: 1px 5px; border-radius: 999px; }
 .sb-col-node { display: flex; align-items: center; gap: 5px; padding: 3px 8px 3px 26px; cursor: grab; font-size: 12px; }
 .sb-col-node:hover { background: var(--surface2); }
 .sb-col-badge { width: 16px; height: 16px; font-size: 9px; border-radius: 2px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }

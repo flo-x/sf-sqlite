@@ -63,7 +63,8 @@ function buildDdlSchema(tables: TableInfo[]): string {
       let ddl = `CREATE ${keyword} "${t.name}" (\n${colLines.join(',\n')}\n);`
 
       if (t.type === 'table') {
-        ddl += `\n-- ${t.rowCount.toLocaleString()} rows`
+        const cnt = db.getTableRowCount(t.name)
+        ddl += `\n-- ${cnt.toLocaleString()} rows`
       }
 
       for (const idx of t.indexes) {
@@ -888,6 +889,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('db:recent-remove', (_e, filePath: string) => recent.removeRecentDatabase(filePath))
 
   ipcMain.handle('db:info', () => db.getDatabaseInfo())
+  ipcMain.handle('db:table-row-count', (_e, tableName: string) => db.getTableRowCount(tableName))
 
   ipcMain.handle('db:query', (_e, sql: string) => db.executeQuery(sql))
 

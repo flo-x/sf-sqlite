@@ -15,7 +15,6 @@ export interface TableIndex {
 export interface TableInfo {
   name: string
   type: 'table' | 'view'
-  rowCount: number
   columns: TableColumn[]
   indexes: TableIndex[]
 }

@@ -100,6 +100,7 @@
 
 <script setup lang="ts">
 import { onMounted, ref, computed } from 'vue'
+import { runAllQuitHandlers } from './composables/useQuitHandlers'
 import { useConnectionStore } from './stores/connection'
 import { useJobStore } from './stores/job'
 import NavButton from './components/NavButton.vue'
@@ -162,6 +163,11 @@ onMounted(async () => {
     offUpdateAvailable()
     offUpdateProgress()
     offUpdateDownloaded()
+  })
+
+  window.api.onBeforeQuit(async () => {
+    await runAllQuitHandlers()
+    await window.api.notifyDraftsQuitReady()
   })
 })
 </script>

@@ -231,6 +231,7 @@ import * as monaco from 'monaco-editor'
 import { EDITOR_BASE_OPTIONS } from '../utils/monaco'
 
 const isMac = navigator.platform.startsWith('Mac')
+import { registerQuitHandler } from '../composables/useQuitHandlers'
 import { useConnectionStore } from '../stores/connection'
 import { useQueryStore } from '../stores/query'
 import DataGrid from '../components/DataGrid.vue'
@@ -376,7 +377,7 @@ function onGlobalKeydown(e: KeyboardEvent): void {
 // ── Draft auto-save ────────────────────────────────────────────────────────────
 const IDLE_DRAFT_MS = 60_000
 let idleDraftTimer: ReturnType<typeof setTimeout> | null = null
-let cleanupBeforeQuit: (() => void) | null = null
+let unregisterQuitHandler: (() => void) | null = null
 
 async function saveDraftAllTabs(): Promise<void> {
   // Ensure the active tab's current view state is captured before iterating
@@ -410,10 +411,7 @@ onMounted(async () => {
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('blur', onWindowBlur)
 
-  cleanupBeforeQuit = window.api.onBeforeQuit(async () => {
-    await saveDraftAllTabs()
-    await window.api.notifyDraftsQuitReady()
-  })
+  unregisterQuitHandler = registerQuitHandler(() => saveDraftAllTabs())
 
   if (!conn.dbConnected) return
   if (!queryStore.initialized) {
@@ -901,7 +899,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('blur', onWindowBlur)
   if (idleDraftTimer !== null) clearTimeout(idleDraftTimer)
-  cleanupBeforeQuit?.()
+  unregisterQuitHandler?.()
   editor?.dispose()
 })
 </script>
