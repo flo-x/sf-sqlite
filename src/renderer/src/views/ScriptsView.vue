@@ -66,6 +66,12 @@
           @click="saveScript"
         >💾 Save</button>
         <span v-if="activeScript.dirty" class="dirty-dot" title="Unsaved changes">•</span>
+        <button
+          class="btn btn-secondary btn-sm ai-toggle-btn"
+          :class="{ active: aiDrawerOpen }"
+          title="AI Assistant"
+          @click="aiDrawerOpen = !aiDrawerOpen"
+        >AI</button>
       </div>
 
       <!-- Editor or Help panel -->
@@ -112,19 +118,24 @@
           </table>
 
           <h3>Job execution methods</h3>
+          <p style="margin:0 0 8px;color:var(--text-muted);">Jobs are identified by their <strong>display label</strong> — the same string shown in the Jobs list (e.g. <code>"Account: extract"</code>, <code>"Contact: writeback"</code>, <code>"SOQL: monthly report"</code>). Use <code>jobs.list()</code> to discover available labels. Labels are matched case-insensitively.</p>
           <table class="api-table">
             <tbody>
               <tr>
-                <td><code>jobs.runDownload(name)</code></td>
-                <td>Runs a download job by its saved name. Returns a promise that resolves to <code>{ rowsLoaded }</code> when the job completes. Throws if the job is not found, is already queued or running, or fails.</td>
+                <td><code>jobs.list()</code></td>
+                <td>Returns a promise that resolves to an array of all configured jobs. Each entry: <code>{ label, type, sfObject, destTable?, operation?, api? }</code>. Use <code>label</code> to call <code>runDownload</code> / <code>runWriteback</code>.</td>
               </tr>
               <tr>
-                <td><code>jobs.runWriteback(name)</code></td>
-                <td>Runs a writeback job by its saved name. Returns a promise that resolves to <code>{ status, rowsSucceeded, rowsFailed }</code>. Row-level data is not included to avoid copying large datasets; call <code>jobs.getFailedRows(result)</code> if needed. Throws on hard failure.</td>
+                <td><code>jobs.runDownload(label)</code></td>
+                <td>Runs the download job identified by <code>label</code>. Returns <code>{ status, rowsSource, rowsSucceeded }</code>. <code>rowsSource</code> = rows fetched from Salesforce; <code>rowsSucceeded</code> = rows written to the destination table. Throws if the job is not found, already running, fails, or is cancelled.</td>
+              </tr>
+              <tr>
+                <td><code>jobs.runWriteback(label)</code></td>
+                <td>Runs the writeback job identified by <code>label</code>. Returns <code>{ status, rowsSource, rowsSucceeded, rowsFailed, execTable }</code>. <code>rowsSource</code> = source rows; <code>execTable</code> = SQLite table name (queryable with <code>db.query()</code>) containing every row with its <code>__sf_id</code>, <code>__status</code>, and <code>__error</code> columns — <code>null</code> for Bulk jobs with no failures.</td>
               </tr>
               <tr>
                 <td><code>jobs.getFailedRows(result)</code></td>
-                <td>Lazily fetches row-level failure data for a completed writeback. Returns <code>{ failedRows, keyFields }</code>. <code>failedRows</code> is an array of <code>{ index, message, row }</code> objects keyed by SQL column name. <code>keyFields</code> lists the SF fields available for <code>updateTableWithIds</code>. Must be called before 5 subsequent writeback jobs evict the run state.</td>
+                <td>Lazily fetches row-level failure data for a completed writeback. Returns <code>{ failedRows, keyFields }</code>. <code>failedRows</code> is an array of <code>{ index, message, row }</code> objects. <code>keyFields</code> lists the SF fields available for <code>updateTableWithIds</code>. Must be called before 5 subsequent writeback jobs evict the run state.</td>
               </tr>
               <tr>
                 <td><code>jobs.updateTableWithIds(result, opts)</code></td>
@@ -205,16 +216,30 @@ for (const row of db.iterate('SELECT id, revenue FROM accounts')) {
 db.progress(total, total, 'Done ✓')
 console.log(`Updated ${i} rows.`)</pre>
 
-          <h3>Example 4 — run a download job</h3>
-          <p>Start a saved download job and log how many rows were loaded.</p>
-          <pre class="code-example">const result = await jobs.runDownload('Contacts Extract')
-console.log(`Loaded ${result.rowsLoaded} rows`)</pre>
+          <h3>Example 4 — list and run a download job</h3>
+          <p>Discover available jobs, then run one and log how many rows were loaded.</p>
+          <pre class="code-example">// List all configured jobs to find the right label
+const allJobs = await jobs.list()
+console.log(allJobs.map(j => `${j.type}: ${j.label}`).join('\n'))
+
+// Run a specific download job using its display label
+const result = await jobs.runDownload('Contact: extract')
+console.log(`Fetched ${result.rowsSource} rows, inserted ${result.rowsSucceeded} rows`)</pre>
 
           <h3>Example 5 — run a writeback job</h3>
-          <p>Start a saved writeback job and inspect failures. Row-level data is fetched lazily only when needed.</p>
-          <pre class="code-example">const result = await jobs.runWriteback('Create New Leads')
-console.log(`Succeeded: ${result.rowsSucceeded}, Failed: ${result.rowsFailed}`)
+          <p>Start a saved writeback job, inspect the summary, and query the exec table for failed rows.</p>
+          <pre class="code-example">const result = await jobs.runWriteback('Lead: writeback')
+console.log(`Status: ${result.status} — Source: ${result.rowsSource}, Succeeded: ${result.rowsSucceeded}, Failed: ${result.rowsFailed}`)
 
+// Option A — query the exec table directly for full row-level detail
+if (result.execTable) {
+  const { columns, rows } = db.query(
+    `SELECT __status, __error, * FROM ${result.execTable} WHERE __status = 'error' LIMIT 100`
+  )
+  console.log(`First failed rows:`, JSON.stringify({ columns, rows }))
+}
+
+// Option B — use getFailedRows for structured access (must call before 5 more jobs run)
 if (result.rowsFailed > 0) {
   const { failedRows } = await jobs.getFailedRows(result)
   for (const row of failedRows) {
@@ -231,7 +256,10 @@ if (result.rowsFailed > 0) {
             <li><code>console.log</code>, <code>console.warn</code>, and <code>console.error</code> stream live to the Logs panel below.</li>
             <li>The progress bar is hidden automatically when the script finishes or is cancelled. Call <code>db.progress(100)</code> at the end to show a full bar briefly before it disappears.</li>
             <li>Calling <code>db.progress()</code> too frequently (e.g. every row in a tight loop) adds negligible overhead — IPC messages are fire-and-forget. Every 1 000–10 000 rows is a reasonable interval for very large tables.</li>
-            <li><code>jobs.runDownload</code> and <code>jobs.runWriteback</code> share the same 5-slot queue used by the UI. Starting a job that is already queued or running (from the UI or another script) throws an error. Multiple jobs can be started concurrently with <code>Promise.all()</code> and they will queue automatically when all slots are full.</li>
+            <li>Job labels are the same strings shown in the Jobs list (e.g. <code>"Account: extract"</code>). Matching is case-insensitive. Use <code>jobs.list()</code> to enumerate all available labels.</li>
+            <li><code>jobs.runDownload</code> throws if the job fails or is cancelled. <code>jobs.runWriteback</code> always resolves — check <code>result.status</code> for <code>"error"</code> or <code>"cancelled"</code>.</li>
+            <li>The writeback exec table (<code>result.execTable</code>) is kept in memory for the 5 most recent runs. Query it immediately after the job completes; it may be evicted if 5 more writeback jobs are started.</li>
+            <li><code>jobs.runDownload</code> and <code>jobs.runWriteback</code> share the same 5-slot queue used by the UI. Starting a job that is already queued or running throws an error. Multiple jobs can be started concurrently with <code>Promise.all()</code> and they will queue automatically when all slots are full.</li>
           </ul>
         </div>
       </div>
@@ -294,6 +322,21 @@ if (result.rowsFailed > 0) {
         </div>
       </div>
     </div>
+
+    <!-- AI panel (always mounted to preserve chat state) -->
+    <div
+      class="ai-drawer"
+      :class="{ open: aiDrawerOpen }"
+      :style="aiDrawerOpen ? { width: aiPanelWidth + 'px' } : undefined"
+      ref="aiPanel"
+    >
+      <div class="ai-resize-handle" @mousedown="startAiPanelResize"></div>
+      <div class="ai-drawer-header">
+        <span class="ai-drawer-title">AI Assistant</span>
+        <button class="ai-drawer-close" title="Close" @click="aiDrawerOpen = false">✕</button>
+      </div>
+      <AiChatPanel @insert-js="insertJsFromAi" @insert-sql="openInQueryEditor" style="flex:1;min-height:0;overflow:hidden;" />
+    </div>
   </div>
 
   <div v-else class="empty-state">
@@ -303,15 +346,66 @@ if (result.rowsFailed > 0) {
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import * as monaco from 'monaco-editor'
 import { EDITOR_BASE_OPTIONS } from '../utils/monaco'
 import { registerQuitHandler } from '../composables/useQuitHandlers'
 import { useConnectionStore } from '../stores/connection'
 import { useJobStore } from '../stores/job'
+import AiChatPanel from '../components/AiChatPanel.vue'
 import type { SavedScript, ScriptLog, ScriptComplete, ScriptDraft } from '../../../shared/types'
 
 const conn = useConnectionStore()
 const jobStore = useJobStore()
+const router = useRouter()
+
+// ── AI drawer ─────────────────────────────────────────────────────────────────
+const aiDrawerOpen = ref(false)
+const aiPanel = ref<HTMLElement | null>(null)
+const AI_WIDTH_KEY = 'ai-panel-width'
+const aiPanelWidth = ref(parseInt(localStorage.getItem(AI_WIDTH_KEY) ?? '400', 10))
+
+function startAiPanelResize(e: MouseEvent): void {
+  const startX = e.clientX
+  const startW = aiPanel.value?.offsetWidth ?? aiPanelWidth.value
+  aiPanel.value?.classList.add('is-resizing')
+  const onMove = (ev: MouseEvent): void => {
+    aiPanelWidth.value = Math.max(260, Math.min(900, startW - (ev.clientX - startX)))
+  }
+  const onUp = (): void => {
+    aiPanel.value?.classList.remove('is-resizing')
+    localStorage.setItem(AI_WIDTH_KEY, String(aiPanelWidth.value))
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+function insertJsFromAi(code: string): void {
+  if (!editor) {
+    return
+  }
+  const model = editor.getModel()
+  if (!model) {
+    return
+  }
+  const currentValue = model.getValue().trim()
+  if (currentValue === '') {
+    model.setValue(code)
+  } else {
+    const pos = editor.getPosition()
+    if (!pos) {
+      return
+    }
+    editor.executeEdits('ai-chat', [{ range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column), text: code }])
+  }
+  editor.focus()
+}
+
+function openInQueryEditor(sql: string): void {
+  router.push({ path: '/query', state: { pendingSql: sql } })
+}
 
 // ── Script list ───────────────────────────────────────────────────────────────
 const scripts = ref<SavedScript[]>([])
@@ -1251,4 +1345,74 @@ watch(() => conn.dbConnected, async (v) => {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ── AI toggle button ────────────────────────────────────────────────────────── */
+.ai-toggle-btn {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #c4b5fd;
+  border-color: #c4b5fd;
+  background: transparent;
+  box-shadow: 0 0 3px 0px rgba(167, 139, 250, 0.45), 0 0 7px 1px rgba(139, 92, 246, 0.2);
+  transition: box-shadow 0.2s, background 0.2s, color 0.2s, border-color 0.2s;
+}
+.ai-toggle-btn:hover:not(.active) {
+  color: #ddd6fe;
+  border-color: #ddd6fe;
+  box-shadow: 0 0 5px 1px rgba(167, 139, 250, 0.65), 0 0 11px 2px rgba(139, 92, 246, 0.3);
+}
+.ai-toggle-btn.active {
+  background: #5b21b6;
+  color: #ede9fe;
+  border-color: #5b21b6;
+  box-shadow: 0 0 4px 1px rgba(91, 33, 182, 0.5), 0 0 9px 2px rgba(91, 33, 182, 0.25);
+}
+
+/* ── AI drawer ───────────────────────────────────────────────────────────────── */
+.ai-drawer {
+  width: 0;
+  min-width: 0;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-left: 0 solid var(--border);
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              border-left-width 0.25s step-end,
+              box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.ai-drawer.open {
+  width: 400px;
+  border-left-width: 1px;
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.08);
+}
+.ai-drawer.is-resizing { transition: none; }
+.ai-resize-handle { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; cursor: col-resize; z-index: 10; background: transparent; }
+.ai-resize-handle::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 3px; height: 48px; border-radius: 99px; background: var(--border); transition: background 0.15s, height 0.15s; }
+.ai-resize-handle:hover::after, .ai-resize-handle:active::after { background: var(--primary); height: 64px; }
+.ai-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--surface);
+}
+.ai-drawer-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.ai-drawer-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-muted);
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.ai-drawer-close:hover { background: var(--surface2); color: var(--text); }
 </style>

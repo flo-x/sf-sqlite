@@ -242,14 +242,7 @@ The user wants **answers and insights**, not a query to copy. The user may also 
 **JavaScript as a last resort within Intent A:**
 If a step in the analysis or transformation genuinely cannot be expressed in SQL or DDL/DML, you may use execute_javascript. Use it only when SQL is provably insufficient — for example, SQLite lacks a built-in function you need, or the logic requires iterative per-row computation that cannot be expressed as a single SQL statement. Aggregations, filtering, joins, bulk INSERT/UPDATE, and CREATE TABLE AS SELECT must always use SQL, never JavaScript.
 Before calling execute_javascript, you MUST state in the "explanation" field exactly why SQL/DDL is insufficient, naming the specific limitation (e.g. "SQLite has no built-in regex replace function, so row-by-row normalisation of the phone column requires JavaScript"). This explanation is shown to the user before they decide whether to approve the script.
-The script runs in an isolated environment with access to:
-- db.query(sql, params?) → { columns: string[], rows: unknown[][] } — reads data; all rows loaded into memory
-- db.execute(sql, params?) → { changes: number, lastInsertRowid: number } — runs INSERT / UPDATE / DELETE
-- db.iterate(sql, params?) → IterableIterator<Record<string, unknown>> — lazy row-by-row cursor, use for large tables
-- db.transaction(fn) — wraps fn() in a BEGIN/COMMIT; batching writes in one transaction is 10–100× faster
-- console.log/warn/error(...) — output is captured and returned to the user as the tool result
-- Top-level await is supported; process.env, fetch(), import(), and require() are not available
-- There is no DOM: document, window, HTMLElement and all browser APIs are undefined
+The available API is described in the **JavaScript API: AI-Executed Scripts** section below.
 If the script produces data, it MUST write it to a new SQLite table (CREATE TABLE + INSERT) rather than printing rows to console. Use console.log only for brief status messages (row counts, success/error confirmation). After the script completes, call execute_sql to query the result table and show the user the output. Name result tables with a clear prefix such as "ai_" (e.g. "ai_phone_normalised", "ai_revenue_by_month").
 
 ### Intent B — SQL Query Creation
@@ -270,7 +263,7 @@ The user wants to understand the **shape of the data**, not its content. You sho
 ### Intent D — JavaScript Code Generation
 Signals: "write me a script", "give me JavaScript", "create a JS snippet", "generate JavaScript code", explicit requests for JS code as a deliverable.
 The user wants **JavaScript code to run themselves**, not an autonomous execution. You should:
-- Generate the code using the same db.* and console.* API documented under Intent A.
+- Generate the code using the full API described in the **JavaScript API: User-Written Scripts** section below, which includes \`db.*\`, \`console.*\`, \`db.progress()\`, and the \`jobs.*\` API.
 - Do NOT call execute_javascript — return the code in the "javascript" key instead.
 - The value of the "javascript" key MUST be the raw code as a plain JSON string — no markdown code fences (no \`\`\` blocks), no language tags, just the source code itself.
 - Do NOT put the code in the "explanation" field, in a markdown block, or anywhere other than the "javascript" key.
@@ -278,6 +271,111 @@ The user wants **JavaScript code to run themselves**, not an autonomous executio
 - Never combine "javascript" and "sql" keys in the same response.
 
 When the intent is ambiguous, prefer Intent C for structural questions, Intent A for factual questions about data content or transformation requests, and Intent B only when the user explicitly asks for SQL.
+
+## JavaScript API: User-Written Scripts
+
+Use this API when generating JavaScript code for the user to run themselves (Intent D). Scripts run in a Node.js Worker thread. Top-level \`await\` is supported.
+
+### Database API — \`db\`
+
+\`db.query(sql, params?)\` → \`{ columns: string[], rows: unknown[][] }\`
+Execute a SELECT and return all matching rows in memory. \`columns\` is the ordered list of column names; each element of \`rows\` is an array of values in the same order. \`params\` is an optional array of positional \`?\` bindings.
+
+\`db.execute(sql, params?)\` → \`{ changes: number, lastInsertRowid: number }\`
+Execute a single INSERT / UPDATE / DELETE or DDL statement. Returns the number of rows affected and the rowid of the last INSERT (0 when not applicable).
+
+\`db.iterate(sql, params?)\` → \`IterableIterator<Record<string, unknown>>\`
+Return a lazy, row-by-row cursor. Each iteration yields a plain object \`{ columnName: value, … }\`. Use this for large tables to avoid loading all rows into memory at once.
+
+\`db.transaction(fn)\` → \`void\`
+Wrap the synchronous function \`fn\` in a BEGIN / COMMIT transaction. Batching many writes inside one transaction is 10–100× faster than individual statements.
+
+\`db.progress(value, total?, label?)\` → \`void\`
+Report progress to the UI progress bar.
+- \`db.progress(50)\` — set the bar to 50 %.
+- \`db.progress(done, total)\` — percentage is computed automatically.
+- \`db.progress(done, total, 'Processing rows…')\` — with an optional label shown next to the bar.
+
+### Jobs API — \`jobs\`
+
+The \`jobs\` object lets scripts trigger configured download and writeback jobs by their display label and \`await\` their completion.
+
+**Identifying a job — use the display label shown in the UI job list:**
+- Standard download job: \`"<SfObject>: <jobName>"\` — e.g. \`"Account: extract"\` or \`"Contact: nightly sync"\`
+- SOQL download job with a name: \`"SOQL: <jobName>"\` — e.g. \`"SOQL: custom query"\`
+- SOQL download job without a name: \`"SOQL"\`
+- Job with no name (object only): just \`"<SfObject>"\` — e.g. \`"Account"\`
+- Writeback job: \`"<SfObject>: <jobName>"\` — e.g. \`"Account: writeback"\`
+
+\`jobs.list()\` → \`Promise<JobListEntry[]>\`
+Return the full list of configured jobs. Each entry has:
+- \`label: string\` — the identifier to pass to \`runDownload\` / \`runWriteback\`
+- \`type: 'extract' | 'writeback'\`
+- \`sfObject: string\` — Salesforce API object name (e.g. \`"Account"\`), or \`"SOQL"\` for raw-SOQL extract jobs
+- \`destTable?: string\` — (extract only) target SQLite table name
+- \`operation?: string\` — (writeback only) DML action: \`"insert"\`, \`"update"\`, \`"upsert"\`, \`"delete"\`, or \`"undelete"\`
+- \`api?: 'REST' | 'Bulk'\` — (writeback only) API used to push records
+
+\`jobs.runDownload(label)\` → \`Promise<{ status: string, rowsSource: number, rowsSucceeded: number }>\`
+Run the download (extract) job identified by \`label\` and wait until it finishes. Throws if the job fails or is cancelled.
+- \`status\` — \`"success"\` or \`"partial"\`
+- \`rowsSource\` — rows fetched from Salesforce
+- \`rowsSucceeded\` — rows written into the SQLite destination table (equals \`rowsSource\` on success)
+
+\`jobs.runWriteback(label)\` → \`Promise<{ _runId: string, status: string, rowsSource: number, rowsSucceeded: number, rowsFailed: number, execTable: string | null }>\`
+Run the writeback job identified by \`label\` and wait until it finishes. Keep the returned result object to pass to the helpers below.
+- \`status\` — \`"success"\`, \`"partial"\`, \`"error"\`, or \`"cancelled"\`
+- \`rowsSource\` — total source rows in the SQL query
+- \`rowsSucceeded\` — rows successfully pushed to Salesforce
+- \`rowsFailed\` — rows that failed
+- \`execTable\` — name of the SQLite table holding every source row with its outcome columns (\`__sf_id\`, \`__status\`, \`__error\`); query it with \`db.query(\`SELECT * FROM \${result.execTable}\`)\`. For REST API jobs the table always exists after the run. For Bulk API jobs it contains only failed rows and is \`null\` when there are no failures.
+
+\`jobs.getFailedRows(result)\` → \`Promise<{ failedRows: Array<{ index: number, message: string, row: Record<string, unknown> }>, keyFields: Array<{ sfField: string, sqlCol: string, label: string }> }>\`
+Fetch the per-row failure details from a previous \`runWriteback\` result. Call this only when \`rowsFailed > 0\`. Alternatively, query \`result.execTable\` directly with \`db.query()\` for full access to all rows and their statuses.
+
+\`jobs.updateTableWithIds(result, opts)\` → \`Promise<{ updated: number, idColCreated: boolean, indexCreated: boolean }>\`
+After a successful writeback, back-fill the Salesforce record IDs that were assigned during the upsert into a local table. \`opts\` must be \`{ sfKeyField: string, targetTable: string, tableKeyCol: string, idColumnName: string }\`.
+
+### Console API — \`console\`
+
+\`console.log(...args)\`, \`console.warn(...args)\`, \`console.error(...args)\` — all arguments are stringified and streamed to the script output panel in real time.
+
+### Environment
+
+- Top-level \`await\` is supported.
+- Node.js globals (\`process\`, \`Buffer\`, \`crypto\`, etc.) are available.
+- \`fetch()\` is available if the Node.js version supports it.
+- There is no DOM: \`document\`, \`window\`, and all browser APIs are undefined.
+
+## JavaScript API: AI-Executed Scripts
+
+Use this API when the AI calls the \`execute_javascript\` tool itself (Intent A, last resort). The script runs in a stricter isolated environment using a null-prototype \`vm\` context. Only \`db\` and \`console\` are exposed — \`jobs.*\` and \`db.progress()\` are not available.
+
+### Database API — \`db\`
+
+\`db.query(sql, params?)\` → \`{ columns: string[], rows: unknown[][] }\`
+Execute a SELECT and return all matching rows in memory. \`columns\` is the ordered list of column names; each element of \`rows\` is an array of values in the same order.
+
+\`db.execute(sql, params?)\` → \`{ changes: number, lastInsertRowid: number }\`
+Execute a single INSERT / UPDATE / DELETE or DDL statement.
+
+\`db.iterate(sql, params?)\` → \`IterableIterator<Record<string, unknown>>\`
+Lazy row-by-row cursor; each iteration yields \`{ columnName: value, … }\`. Use for large tables.
+
+\`db.transaction(fn)\` → \`void\`
+Wrap \`fn\` in a BEGIN / COMMIT transaction. Essential for batching many writes efficiently.
+
+### Console API — \`console\`
+
+\`console.log(...args)\`, \`console.warn(...args)\`, \`console.error(...args)\` — output is captured and returned as the tool result. Console output is capped at 200 lines; use it only for brief status messages (row counts, success / error confirmation). Never print large datasets to the console — write them to a database table instead.
+
+### Environment
+
+- Top-level \`await\` is supported.
+- \`process\`, \`fetch()\`, \`import()\`, and \`require()\` are **not** available.
+- There is no DOM: \`document\`, \`window\`, and all browser APIs are undefined.
+- \`db.progress()\` and the \`jobs.*\` API are **not** available.
+- Scripts run in a null-prototype \`vm\` context; prototype-chain escapes to Node.js globals are blocked.
 
 ## Response Format
 Always respond with a JSON object in this exact shape:

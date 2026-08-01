@@ -428,6 +428,7 @@ onMounted(async () => {
   await nextTick()
   syncEditorHeight()
   initEditor()
+  applyPendingSql()
 })
 
 onDeactivated(() => {
@@ -452,6 +453,7 @@ onActivated(() => {
       const vs = tabViewStates.get(savedKey)
       editor!.restoreViewState(vs ?? null)
     }
+    applyPendingSql()
   })
 })
 
@@ -548,6 +550,20 @@ function insertAtCursor(text: string): void {
 
 function openInScriptEditor(code: string): void {
   router.push({ path: '/scripts', state: { pendingCode: code } })
+}
+
+/**
+ * If the user arrived via "Insert SQL" from the Script Editor AI chat, consume
+ * the pendingSql from history.state and insert it into the active editor tab.
+ */
+function applyPendingSql(): void {
+  const state = history.state as Record<string, unknown>
+  const pendingSql = state?.pendingSql
+  if (typeof pendingSql !== 'string' || !pendingSql.trim()) {
+    return
+  }
+  history.replaceState({ ...state, pendingSql: undefined }, '')
+  insertSqlFromAi(pendingSql)
 }
 
 function insertSqlFromAi(sql: string): void {
