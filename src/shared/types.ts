@@ -235,6 +235,8 @@ export interface JobResult {
   rowsSucceeded?: number
   rowsFailed?: number
   errorMsg?: string
+  /** Non-fatal warning to surface in the UI (e.g. partial exec-table write failure). */
+  warnMsg?: string
   // Bulk API 2.0: SF field column names used in failed results
   columns?: string[]
 }

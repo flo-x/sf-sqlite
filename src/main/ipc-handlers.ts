@@ -94,7 +94,7 @@ const pendingToolCancels = new Map<string, () => void>()
 // map (avoids O(N) scans of the exec table for live progress reporting).
 interface WbRunState {
   sql: string
-  columns: string[]        // source SQL column names
+  columns: string[]        // source SQL column names (SF field names for Bulk API)
   totalRows: number        // total rows in the exec table (set after Phase 0 finishes)
   /** True while Phase 0 (loading source rows into exec table) is still running. */
   loadingPhase: boolean
@@ -102,6 +102,11 @@ interface WbRunState {
   inFlight: number
   /** In-memory tally of error-prefix → row count. Updated as batches complete. */
   distinctErrorCounts: Map<string, number>
+  /**
+   * True for Bulk API runs.  The exec table (if it exists) holds only failed rows
+   * whose columns are Salesforce field names, not the source SQL column names.
+   */
+  isBulk?: boolean
 }
 
 /**
@@ -533,6 +538,43 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
       }
     }
 
+    // Pipelined failed-row ingestion: table is created on the first batch and
+    // rows are inserted in 10 000-row transactions as they arrive, so the full
+    // list never needs to live in memory.
+    let bulkExecTableCreated = false
+    // Captures the first DB error across all batches; surfaced as a warning once
+    // the job completes.  Subsequent batch errors are logged but don't overwrite
+    // the first message.
+    let bulkExecWarnMsg: string | null = null
+
+    const onFailedBatch = (sfColumns: string[], batch: Array<{ message: string; row: unknown[] }>): void => {
+      try {
+        if (!bulkExecTableCreated) {
+          db.wbExecCreateBulkFailed(runId, sfColumns)
+          state.columns = sfColumns
+          state.isBulk = true
+          bulkExecTableCreated = true
+        }
+        db.wbExecInsertBulkFailed(
+          runId,
+          sfColumns,
+          batch.map((e) => ({ message: e.message, errorPrefix: errorPrefix(e.message), row: e.row }))
+        )
+        for (const e of batch) {
+          const prefix = errorPrefix(e.message)
+          state.distinctErrorCounts.set(prefix, (state.distinctErrorCounts.get(prefix) ?? 0) + 1)
+        }
+        state.totalRows += batch.length
+      } catch (dbErr) {
+        const msg = dbErr instanceof Error ? dbErr.message : String(dbErr)
+        debugLog('wbSql', `[${runId}] Bulk failed-rows batch insert: ${msg}`)
+        // Record the first error so the renderer can show a warning.
+        if (!bulkExecWarnMsg) {
+          bulkExecWarnMsg = `Some failed rows could not be saved to the exec table: ${msg}`
+        }
+      }
+    }
+
     ;(async () => {
       const startTime = Date.now()
       try {
@@ -555,19 +597,25 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
               elapsed
             } as JobProgress)
           },
-          abortCtrl.signal
+          abortCtrl.signal,
+          onFailedBatch
         )
 
-        state.columns = result.sfColumns
-        state.totalRows = result.succeeded + result.failed
+        // sfColumns / isBulk are set inside onFailedBatch on first batch; set them
+        // here too for the zero-failures case (where onFailedBatch is never called).
+        if (result.sfColumns.length > 0 && !state.isBulk) {
+          state.columns = result.sfColumns
+          state.isBulk = true
+        }
 
         const histStatus = result.failed === 0 ? 'success'
           : result.succeeded === 0 ? 'error' : 'partial'
-        db.finishWritebackRunHistory(runHistId, histStatus, state.totalRows, result.succeeded, result.failed, Date.now() - startTime)
+        db.finishWritebackRunHistory(runHistId, histStatus, result.succeeded + result.failed, result.succeeded, result.failed, Date.now() - startTime)
         const jobResult: JobResult = {
           runId, type: 'writeback', status: histStatus,
           rowsSucceeded: result.succeeded, rowsFailed: result.failed,
-          columns: result.sfColumns
+          columns: result.sfColumns,
+          warnMsg: bulkExecWarnMsg ?? undefined
         }
         send('job:complete', jobResult)
         scheduler.notifyComplete(jobResult)
@@ -1273,10 +1321,14 @@ export function registerIpcHandlers(): void {
     }
     if (failedCount === 0) throw new Error('No failed rows found for this run.')
 
-    const { columns } = prevState
-    const activeMappings = job.operation === 'delete'
-      ? job.fieldMap.filter((m) => !m.excluded && m.sfField === 'Id')
-      : job.fieldMap.filter((m) => !m.excluded)
+    const { columns, isBulk } = prevState
+    // For Bulk API exec tables, columns are already Salesforce field names so
+    // mapRowToRecord is bypassed.  For REST exec tables, normal field-mapping applies.
+    const activeMappings = isBulk
+      ? []
+      : job.operation === 'delete'
+        ? job.fieldMap.filter((m) => !m.excluded && m.sfField === 'Id')
+        : job.fieldMap.filter((m) => !m.excluded)
     let parsedHeadersRetry: Record<string, string> | undefined
     if (job.customHeaders) {
       try { parsedHeadersRetry = JSON.parse(job.customHeaders) } catch { parsedHeadersRetry = undefined }
@@ -1301,7 +1353,8 @@ export function registerIpcHandlers(): void {
       columns,
       totalRows: 0,
       loadingPhase: true, inFlight: 0,
-      distinctErrorCounts: new Map()
+      distinctErrorCounts: new Map(),
+      isBulk
     }
     addWbRunState(newRunId, newState)
     const runHistId = db.startWritebackRunHistory(jobId, false)
@@ -1330,7 +1383,15 @@ export function registerIpcHandlers(): void {
             if (!batchRows.length) break
             mainOffset += batchRows.length
             newState.inFlight += batchRows.length
-            const records = batchRows.map((b) => mapRowToRecord(b.row, columns, activeMappings))
+            // For Bulk API retries, columns are already SF field names — build the
+            // record directly without going through mapRowToRecord.
+            const records = isBulk
+              ? batchRows.map((b) => {
+                  const rec: Record<string, unknown> = {}
+                  for (let i = 0; i < columns.length; i++) { rec[columns[i]] = b.row[i] ?? null }
+                  return rec
+                })
+              : batchRows.map((b) => mapRowToRecord(b.row, columns, activeMappings))
             const results = await sf.writebackOneBatch(sfOpts, records, signal)
             newState.inFlight -= batchRows.length
             const rtOk = results.filter((r) => r.success).length

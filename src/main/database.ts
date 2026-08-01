@@ -1498,6 +1498,50 @@ export function wbExecBuildCreateSql(runId: string, userSql: string): string {
 }
 
 /**
+ * Create the exec table for a Bulk API job that has failed rows.
+ * The table holds one row per Salesforce-reported failure, with columns
+ * matching the Salesforce field names that were uploaded.
+ *
+ * Column order: __sf_id TEXT, __status TEXT, __error TEXT, __error_prefix TEXT,
+ *               <sfColumn1> TEXT, <sfColumn2> TEXT, …
+ */
+export function wbExecCreateBulkFailed(runId: string, sfColumns: string[]): void {
+  const tn = wbExecTn(runId)
+  const colDefs = sfColumns.map((c) => `${escapeId(c)} TEXT`).join(', ')
+  getDb().exec(
+    `CREATE TABLE ${tn} (__sf_id TEXT, __status TEXT, __error TEXT, __error_prefix TEXT` +
+    (colDefs ? `, ${colDefs}` : '') +
+    `)`
+  )
+}
+
+/**
+ * Insert failed rows returned by the Bulk API into the exec table.
+ * Each entry must include the per-column values (in the same order as sfColumns)
+ * plus the pre-computed error message and its prefix.
+ */
+export function wbExecInsertBulkFailed(
+  runId: string,
+  sfColumns: string[],
+  entries: Array<{ message: string; errorPrefix: string; row: unknown[] }>
+): void {
+  if (!entries.length) return
+  const tn = wbExecTn(runId)
+  const d = getDb()
+  const colNames = ['__sf_id', '__status', '__error', '__error_prefix', ...sfColumns.map(escapeId)].join(', ')
+  const placeholders = Array(4 + sfColumns.length).fill('?').join(', ')
+  const stmt = d.prepare(`INSERT INTO ${tn} (${colNames}) VALUES (${placeholders})`)
+  const insertAll = d.transaction(
+    (rows: Array<{ message: string; errorPrefix: string; row: unknown[] }>) => {
+      for (const entry of rows) {
+        stmt.run('', 'error', entry.message, entry.errorPrefix, ...entry.row)
+      }
+    }
+  )
+  insertAll(entries)
+}
+
+/**
  * Build the SQL that the DB worker executes to create the exec table for a
  * retry run.  Copies only the user-data columns from error rows of the
  * previous run, resetting the metadata columns to their initial values.

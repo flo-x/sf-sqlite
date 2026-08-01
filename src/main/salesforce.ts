@@ -1421,11 +1421,22 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * `recordChunks` is an async iterable that yields successive batches of
  * already-mapped SF records (keys = SF field names).
  */
+/** Batch size for streaming failed-row callbacks. */
+const BULK_FAILED_BATCH = 10_000
+
 export async function writebackBulk2(
   opts: WritebackOptions,
   recordChunks: AsyncIterable<Record<string, unknown>[]>,
   onProgress: (p: Bulk2Progress) => void,
-  signal: AbortSignal
+  signal: AbortSignal,
+  /**
+   * Optional streaming callback for failed rows. When provided, failed rows are
+   * delivered in batches of up to {@link BULK_FAILED_BATCH} rows as they are
+   * downloaded from Salesforce, and `Bulk2Result.failedEntries` is left empty.
+   * The first argument is the Salesforce field-name list (same for every call).
+   * Errors thrown by the callback are swallowed so the download completes.
+   */
+  onFailedBatch?: (sfColumns: string[], batch: Array<{ message: string; row: unknown[] }>) => void
 ): Promise<Bulk2Result> {
   if (opts.operation === 'undelete') {
     throw new Error(
@@ -1583,8 +1594,19 @@ export async function writebackBulk2(
     // Data columns = uploaded columns minus any sf__ meta fields.
     const dataHeaders = uploadedColumns.filter((h: string) => !h.startsWith('sf__'))
 
-    // Failed results
+    // Failed results — stream into batches when a callback is supplied so the
+    // full list never has to live in memory at once.
     const failedEntries: Array<{ index: number; message: string; row: unknown[] }> = []
+    let failedCount = 0
+    let batchBuf: Array<{ message: string; row: unknown[] }> = []
+
+    const flushBatch = (): void => {
+      if (!onFailedBatch || batchBuf.length === 0) return
+      const snapshot = batchBuf
+      batchBuf = []
+      try { onFailedBatch(dataHeaders, snapshot) } catch { /* keep downloading on DB error */ }
+    }
+
     let failedLocator: string | null = null
     do {
       const path = failedLocator
@@ -1598,17 +1620,27 @@ export async function writebackBulk2(
       const errorIdx = parsed.headers.indexOf('sf__Error')
       const dataIdxMap = dataHeaders.map((h: string) => parsed.headers.indexOf(h))
       for (const row of parsed.rows) {
-        failedEntries.push({
-          index: failedEntries.length,
+        const entry = {
           message: errorIdx >= 0 ? row[errorIdx] : 'Unknown error',
           row: dataIdxMap.map((i: number) => (i >= 0 ? row[i] : null))
-        })
+        }
+        if (onFailedBatch) {
+          batchBuf.push(entry)
+          failedCount++
+          if (batchBuf.length >= BULK_FAILED_BATCH) flushBatch()
+        } else {
+          failedEntries.push({ index: failedCount, ...entry })
+          failedCount++
+        }
       }
     } while (failedLocator)
 
+    // Flush any remaining rows in the buffer.
+    flushBatch()
+
     return {
       succeeded: finalProcessed - finalFailed,
-      failed: failedEntries.length,
+      failed: failedCount,
       sfColumns: dataHeaders,
       failedEntries,
       insertedIds: []

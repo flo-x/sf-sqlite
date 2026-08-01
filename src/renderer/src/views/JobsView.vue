@@ -392,7 +392,7 @@
               <div v-if="wbEditForm.operation === 'upsert'" class="form-group"><label>External ID Field (SF)</label><input v-model="wbEditForm.externalIdField" type="text" placeholder="Id" /></div>
             </template>
             <div v-else-if="wbEditForm.sfObject" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Loading field list…</div>
-            <div class="form-row">
+            <div v-if="!wbEditForm.useBulkApi" class="form-row">
               <div class="form-group"><label>Batch Size</label><input v-model.number="wbEditForm.batchSize" type="number" placeholder="200" /></div>
               <div class="form-group"><label>Threads (1–10)</label><input v-model.number="wbEditForm.threads" type="number" min="1" max="10" placeholder="1" /></div>
             </div>
@@ -497,7 +497,7 @@
               <div v-if="wbEditForm.operation === 'upsert'" class="form-group"><label>External ID Field (SF)</label><input v-model="wbEditForm.externalIdField" type="text" placeholder="Id" /></div>
             </template>
             <div v-else-if="wbEditForm.sfObject" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Loading field list…</div>
-            <div class="form-row">
+            <div v-if="!wbEditForm.useBulkApi" class="form-row">
               <div class="form-group"><label>Batch Size</label><input v-model.number="wbEditForm.batchSize" type="number" placeholder="200" /></div>
               <div class="form-group"><label>Threads (1–10)</label><input v-model.number="wbEditForm.threads" type="number" min="1" max="10" placeholder="1" /></div>
             </div>
@@ -570,7 +570,7 @@
               <span style="white-space:pre-wrap;">{{ execWarn }}</span>
               <button class="btn btn-ghost btn-sm" style="margin-left:auto;flex-shrink:0;" @click="execWarn = null">Dismiss</button>
             </div>
-            <template v-if="!wbThisJobIsQueued && execIsBulkApi">
+            <template v-if="!wbThisJobIsQueued && execIsBulkApi && !(execJobDone && wbFailedCount > 0)">
               <div v-if="!wbThisJobIsRunning && !execJobDone && !execError" class="empty-state" style="padding:32px 16px;">No execution data yet — click ▶ Execute to run this job.</div>
               <div v-else-if="wbThisJobIsRunning" class="bulk-phase-card">
                 <div class="bulk-phase-row">
@@ -602,6 +602,9 @@
                       <span class="spinner" style="width:14px;height:14px;border-width:2px;flex-shrink:0;"></span>
                       Loading source data into execution table…
                     </template>
+                    <template v-else-if="execIsBulkApi && execJobDone">
+                      Processed: <strong>{{ wbSucceededCount.toLocaleString() }}</strong> succeeded, <strong style="color:var(--danger);">{{ wbFailedCount.toLocaleString() }}</strong> failed — showing failed rows
+                    </template>
                     <template v-else-if="wbTotalRows > 0">
                       <span v-if="wbThisJobIsRunning" class="spinner" style="width:14px;height:14px;border-width:2px;flex-shrink:0;"></span>
                       {{ wbThisJobIsRunning ? 'Processing' : 'Processed' }} <strong>{{ (wbThisJobIsRunning ? wbTotalRows : (wbSucceededCount + wbFailedCount)).toLocaleString() }}</strong>
@@ -609,7 +612,7 @@
                       <template v-if="execRowsPerSec > 0">, <strong>{{ execRowsPerSec.toLocaleString() }}</strong> rows/sec</template>
                     </template>
                   </div>
-                  <div v-if="wbTotalRows > 0" class="exec-status-filter" style="margin-left:auto;">
+                  <div v-if="wbTotalRows > 0 && !execIsBulkApi" class="exec-status-filter" style="margin-left:auto;">
                     <button class="exec-filter-pill" :class="{ active: wbAllFiltersOn }" @click="execFilterSuccess = execFilterError = execFilterPending = execFilterQueued = true; failedErrorFilter = ''">All <span class="exec-filter-count">{{ wbTotalRows.toLocaleString() }}</span></button>
                     <button class="exec-filter-pill" :class="{ active: execFilterSuccess, 'exec-filter-pill--ok': true }" @click="execFilterSuccess = !execFilterSuccess">✓ OK <span class="exec-filter-count">{{ wbSucceededCount.toLocaleString() }}</span></button>
                     <button class="exec-filter-pill" :class="{ active: execFilterError, 'exec-filter-pill--error': true }" @click="execFilterError = !execFilterError">✗ Error <span class="exec-filter-count">{{ wbFailedCount.toLocaleString() }}</span></button>
@@ -1526,11 +1529,12 @@ async function wbRestoreExecState(jobId: number): Promise<void> {
   execBulkPhase.value = ''; execBulkUploaded.value = 0
   execBulkProcessed.value = 0; execBulkJobState.value = ''
   execPageRows.value = []
-  // Restore the page data from the exec table if a run exists
-  if (s.runId && !s.isBulkApi) {
+  // Restore the page data from the exec table if a run exists.
+  // For Bulk API, the exec table only exists when there are failed rows.
+  if (s.runId && (!s.isBulkApi || s.failed > 0)) {
     await wbLoadExecPage(0)
     // If job was still running, start polling to continue receiving updates
-    if (!s.jobDone) startExecPoll(s.runId)
+    if (!s.jobDone && !s.isBulkApi) startExecPoll(s.runId)
   }
 }
 
@@ -1776,13 +1780,36 @@ function wbStartRunMonitor(jobId: number, runId: string): void {
           await wbLoadExecPage(execPageOffset.value)
         } catch { /* ignore */ }
       } else {
-        // Bulk API: set counts from job result
-        if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined) {
-          execTotalRows.value = e.rowsSucceeded + e.rowsFailed
-          execSucceeded.value = e.rowsSucceeded; execFailed.value = e.rowsFailed
-          execFailedTotal.value = e.rowsFailed
-          if (e.rowsSucceeded + e.rowsFailed === 0) execWarn.value = 'The job completed but 0 rows were processed. Check that your SQL query returns rows and that at least one field mapping is active.'
+        // Bulk API: counts come from the job result event.
+        const rowsOk = e.rowsSucceeded ?? 0
+        const rowsFail = e.rowsFailed ?? 0
+        execSucceeded.value = rowsOk
+        execFailed.value = rowsFail
+        execFailedTotal.value = rowsFail
+        if (rowsOk + rowsFail === 0) {
+          execWarn.value = 'The job completed but 0 rows were processed. Check that your SQL query returns rows and that at least one field mapping is active.'
         }
+        // If there are failed rows, populate the DataGrid from the exec table.
+        if (rowsFail > 0 && runId) {
+          try {
+            // exec table only holds failed rows — set totalRows to failed count
+            execTotalRows.value = rowsFail
+            // Pre-select only the error filter (no OK/queued rows in exec table)
+            execFilterSuccess.value = false
+            execFilterQueued.value = false
+            execFilterError.value = true
+            const de = await window.api.wbExecDistinctErrors(runId)
+            execFailedDistinctErrors.value = de
+            await wbLoadExecPage(0)
+          } catch { /* ignore */ }
+        }
+      }
+      // Surface any non-fatal warning from the main process (e.g. partial exec-table
+      // write failure).  Appended so it does not erase a more specific prior warn.
+      if (e.warnMsg) {
+        execWarn.value = execWarn.value
+          ? `${execWarn.value}\n${e.warnMsg}`
+          : e.warnMsg
       }
       wbCaptureExecState(jobId)
     } else {
@@ -1794,7 +1821,10 @@ function wbStartRunMonitor(jobId: number, runId: string): void {
         else if (e.status !== 'error') cached.warn = null
         if (e.rowsSucceeded !== undefined) cached.succeeded = e.rowsSucceeded
         if (e.rowsFailed !== undefined) { cached.failed = e.rowsFailed; cached.failedTotal = e.rowsFailed }
-        if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined) cached.totalRows = e.rowsSucceeded + e.rowsFailed
+        if (e.rowsSucceeded !== undefined && e.rowsFailed !== undefined) {
+          // For Bulk API the exec table only holds failed rows, so totalRows = failed count.
+          cached.totalRows = cached.isBulkApi ? (e.rowsFailed ?? 0) : (e.rowsSucceeded + e.rowsFailed)
+        }
         if (e.columns && e.columns.length > 0) cached.columns = e.columns
         cached.cachedAt = Date.now()
       }
