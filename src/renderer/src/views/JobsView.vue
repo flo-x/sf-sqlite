@@ -106,7 +106,7 @@
           <div class="editor-body">
             <div class="form-group">
               <label>Job Name</label>
-              <input v-model="exEditForm.name" type="text" placeholder="e.g. Active Accounts EU" />
+              <input v-model="exEditForm.name" type="text" placeholder="extract" />
             </div>
             <div class="form-group">
               <label>Mode</label>
@@ -232,7 +232,7 @@
               <span v-if="exClearMsg" class="qs-msg" :class="exClearMsgError ? 'qs-msg-error' : 'qs-msg-ok'">{{ exClearMsg }}</span>
             </div>
             <div v-if="exSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ exSaveError }}</div>
-            <div class="form-group"><label>Job Name</label><input v-model="exEditForm.name" type="text" placeholder="e.g. Active Accounts EU" /></div>
+            <div class="form-group"><label>Job Name</label><input v-model="exEditForm.name" type="text" placeholder="extract" /></div>
             <div class="form-group">
               <label>Mode</label>
               <div class="mode-toggle">
@@ -361,7 +361,7 @@
             </div>
           </div>
           <div class="editor-body">
-            <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="e.g. Sync EU Accounts" /></div>
+            <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
             <div class="form-group">
               <label>Operation</label>
               <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
@@ -466,7 +466,7 @@
               </button>
             </div>
             <div v-if="wbSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ wbSaveError }}</div>
-            <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="e.g. Sync EU Accounts" /></div>
+            <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
             <div class="form-group">
               <label>Operation</label>
               <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
@@ -1056,6 +1056,7 @@ async function exOnObjectChange(name: string, resetFields = true): Promise<void>
 
 async function exSave(andExecute: boolean): Promise<void> {
   exSaveError.value = ''
+  if (!exEditForm.value.name.trim()) exEditForm.value.name = 'extract'
   const candidateName = exEditForm.value.name.trim()
   exSaving.value = true
   try {
@@ -1654,6 +1655,7 @@ async function wbSave(andExecute: boolean): Promise<void> {
     const badMappings = wbEditForm.value.fieldMap.filter((m) => !m.excluded && m.sfField && m.sfField !== 'Id')
     if (badMappings.length > 0) { wbSaveError.value = `Delete operations only send the Id field. Please uncheck: ${badMappings.map((m) => m.sfField).join(', ')}.`; return }
   }
+  if (!wbEditForm.value.name.trim()) wbEditForm.value.name = 'writeback'
   const wbCandidateName = wbEditForm.value.name.trim()
   const wbCandidateObj = wbEditForm.value.sfObject.toLowerCase()
   const wbDuplicate = wbJobs.value.find((j) => {

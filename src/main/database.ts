@@ -31,18 +31,12 @@ export function openDatabase(filePath: string): { path: string } {
   }
   const dir = dirname(filePath)
   mkdirSync(dir, { recursive: true })
-  let t = Date.now()
   db = new Database(filePath)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
-  console.log(`[db] open took ${Date.now() - t} ms`)
   currentPath = filePath
-  t = Date.now()
   initMetaTables()
-  console.log(`[db] initMetaTables took ${Date.now() - t} ms`)
-  t = Date.now()
   cleanupAbandonedExecTables()
-  console.log(`[db] cleanupAbandonedExecTables took ${Date.now() - t} ms`)
   return { path: filePath }
 }
 

@@ -78,7 +78,8 @@ const filtered = computed(() => {
 
 const SYSTEM_FIELD_LABELS = new Set([
   'deleted', 'created date', 'created by id', 'last modified date',
-  'last modified by id', 'system modstamp', 'may edit', 'is locked'
+  'last modified by id', 'system modstamp', 'may edit', 'is locked',
+  'currency iso code'
 ])
 
 const systemFields = computed(() =>

@@ -1,6 +1,6 @@
 import { parentPort, workerData } from 'worker_threads'
 import Database from 'better-sqlite3'
-import type { ScriptLog } from '../shared/types'
+import type { ScriptLog, JobListEntry } from '../shared/types'
 
 interface WorkerData {
   code: string
@@ -46,14 +46,16 @@ parentPort!.on('message', (msg: { type: string } & Record<string, unknown>) => {
     msg.type === 'runExtractResult' ||
     msg.type === 'runWritebackResult' ||
     msg.type === 'getFailedRowsResult' ||
-    msg.type === 'updateTableWithIdsResult'
+    msg.type === 'updateTableWithIdsResult' ||
+    msg.type === 'listJobsResult'
   ) {
     pending.resolve(msg.result)
   } else if (
     msg.type === 'runExtractError' ||
     msg.type === 'runWritebackError' ||
     msg.type === 'getFailedRowsError' ||
-    msg.type === 'updateTableWithIdsError'
+    msg.type === 'updateTableWithIdsError' ||
+    msg.type === 'listJobsError'
   ) {
     pending.reject(new Error(msg.error as string))
   }
@@ -115,19 +117,30 @@ async function main(): Promise<void> {
   // Row-level data (failedRows, keyFields) is fetched lazily via getFailedRows
   // to avoid cloning potentially large datasets into the worker thread.
   const jobsApi = {
-    runDownload: (name: string): Promise<{ rowsLoaded: number }> =>
-      sendJobRequest('runExtract', { name }) as Promise<{ rowsLoaded: number }>,
+    runDownload: (name: string): Promise<{
+      status: string
+      rowsSource: number
+      rowsSucceeded: number
+    }> => sendJobRequest('runExtract', { name }) as Promise<{
+      status: string
+      rowsSource: number
+      rowsSucceeded: number
+    }>,
 
     runWriteback: (name: string): Promise<{
       _runId: string
       status: string
+      rowsSource: number
       rowsSucceeded: number
       rowsFailed: number
+      execTable: string | null
     }> => sendJobRequest('runWriteback', { name }) as Promise<{
       _runId: string
       status: string
+      rowsSource: number
       rowsSucceeded: number
       rowsFailed: number
+      execTable: string | null
     }>,
 
     getFailedRows: (result: { _runId: string }): Promise<{
@@ -146,7 +159,10 @@ async function main(): Promise<void> {
         updated: number
         idColCreated: boolean
         indexCreated: boolean
-      }>
+      }>,
+
+    list: (): Promise<JobListEntry[]> =>
+      sendJobRequest('listJobs', {}) as Promise<JobListEntry[]>
   }
 
   const startTs = Date.now()

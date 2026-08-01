@@ -172,6 +172,20 @@ export interface WritebackJob {
 
 export type WritebackJobInput = Omit<WritebackJob, 'id' | 'createdAt' | 'updatedAt'>
 
+export interface JobListEntry {
+  /** Display label used to identify the job in the scripts API (e.g. "Account: extract"). */
+  label: string
+  type: 'extract' | 'writeback'
+  /** Salesforce API object name (e.g. "Account"), or "SOQL" for raw-SOQL extract jobs. */
+  sfObject: string
+  /** Extract jobs only: target SQLite table name. */
+  destTable?: string
+  /** Writeback jobs only: DML operation. */
+  operation?: 'insert' | 'update' | 'upsert' | 'delete' | 'undelete'
+  /** Writeback jobs only: API used to push records. */
+  api?: 'REST' | 'Bulk'
+}
+
 export interface WritebackRunEntry {
   id: number
   jobId: number

@@ -1076,13 +1076,13 @@ async function confirmColRename(): Promise<void> {
   z-index: 200;
 }
 .vacuum-modal {
-  background: var(--bg-panel, #1e1e2e);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 22px 24px;
   max-width: 380px;
   width: calc(100% - 48px);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
 }
 .vacuum-modal-title { font-weight: 600; font-size: 14px; margin-bottom: 10px; }
 .vacuum-modal-body { font-size: 13px; line-height: 1.55; }

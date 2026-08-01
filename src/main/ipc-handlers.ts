@@ -24,11 +24,14 @@ import {
 } from './llm'
 import { applyExtraCaCert, clearExtraCaCert, disablePatch, enablePatch, isPatchDisabled, getShellCaCertPath, getActiveCaCertPath } from './tls-patch'
 import type {
+  ExtractJob,
   ExtractJobInput,
+  WritebackJob,
   WritebackJobInput,
   FieldMapping,
   JobProgress,
   JobResult,
+  JobListEntry,
   FieldDescriptor,
   SavedScriptInput,
   ScriptLog,
@@ -227,9 +230,27 @@ function autoConnectAfterDbOpen(): void {
 
 export interface WritebackScriptResult {
   _runId: string
-  status: 'success' | 'partial' | 'error'
+  status: 'success' | 'partial' | 'error' | 'cancelled'
+  /** Total rows in the source SQL query. */
+  rowsSource: number
+  /** Rows successfully pushed to Salesforce. */
   rowsSucceeded: number
+  /** Rows that failed to push to Salesforce. */
   rowsFailed: number
+  /**
+   * Name of the SQLite exec table that holds every source row with its
+   * Salesforce outcome (__sf_id, __status, __error columns).
+   * For REST API jobs the table always exists after the run.
+   * For Bulk API jobs the table only exists when rowsFailed > 0 (failed rows only).
+   * null when no exec table was created (e.g. the job was cancelled before Phase 0
+   * completed, or a Bulk job had zero failures).
+   */
+  execTable: string | null
+}
+
+/** Bare table name (no SQL quoting) used for the writeback exec table. */
+function wbExecTableName(runId: string): string {
+  return `_wb_exec_${runId.replace(/-/g, '_')}`
 }
 
 export interface WritebackFailedRowsResult {
@@ -489,7 +510,7 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
     db.finishWritebackRunHistory(runHistId, 'error', 0, 0, 0, 0, msg)
     const jobResult: JobResult = { runId, type: 'writeback', status: 'error', errorMsg: msg }
     send('job:complete', jobResult)
-    return { _runId: runId, status: 'error', rowsSucceeded: 0, rowsFailed: 0 }
+    return { _runId: runId, status: 'error', rowsSource: 0, rowsSucceeded: 0, rowsFailed: 0, execTable: null }
   }
 
   const abortCtrl = new AbortController()
@@ -784,11 +805,20 @@ async function startWritebackRun(jobId: number, runId: string): Promise<Writebac
 
   // Await the basic completion signal from the scheduler.
   const basicResult = await completionPromise
+  const succeeded = basicResult.rowsSucceeded ?? 0
+  const failed = basicResult.rowsFailed ?? 0
+  // REST path: state.totalRows is set after Phase 0; Bulk path: it stays 0.
+  const rowsSource = state.totalRows > 0 ? state.totalRows : succeeded + failed
+  // REST path exec table always exists when Phase 0 completed (totalRows > 0).
+  // Bulk path exec table exists only when there are failed rows.
+  const execTable = (state.totalRows > 0 || failed > 0) ? wbExecTableName(runId) : null
   return {
     _runId: runId,
-    status: basicResult.status as 'success' | 'partial' | 'error',
-    rowsSucceeded: basicResult.rowsSucceeded ?? 0,
-    rowsFailed: basicResult.rowsFailed ?? 0
+    status: basicResult.status as 'success' | 'partial' | 'error' | 'cancelled',
+    rowsSource,
+    rowsSucceeded: succeeded,
+    rowsFailed: failed,
+    execTable,
   }
 }
 
@@ -828,20 +858,60 @@ function getProviderBaseUrl(settings: LlmSettings): string {
 
 // ── Module-level job executors (used by both IPC handlers and script runner) ──
 
-function runExtractByName(name: string): Promise<JobResult> {
-  const job = db.listExtractJobs().find((j) => j.name === name)
-  if (!job) throw new Error(`Download job "${name}" not found`)
+/**
+ * Compute the display label for a download job — the same string shown in the
+ * UI job list and used by jobs.runDownload() to identify a job.
+ * Format: "SOQL: <name>" | "SOQL" | "<SfObject>: <name>" | "<SfObject>"
+ */
+function extractJobLabel(j: ExtractJob): string {
+  if (j.soqlQuery) {
+    return j.name ? `SOQL: ${j.name}` : 'SOQL'
+  }
+  return j.name ? `${j.sfObject}: ${j.name}` : j.sfObject
+}
+
+/**
+ * Compute the display label for a writeback job — the same string shown in the
+ * UI job list and used by jobs.runWriteback() to identify a job.
+ * Format: "<SfObject>: <name>" | "<SfObject>"
+ */
+function writebackJobLabel(j: WritebackJob): string {
+  return j.name ? `${j.sfObject}: ${j.name}` : j.sfObject
+}
+
+function runExtractByName(label: string): Promise<JobResult> {
+  const labelLower = label.toLowerCase()
+  const job = db.listExtractJobs().find((j) => extractJobLabel(j).toLowerCase() === labelLower)
+  if (!job) throw new Error(`Download job "${label}" not found`)
   // Pre-generate runId so the same value is used in startFn and in the
   // external event emitted to the renderer for UI badge synchronisation.
   const runId = randomUUID()
-  return scheduler.schedule('extract', job.id, name, runId, () => startExtractRun(job.id, runId))
+  return scheduler.schedule('extract', job.id, label, runId, () => startExtractRun(job.id, runId))
 }
 
-function runWritebackByName(name: string): Promise<WritebackScriptResult> {
-  const job = db.listWritebackJobs().find((j) => j.name === name)
-  if (!job) throw new Error(`Writeback job "${name}" not found`)
+function runWritebackByName(label: string): Promise<WritebackScriptResult> {
+  const labelLower = label.toLowerCase()
+  const job = db.listWritebackJobs().find((j) => writebackJobLabel(j).toLowerCase() === labelLower)
+  if (!job) throw new Error(`Writeback job "${label}" not found`)
   const runId = randomUUID()
-  return scheduler.schedule('writeback', job.id, name, runId, () => startWritebackRun(job.id, runId))
+  return scheduler.schedule('writeback', job.id, label, runId, () => startWritebackRun(job.id, runId))
+}
+
+function listJobs(): JobListEntry[] {
+  const extractEntries: JobListEntry[] = db.listExtractJobs().map((j) => ({
+    label: extractJobLabel(j),
+    type: 'extract' as const,
+    sfObject: j.soqlQuery ? 'SOQL' : j.sfObject,
+    destTable: j.destTable,
+  }))
+  const writebackEntries: JobListEntry[] = db.listWritebackJobs().map((j) => ({
+    label: writebackJobLabel(j),
+    type: 'writeback' as const,
+    sfObject: j.sfObject,
+    operation: j.operation,
+    api: j.useBulkApi ? 'Bulk' : 'REST',
+  }))
+  return [...extractEntries, ...writebackEntries]
 }
 
 /** Stub: "update table with IDs" will be re-implemented later. */
@@ -1469,7 +1539,7 @@ export function registerIpcHandlers(): void {
   })
 
   // Register executors so the script runner can dispatch jobs from worker threads.
-  scriptRunner.setJobExecutors(runExtractByName, runWritebackByName, runUpdateTableWithIds, getFailedRowsByRunId)
+  scriptRunner.setJobExecutors(runExtractByName, runWritebackByName, runUpdateTableWithIds, getFailedRowsByRunId, listJobs)
 
   // ── Scripts ─────────────────────────────────────────────────────────────────
   ipcMain.handle('script:list', () => db.listScripts())

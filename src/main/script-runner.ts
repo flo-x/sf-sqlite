@@ -1,6 +1,6 @@
 import { Worker } from 'worker_threads'
 import path from 'path'
-import type { ScriptLog, ScriptComplete, ScriptProgress, JobResult } from '../shared/types'
+import type { ScriptLog, ScriptComplete, ScriptProgress, JobResult, JobListEntry } from '../shared/types'
 import type { WritebackScriptResult, WritebackFailedRowsResult } from './ipc-handlers'
 
 type ExtractExecutor = (name: string) => Promise<JobResult>
@@ -13,22 +13,26 @@ type UpdateTableExecutor = (
   idColumnName: string
 ) => { updated: number; idColCreated: boolean; indexCreated: boolean }
 type GetFailedRowsExecutor = (runId: string) => WritebackFailedRowsResult
+type ListJobsExecutor = () => JobListEntry[]
 
 let extractExecutor: ExtractExecutor | null = null
 let writebackExecutor: WritebackExecutor | null = null
 let updateTableExecutor: UpdateTableExecutor | null = null
 let getFailedRowsExecutor: GetFailedRowsExecutor | null = null
+let listJobsExecutor: ListJobsExecutor | null = null
 
 export function setJobExecutors(
   extract: ExtractExecutor,
   writeback: WritebackExecutor,
   updateTable: UpdateTableExecutor,
-  getFailedRows: GetFailedRowsExecutor
+  getFailedRows: GetFailedRowsExecutor,
+  listJobs: ListJobsExecutor
 ): void {
   extractExecutor = extract
   writebackExecutor = writeback
   updateTableExecutor = updateTable
   getFailedRowsExecutor = getFailedRows
+  listJobsExecutor = listJobs
 }
 
 const activeWorkers = new Map<string, Worker>()
@@ -62,7 +66,20 @@ export function runScript(
       }
       extractExecutor(name)
         .then((result) => {
-          worker.postMessage({ type: 'runExtractResult', reqId, result: { rowsLoaded: result.rowsLoaded ?? 0 } })
+          if (result.status === 'error') {
+            worker.postMessage({ type: 'runExtractError', reqId, error: result.errorMsg ?? 'Extract job failed' })
+          } else if (result.status === 'cancelled') {
+            worker.postMessage({ type: 'runExtractError', reqId, error: 'Extract job was cancelled' })
+          } else {
+            const rowsLoaded = result.rowsLoaded ?? 0
+            worker.postMessage({
+              type: 'runExtractResult', reqId, result: {
+                status: result.status,
+                rowsSource: rowsLoaded,
+                rowsSucceeded: rowsLoaded,
+              }
+            })
+          }
         })
         .catch((err: unknown) => {
           worker.postMessage({ type: 'runExtractError', reqId, error: err instanceof Error ? err.message : String(err) })
@@ -104,6 +121,18 @@ export function runScript(
         worker.postMessage({ type: 'getFailedRowsResult', reqId, result })
       } catch (err: unknown) {
         worker.postMessage({ type: 'getFailedRowsError', reqId, error: err instanceof Error ? err.message : String(err) })
+      }
+    } else if (msg.type === 'listJobs') {
+      const { reqId } = msg as { type: string; reqId: string }
+      if (!listJobsExecutor) {
+        worker.postMessage({ type: 'listJobsError', reqId, error: 'Job executor not available' })
+        return
+      }
+      try {
+        const result = listJobsExecutor()
+        worker.postMessage({ type: 'listJobsResult', reqId, result })
+      } catch (err: unknown) {
+        worker.postMessage({ type: 'listJobsError', reqId, error: err instanceof Error ? err.message : String(err) })
       }
     }
   })
