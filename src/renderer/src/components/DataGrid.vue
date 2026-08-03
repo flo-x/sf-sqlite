@@ -137,12 +137,6 @@
           <span style="font-size:12px;">{{ (externalOffset ?? 0) + 1 }}–{{ Math.min((externalOffset ?? 0) + rows.length, displayRowCount) }} / {{ displayRowCount.toLocaleString() }}</span>
           <button class="btn btn-ghost btn-sm" :disabled="(externalOffset ?? 0) + rows.length >= displayRowCount" @click="onPageChange((externalOffset ?? 0) + PAGE)">Next ›</button>
         </div>
-        <!-- Internal pagination (client-side): DataGrid slices rows locally -->
-        <div v-else-if="!onPageChange && rows.length > PAGE" style="margin-left: auto; display:flex; gap:6px; align-items:center;">
-          <button class="btn btn-ghost btn-sm" :disabled="scrollOffset === 0" @click="scrollOffset = Math.max(0, scrollOffset - PAGE)">‹ Prev</button>
-          <span style="font-size:12px;">{{ scrollOffset + 1 }}–{{ Math.min(scrollOffset + PAGE, rows.length) }}</span>
-          <button class="btn btn-ghost btn-sm" :disabled="scrollOffset + PAGE >= rows.length" @click="scrollOffset = Math.min(rows.length - PAGE, scrollOffset + PAGE)">Next ›</button>
-        </div>
       </div>
     </template>
   </div>
@@ -207,11 +201,10 @@ const tableFixed = ref(false)   // switches to fixed layout after first width sn
 
 const internalSortCriteria = ref<SortCriterion[]>([])
 /**
- * In internal pagination mode: the first row index of the current page within sortedRows.
- * In external pagination mode: the first row index of the current virtual window within
- * the delivered page (i.e. the virtual-scroll position within the page).
+ * The first row index of the current virtual scroll window within sortedRows.
+ * Updated by onTableWrapScroll in both internal and external pagination modes.
  * All selection, focus, and display logic uses `scrollOffset + vi` as the
- * page-relative row index, which is consistent across both modes.
+ * row index, which is consistent across both modes.
  */
 const scrollOffset = ref(0)
 
@@ -230,11 +223,11 @@ const vViewCount = computed(() => Math.ceil(vWrapHeight.value / Math.max(1, vRow
 const totalCols = computed(() => (props.showRowNumbers ? 1 : 0) + displayCols.value.length)
 /** Pixel height of the top spacer row (rows above the virtual window). */
 const paddingTopPx = computed(() =>
-  props.onPageChange && tableFixed.value ? scrollOffset.value * vRowHeight.value : 0
+  tableFixed.value ? scrollOffset.value * vRowHeight.value : 0
 )
 /** Pixel height of the bottom spacer row (rows below the virtual window). */
 const paddingBottomPx = computed(() => {
-  if (!props.onPageChange || !tableFixed.value) return 0
+  if (!tableFixed.value) return 0
   const windowEnd = scrollOffset.value + vViewCount.value + 2 * VBUFFER
   return Math.max(0, (sortedRows.value.length - windowEnd) * vRowHeight.value)
 })
@@ -470,27 +463,21 @@ const isTruncated = computed(() => truncatedAt.value !== null)
 const PAGE = computed(() => props.pageSize ?? 200)
 
 /**
- * The rows actually rendered in the DOM.
+ * The rows actually rendered in the DOM — always uses a virtual window.
  *
- * External mode (onPageChange set):
- *   - Auto-layout phase (!tableFixed): render only the first VSAMPLE rows so
- *     the browser can auto-size column widths without mounting 100k nodes.
- *   - Fixed layout: render a virtual window of rows centred around scrollOffset,
- *     padded by VBUFFER rows on each side.  Top and bottom spacer <tr> rows
- *     maintain the full scroll height for everything outside the window.
- *
- * Internal mode: slice a single page locally (unchanged behaviour).
+ * Auto-layout phase (!tableFixed): render only the first VSAMPLE rows so
+ * the browser can auto-size column widths without mounting 100k nodes.
+ * Fixed layout: render a virtual window of rows centred around scrollOffset,
+ * padded by VBUFFER rows on each side.  Top and bottom spacer <tr> rows
+ * maintain the full scroll height for everything outside the window.
  */
 const visibleRows = computed(() => {
-  if (props.onPageChange) {
-    if (!tableFixed.value) {
-      // Auto-layout sample: limit DOM size during the column-width snapshot phase.
-      return sortedRows.value.slice(0, VSAMPLE)
-    }
-    const end = Math.min(sortedRows.value.length, scrollOffset.value + vViewCount.value + 2 * VBUFFER)
-    return sortedRows.value.slice(scrollOffset.value, end)
+  if (!tableFixed.value) {
+    // Auto-layout sample: limit DOM size during the column-width snapshot phase.
+    return sortedRows.value.slice(0, VSAMPLE)
   }
-  return sortedRows.value.slice(scrollOffset.value, scrollOffset.value + PAGE.value)
+  const end = Math.min(sortedRows.value.length, scrollOffset.value + vViewCount.value + 2 * VBUFFER)
+  return sortedRows.value.slice(scrollOffset.value, end)
 })
 
 // Total row count shown in the footer and "Copy N rows" button.
@@ -771,7 +758,7 @@ function frozenTdStyle(col: DisplayCol): Record<string, string> {
 // ── Virtual scroll event handling ─────────────────────────────────────────────
 
 function onTableWrapScroll(): void {
-  if (!props.onPageChange || !tableWrap.value) return
+  if (!tableWrap.value) return
   const rawTop = Math.floor(tableWrap.value.scrollTop / Math.max(1, vRowHeight.value))
   const newOffset = Math.max(0, rawTop - VBUFFER)
   if (newOffset === scrollOffset.value) return
