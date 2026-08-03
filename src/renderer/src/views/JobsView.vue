@@ -105,7 +105,7 @@
           </div>
           <div class="editor-body">
             <div class="form-group">
-              <label>Job Name</label>
+              <label>Job Name Suffix</label>
               <input v-model="exEditForm.name" type="text" placeholder="extract" />
             </div>
             <div class="form-group">
@@ -232,7 +232,7 @@
               <span v-if="exClearMsg" class="qs-msg" :class="exClearMsgError ? 'qs-msg-error' : 'qs-msg-ok'">{{ exClearMsg }}</span>
             </div>
             <div v-if="exSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ exSaveError }}</div>
-            <div class="form-group"><label>Job Name</label><input v-model="exEditForm.name" type="text" placeholder="extract" /></div>
+            <div class="form-group"><label>Job Name Suffix</label><input v-model="exEditForm.name" type="text" placeholder="extract" /></div>
             <div class="form-group">
               <label>Mode</label>
               <div class="mode-toggle">
@@ -361,7 +361,7 @@
             </div>
           </div>
           <div class="editor-body">
-            <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
+            <div class="form-group"><label>Job Name Suffix</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
             <div class="form-group">
               <label>Operation</label>
               <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
@@ -466,7 +466,7 @@
               </button>
             </div>
             <div v-if="wbSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ wbSaveError }}</div>
-            <div class="form-group"><label>Job Name</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
+            <div class="form-group"><label>Job Name Suffix</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
             <div class="form-group">
               <label>Operation</label>
               <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
