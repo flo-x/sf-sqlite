@@ -279,7 +279,10 @@ Use this API when generating JavaScript code for the user to run themselves (Int
 ### Database API — \`db\`
 
 \`db.query(sql, params?)\` → \`{ columns: string[], rows: unknown[][] }\`
-Execute a SELECT and return all matching rows in memory. \`columns\` is the ordered list of column names; each element of \`rows\` is an array of values in the same order. \`params\` is an optional array of positional \`?\` bindings.
+Execute a SELECT and return all matching rows in memory. \`columns\` is the ordered list of column names; each element of \`rows\` is a plain array of values in the same order. \`params\` is an optional array of positional \`?\` bindings.
+
+\`db.query(sql, params?, { asObjects: true })\` → \`Record<string, unknown>[]\`
+Same as above, but returns an array of plain objects keyed by column name instead of arrays. Convenient when you want to access fields by name (\`row.revenue\`) rather than by index. Pass \`undefined\` as \`params\` when you have no bindings: \`db.query(sql, undefined, { asObjects: true })\`.
 
 \`db.execute(sql, params?)\` → \`{ changes: number, lastInsertRowid: number }\`
 Execute a single INSERT / UPDATE / DELETE or DDL statement. Returns the number of rows affected and the rowid of the last INSERT (0 when not applicable).

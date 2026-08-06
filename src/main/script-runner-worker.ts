@@ -76,11 +76,20 @@ async function main(): Promise<void> {
   d.pragma('foreign_keys = ON')
 
   const dbApi = {
-    query: (sql: string, params?: unknown[]): { columns: string[]; rows: unknown[][] } => {
+    query: (
+      sql: string,
+      params?: unknown[],
+      opts?: { asObjects?: boolean }
+    ): { columns: string[]; rows: unknown[][] } | Record<string, unknown>[] => {
       const stmt = d.prepare(sql)
-      const rows = params?.length ? stmt.all(...params) : stmt.all()
-      const columns = rows.length > 0 ? Object.keys(rows[0] as object) : stmt.columns().map((c) => c.name)
-      return { columns, rows: rows.map((r) => Object.values(r as object)) }
+      const raw = params?.length ? stmt.all(...params) : stmt.all()
+      const columns =
+        raw.length > 0 ? Object.keys(raw[0] as object) : stmt.columns().map((c) => c.name)
+      const rows = raw.map((r) => Object.values(r as object))
+      if (opts?.asObjects) {
+        return rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i]])))
+      }
+      return { columns, rows }
     },
 
     iterate: (sql: string, params?: unknown[]): IterableIterator<Record<string, unknown>> => {

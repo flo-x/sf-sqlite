@@ -88,7 +88,11 @@
             <tbody>
               <tr>
                 <td><code>db.query(sql, params?)</code></td>
-                <td>Runs a SELECT and returns <code>{ columns, rows }</code>. All rows are loaded into memory — use for small / medium result sets.</td>
+                <td>Runs a SELECT and returns <code>{ columns, rows }</code>. <code>columns</code> is an ordered array of column names; each element of <code>rows</code> is a plain array of values in the same order. All rows are loaded into memory — use for small / medium result sets.</td>
+              </tr>
+              <tr>
+                <td><code>db.query(sql, params?, { asObjects: true })</code></td>
+                <td>Same as above, but returns an array of plain objects keyed by column name — <code>Record&lt;string, unknown&gt;[]</code>. Convenient when you want to access fields by name (<code>row.revenue</code>) rather than by index. The conversion happens locally after the query; there is no extra transport cost.</td>
               </tr>
               <tr>
                 <td><code>db.iterate(sql, params?)</code></td>
@@ -197,11 +201,7 @@ console.log("Done");
           <h3>Example 3 — progress bar while iterating</h3>
           <p>Count the rows first, then report progress every 1 000 rows while processing.</p>
           <pre class="code-example">// Get the total so we can compute a percentage.
-const [{ n: total }] = db.query('SELECT COUNT(*) AS n FROM accounts').rows.map(
-  (r) => Object.fromEntries(db.query('SELECT COUNT(*) AS n FROM accounts').columns.map((c, i) => [c, r[i]]))
-)
-
-// Simpler: destructure columns manually.
+// db.query() rows are arrays — destructure directly.
 const { rows: [[total]] } = db.query('SELECT COUNT(*) AS n FROM accounts')
 
 let i = 0
@@ -250,7 +250,7 @@ if (result.rowsFailed > 0) {
           <h3>Notes</h3>
           <ul>
             <li><code>params</code> are passed as a plain array: <code>db.query('SELECT * FROM t WHERE id = ?', [42])</code></li>
-            <li>Rows returned by <code>db.iterate()</code> and <code>db.query()</code> are plain objects keyed by column name.</li>
+            <li>Rows returned by <code>db.iterate()</code> are always plain objects keyed by column name. Rows returned by <code>db.query()</code> are plain arrays by default — use the parallel <code>columns</code> array to look up field positions, or pass <code>{ asObjects: true }</code> as the third argument to get plain objects instead.</li>
             <li>Scripts run in a background thread — the UI stays responsive during long-running operations.</li>
             <li>Clicking <strong>Cancel</strong> immediately terminates the script; any uncommitted transaction is rolled back.</li>
             <li><code>console.log</code>, <code>console.warn</code>, and <code>console.error</code> stream live to the Logs panel below.</li>
