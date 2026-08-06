@@ -124,6 +124,7 @@ export interface ExtractJob {
   writeMode: 'replace' | 'append'
   soqlQuery: string | null  // when set the job runs this raw SOQL; structured fields are ignored
   additionalIndexes: string[]  // extra columns to index after the job runs
+  comment: string | null
   createdAt: string
   updatedAt: string
 }
@@ -166,6 +167,7 @@ export interface WritebackJob {
   distributionKey: string[] | null
   useBulkApi: boolean
   customHeaders: string | null
+  comment: string | null
   createdAt: string
   updatedAt: string
 }

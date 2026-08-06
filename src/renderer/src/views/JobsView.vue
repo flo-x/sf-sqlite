@@ -49,7 +49,10 @@
           {{ entry.type === 'extract' ? '⬇' : '⬆' }}
         </span>
         <span class="job-row-main">
-          <span class="job-row-name">{{ entry.name }}</span>
+          <span class="job-row-name-row">
+            <span class="job-row-name">{{ entry.name }}</span>
+            <button v-if="entry.comment" class="job-comment-icon" @click.stop="openCommentPopup(entry, $event)" title="Show comment">ⓘ</button>
+          </span>
           <span v-if="uiPrefs.showJobDetails" class="job-row-subtitle">{{ entry.subtitle }}</span>
         </span>
         <span class="job-row-status">
@@ -104,9 +107,15 @@
             </div>
           </div>
           <div class="editor-body">
-            <div class="form-group">
-              <label>Job Name Suffix</label>
-              <input v-model="exEditForm.name" type="text" placeholder="extract" />
+            <div class="form-row-h">
+              <div class="form-group">
+                <label>Job Name Suffix</label>
+                <input v-model="exEditForm.name" type="text" placeholder="extract" />
+              </div>
+              <div class="form-group">
+                <label>Comment</label>
+                <textarea v-model="exEditForm.comment" rows="2" placeholder="Optional note" class="comment-textarea" />
+              </div>
             </div>
             <div class="form-group">
               <label>Mode</label>
@@ -232,7 +241,10 @@
               <span v-if="exClearMsg" class="qs-msg" :class="exClearMsgError ? 'qs-msg-error' : 'qs-msg-ok'">{{ exClearMsg }}</span>
             </div>
             <div v-if="exSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ exSaveError }}</div>
-            <div class="form-group"><label>Job Name Suffix</label><input v-model="exEditForm.name" type="text" placeholder="extract" /></div>
+            <div class="form-row-h">
+              <div class="form-group"><label>Job Name Suffix</label><input v-model="exEditForm.name" type="text" placeholder="extract" /></div>
+              <div class="form-group"><label>Comment</label><textarea v-model="exEditForm.comment" rows="2" placeholder="Optional note" class="comment-textarea" /></div>
+            </div>
             <div class="form-group">
               <label>Mode</label>
               <div class="mode-toggle">
@@ -361,7 +373,10 @@
             </div>
           </div>
           <div class="editor-body">
-            <div class="form-group"><label>Job Name Suffix</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
+            <div class="form-row-h">
+              <div class="form-group"><label>Job Name Suffix</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
+              <div class="form-group"><label>Comment</label><textarea v-model="wbEditForm.comment" rows="2" placeholder="Optional note" class="comment-textarea" /></div>
+            </div>
             <div class="form-group">
               <label>Operation</label>
               <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
@@ -466,7 +481,10 @@
               </button>
             </div>
             <div v-if="wbSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ wbSaveError }}</div>
-            <div class="form-group"><label>Job Name Suffix</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
+            <div class="form-row-h">
+              <div class="form-group"><label>Job Name Suffix</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
+              <div class="form-group"><label>Comment</label><textarea v-model="wbEditForm.comment" rows="2" placeholder="Optional note" class="comment-textarea" /></div>
+            </div>
             <div class="form-group">
               <label>Operation</label>
               <div class="op-selector"><label v-for="op in wbOperations" :key="op" class="radio-label"><input type="radio" :value="op" v-model="wbEditForm.operation" /> {{ op }}</label></div>
@@ -736,6 +754,21 @@
       </div>
     </div>
   </Teleport>
+
+  <!-- ── Comment popup ──────────────────────────────────────────────────── -->
+  <Teleport to="body">
+    <template v-if="commentPopup">
+      <div class="comment-overlay" @click.prevent.stop="commentPopup = null" @wheel.prevent.stop="commentPopup = null" />
+      <div
+        class="comment-popup"
+        :style="{
+          left: commentPopup.left + 'px',
+          ...(commentPopup.top !== null ? { top: commentPopup.top + 'px' } : { bottom: commentPopup.bottom + 'px' })
+        }"
+        @click.stop
+      >{{ commentPopup.comment }}</div>
+    </template>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -810,6 +843,8 @@ interface ListEntry {
   sortObject: string
   /** Raw job name as entered by the user, used for sorting. */
   sortName: string
+  /** Optional user comment, shown in the row when hovering. */
+  comment: string | null
 }
 
 const filteredJobs = computed((): ListEntry[] => {
@@ -826,7 +861,8 @@ const filteredJobs = computed((): ListEntry[] => {
         ? `SOQL → ${j.destTable || 'sf_results'}`
         : `${j.sfObject} → ${j.destTable || j.sfObject}`,
       sortObject: j.soqlQuery ? 'SOQL' : j.sfObject,
-      sortName: j.name
+      sortName: j.name,
+      comment: j.comment
     }))
   const wbEntries: ListEntry[] = wbJobs.value
     .filter((j) => !q || j.name.toLowerCase().includes(q) || j.sfObject.toLowerCase().includes(q) || j.sqlQuery.toLowerCase().includes(q))
@@ -836,7 +872,8 @@ const filteredJobs = computed((): ListEntry[] => {
       name: j.name ? `${j.sfObject}: ${j.name}` : j.sfObject,
       subtitle: `${j.sfObject}  ${j.operation}`,
       sortObject: j.sfObject,
-      sortName: j.name
+      sortName: j.name,
+      comment: j.comment
     }))
   return [...exEntries, ...wbEntries].sort((a, b) => {
     // 1) SF object name
@@ -936,9 +973,26 @@ const exAdditionalIndexInput = ref('')
 const exIndexPickerOpen = ref(false)
 const exErrorPopover = ref<{ id: number; msg: string; x: number; y: number } | null>(null)
 
+// ── Comment popup ─────────────────────────────────────────────────────────────
+interface CommentPopup { comment: string; left: number; top: number | null; bottom: number | null }
+const commentPopup = ref<CommentPopup | null>(null)
+
+function openCommentPopup(entry: ListEntry, e: MouseEvent): void {
+  if (!entry.comment) return
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const flipUp = window.innerHeight - rect.bottom < 120
+  commentPopup.value = {
+    comment: entry.comment,
+    left: rect.left,
+    top: flipUp ? null : rect.bottom + 6,
+    bottom: flipUp ? window.innerHeight - rect.top + 6 : null
+  }
+}
+
 interface ExEditForm {
   id?: number
   name: string
+  comment: string
   mode: 'structured' | 'soql'
   sfObject: string
   fields: string[]
@@ -951,7 +1005,7 @@ interface ExEditForm {
   additionalIndexes: string[]
 }
 const exEditForm = ref<ExEditForm>({
-  name: '', mode: 'structured', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: '', additionalIndexes: []
+  name: '', comment: '', mode: 'structured', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: '', additionalIndexes: []
 })
 
 const exSelectedJobId = computed(() => selectedJob.value?.type === 'extract' ? selectedJob.value.id : null)
@@ -1014,7 +1068,7 @@ async function exLoadJobs(): Promise<void> {
 
 function exSyncEditForm(j: ExtractJob): void {
   exEditForm.value = {
-    id: j.id, name: j.name, mode: j.soqlQuery ? 'soql' : 'structured',
+    id: j.id, name: j.name, comment: j.comment ?? '', mode: j.soqlQuery ? 'soql' : 'structured',
     sfObject: j.sfObject, fields: [...j.fields],
     customExpressions: [...(j.customExpressions ?? [])],
     whereClause: j.whereClause ?? '', rowLimit: j.rowLimit,
@@ -1079,6 +1133,7 @@ async function exSave(andExecute: boolean): Promise<void> {
     const cleanedIndexes = toRaw(exEditForm.value.additionalIndexes).filter((col) => validColumns === null || validColumns.has(col))
     const job = await window.api.saveExtractJob({
       name: exEditForm.value.name.trim(),
+      comment: exEditForm.value.comment.trim() || null,
       sfObject: isSoql ? '' : exEditForm.value.sfObject,
       fields: isSoql ? [] : toRaw(exEditForm.value.fields).slice(),
       customExpressions: isSoql ? [] : toRaw(exEditForm.value.customExpressions).slice(),
@@ -1245,6 +1300,7 @@ const wbOperations = ['insert', 'update', 'upsert', 'delete', 'undelete']
 interface WbEditForm {
   id?: number
   name: string
+  comment: string
   sqlQuery: string
   sfObject: string
   operation: string
@@ -1257,7 +1313,7 @@ interface WbEditForm {
   customHeaders: string
 }
 const wbEditForm = ref<WbEditForm>({
-  name: '', sqlQuery: '', sfObject: '', operation: 'insert', fieldMap: [],
+  name: '', comment: '', sqlQuery: '', sfObject: '', operation: 'insert', fieldMap: [],
   externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null,
   useBulkApi: false, customHeaders: ''
 })
@@ -1585,7 +1641,7 @@ async function wbLoadJobs(): Promise<void> {
 
 function wbLoadJobIntoForm(j: WritebackJob): void {
   wbEditForm.value = {
-    id: j.id, name: j.name, sqlQuery: j.sqlQuery, sfObject: j.sfObject,
+    id: j.id, name: j.name, comment: j.comment ?? '', sqlQuery: j.sqlQuery, sfObject: j.sfObject,
     operation: j.operation, fieldMap: [...j.fieldMap.map((m) => ({ ...m }))],
     externalIdField: j.externalIdField || 'Id', batchSize: j.batchSize, threads: j.threads,
     distributionKey: j.distributionKey ? [...j.distributionKey] : null,
@@ -1673,6 +1729,7 @@ async function wbSave(andExecute: boolean): Promise<void> {
     const job = await window.api.saveWritebackJob({
       ...(wbEditForm.value.id ? { id: wbEditForm.value.id } : {}),
       name: wbCandidateName,
+      comment: wbEditForm.value.comment.trim() || null,
       sqlQuery: wbEditForm.value.sqlQuery, sfObject: wbEditForm.value.sfObject,
       operation: wbEditForm.value.operation as WritebackJob['operation'],
       fieldMap: toRaw(wbEditForm.value.fieldMap).map((m) => ({ ...toRaw(m) })),
@@ -2107,8 +2164,13 @@ watch(() => conn.dbPath, async (newPath, oldPath) => {
   }
 })
 
-function onDocClick(): void { exErrorPopover.value = null; newJobMenuOpen.value = false }
-function onDocKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') { exErrorPopover.value = null; newJobMenuOpen.value = false } }
+function onDocClick(): void { exErrorPopover.value = null; newJobMenuOpen.value = false; commentPopup.value = null }
+function onDocKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape') {
+    exErrorPopover.value = null; newJobMenuOpen.value = false
+    if (commentPopup.value) { commentPopup.value = null; return }
+  }
+}
 </script>
 
 <style scoped>
@@ -2160,8 +2222,14 @@ function onDocKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') { exErro
 .job-row-icon { font-size: 12px; flex-shrink: 0; }
 .job-row-detailed .job-row-icon { align-self: flex-start; margin-top: 2px; }
 .job-row-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
-.job-row-name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.job-row-name-row { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.job-row-name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); flex: 1; min-width: 0; }
+.job-comment-icon { flex-shrink: 0; background: none; border: none; padding: 0 1px; font-size: 11px; line-height: 1; color: var(--text-muted); cursor: pointer; opacity: 0.6; }
+.job-comment-icon:hover { opacity: 1; }
 .job-row-subtitle { font-size: 10px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.form-row-h { display: flex; flex-direction: row; gap: 12px; }
+.form-row-h .form-group { flex: 1; min-width: 0; }
+.comment-textarea { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 13px; line-height: 1.4; }
 .job-row-status { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .job-row-detailed .job-row-status { align-self: flex-start; margin-top: 2px; }
 .badge-icon { padding: 1px 5px; font-size: 12px; line-height: 1; }
@@ -2330,4 +2398,27 @@ function onDocKeydown(e: KeyboardEvent): void { if (e.key === 'Escape') { exErro
 .update-ids-success { display: flex; align-items: flex-start; gap: 12px; background: color-mix(in srgb, var(--success) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--success) 25%, var(--border)); border-radius: var(--radius-sm); padding: 16px; color: var(--success); }
 .update-ids-info { background: color-mix(in srgb, var(--primary) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--border)); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px; }
 .update-ids-index-note { margin-top: 5px; font-size: 12px; color: color-mix(in srgb, var(--warning, #f59e0b) 90%, var(--text)); background: color-mix(in srgb, var(--warning, #f59e0b) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 25%, var(--border)); border-radius: var(--radius-sm); padding: 6px 10px; }
+
+/* ── Comment popup (rendered via Teleport, needs :global) ──────────────────── */
+:global(.comment-overlay) {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+}
+:global(.comment-popup) {
+  position: fixed;
+  z-index: 9999;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  max-width: 320px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  pointer-events: auto;
+}
 </style>

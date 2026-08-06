@@ -239,6 +239,12 @@ function initMetaTables(): void {
   if (!wbCols.includes('distribution_key')) {
     d.exec(`ALTER TABLE _sf_bridge_writeback_jobs ADD COLUMN distribution_key TEXT`)
   }
+  if (!extractCols.includes('comment')) {
+    d.exec(`ALTER TABLE _sf_bridge_extract_jobs ADD COLUMN comment TEXT`)
+  }
+  if (!wbCols.includes('comment')) {
+    d.exec(`ALTER TABLE _sf_bridge_writeback_jobs ADD COLUMN comment TEXT`)
+  }
   const runHistCols = (d.prepare(`PRAGMA table_info("_sf_bridge_run_history")`).all() as Array<{ name: string }>).map(c => c.name)
   if (!runHistCols.includes('duration_ms')) {
     d.exec(`ALTER TABLE _sf_bridge_run_history ADD COLUMN duration_ms INTEGER`)
@@ -561,13 +567,13 @@ export function saveExtractJob(job: ExtractJobInput): ExtractJob {
   const existing = d.prepare('SELECT id FROM _sf_bridge_extract_jobs WHERE id = ?').get((job as ExtractJob).id ?? 0)
   if (existing) {
     d.prepare(
-      `UPDATE _sf_bridge_extract_jobs SET name=?, sf_object=?, fields=?, custom_expressions=?, where_clause=?, row_limit=?, dest_table=?, write_mode=?, soql_query=?, additional_indexes=?, updated_at=? WHERE id=?`
-    ).run(job.name, job.sfObject, JSON.stringify(job.fields), customExprs, job.whereClause ?? null, job.rowLimit ?? null, job.destTable, job.writeMode, job.soqlQuery ?? null, JSON.stringify(job.additionalIndexes ?? []), now, (job as ExtractJob).id)
+      `UPDATE _sf_bridge_extract_jobs SET name=?, sf_object=?, fields=?, custom_expressions=?, where_clause=?, row_limit=?, dest_table=?, write_mode=?, soql_query=?, additional_indexes=?, comment=?, updated_at=? WHERE id=?`
+    ).run(job.name, job.sfObject, JSON.stringify(job.fields), customExprs, job.whereClause ?? null, job.rowLimit ?? null, job.destTable, job.writeMode, job.soqlQuery ?? null, JSON.stringify(job.additionalIndexes ?? []), job.comment ?? null, now, (job as ExtractJob).id)
     return rowToExtractJob(getDb().prepare('SELECT * FROM _sf_bridge_extract_jobs WHERE id=?').get((job as ExtractJob).id) as Record<string, unknown>)
   }
   const info = d.prepare(
-    `INSERT INTO _sf_bridge_extract_jobs (name,sf_object,fields,custom_expressions,where_clause,row_limit,dest_table,write_mode,soql_query,additional_indexes,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).run(job.name, job.sfObject, JSON.stringify(job.fields), customExprs, job.whereClause ?? null, job.rowLimit ?? null, job.destTable, job.writeMode, job.soqlQuery ?? null, JSON.stringify(job.additionalIndexes ?? []), now, now)
+    `INSERT INTO _sf_bridge_extract_jobs (name,sf_object,fields,custom_expressions,where_clause,row_limit,dest_table,write_mode,soql_query,additional_indexes,comment,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(job.name, job.sfObject, JSON.stringify(job.fields), customExprs, job.whereClause ?? null, job.rowLimit ?? null, job.destTable, job.writeMode, job.soqlQuery ?? null, JSON.stringify(job.additionalIndexes ?? []), job.comment ?? null, now, now)
   return rowToExtractJob(d.prepare('SELECT * FROM _sf_bridge_extract_jobs WHERE id=?').get(info.lastInsertRowid) as Record<string, unknown>)
 }
 
@@ -611,13 +617,13 @@ export function saveWritebackJob(job: WritebackJobInput): WritebackJob {
   const existing = d.prepare('SELECT id FROM _sf_bridge_writeback_jobs WHERE id=?').get((job as WritebackJob).id ?? 0)
   if (existing) {
     d.prepare(
-      `UPDATE _sf_bridge_writeback_jobs SET name=?,sql_query=?,sf_object=?,operation=?,field_map=?,external_id_field=?,batch_size=?,threads=?,distribution_key=?,use_bulk_api=?,custom_headers=?,updated_at=? WHERE id=?`
-    ).run(job.name, job.sqlQuery, job.sfObject, job.operation, JSON.stringify(job.fieldMap), job.externalIdField ?? null, job.batchSize ?? null, job.threads ?? null, job.distributionKey?.length ? JSON.stringify(job.distributionKey) : null, job.useBulkApi ? 1 : 0, job.customHeaders ?? null, now, (job as WritebackJob).id)
+      `UPDATE _sf_bridge_writeback_jobs SET name=?,sql_query=?,sf_object=?,operation=?,field_map=?,external_id_field=?,batch_size=?,threads=?,distribution_key=?,use_bulk_api=?,custom_headers=?,comment=?,updated_at=? WHERE id=?`
+    ).run(job.name, job.sqlQuery, job.sfObject, job.operation, JSON.stringify(job.fieldMap), job.externalIdField ?? null, job.batchSize ?? null, job.threads ?? null, job.distributionKey?.length ? JSON.stringify(job.distributionKey) : null, job.useBulkApi ? 1 : 0, job.customHeaders ?? null, job.comment ?? null, now, (job as WritebackJob).id)
     return rowToWritebackJob(d.prepare('SELECT * FROM _sf_bridge_writeback_jobs WHERE id=?').get((job as WritebackJob).id) as Record<string, unknown>)
   }
   const info = d.prepare(
-    `INSERT INTO _sf_bridge_writeback_jobs (name,sql_query,sf_object,operation,field_map,external_id_field,batch_size,threads,distribution_key,use_bulk_api,custom_headers,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).run(job.name, job.sqlQuery, job.sfObject, job.operation, JSON.stringify(job.fieldMap), job.externalIdField ?? null, job.batchSize ?? null, job.threads ?? null, job.distributionKey?.length ? JSON.stringify(job.distributionKey) : null, job.useBulkApi ? 1 : 0, job.customHeaders ?? null, now, now)
+    `INSERT INTO _sf_bridge_writeback_jobs (name,sql_query,sf_object,operation,field_map,external_id_field,batch_size,threads,distribution_key,use_bulk_api,custom_headers,comment,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(job.name, job.sqlQuery, job.sfObject, job.operation, JSON.stringify(job.fieldMap), job.externalIdField ?? null, job.batchSize ?? null, job.threads ?? null, job.distributionKey?.length ? JSON.stringify(job.distributionKey) : null, job.useBulkApi ? 1 : 0, job.customHeaders ?? null, job.comment ?? null, now, now)
   return rowToWritebackJob(d.prepare('SELECT * FROM _sf_bridge_writeback_jobs WHERE id=?').get(info.lastInsertRowid) as Record<string, unknown>)
 }
 
@@ -827,6 +833,7 @@ function rowToExtractJob(r: Record<string, unknown>): ExtractJob {
     writeMode: r.write_mode as 'replace' | 'append',
     soqlQuery: (r.soql_query as string | null) ?? null,
     additionalIndexes: r.additional_indexes ? JSON.parse(r.additional_indexes as string) : [],
+    comment: (r.comment as string | null) ?? null,
     createdAt: r.created_at as string,
     updatedAt: r.updated_at as string
   }
@@ -859,6 +866,7 @@ function rowToWritebackJob(r: Record<string, unknown>): WritebackJob {
     distributionKey: r.distribution_key ? JSON.parse(r.distribution_key as string) as string[] : null,
     useBulkApi: r.use_bulk_api === 1,
     customHeaders: (r.custom_headers as string | null) ?? null,
+    comment: (r.comment as string | null) ?? null,
     createdAt: r.created_at as string,
     updatedAt: r.updated_at as string
   }
