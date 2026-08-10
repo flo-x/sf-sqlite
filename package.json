@@ -1,6 +1,6 @@
 {
   "name": "sf-sqlite",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Salesforce-SQLite integration workbench",
   "main": "./out/main/index.js",
   "author": "flo-x <7840512+flo-x@users.noreply.github.com>",
