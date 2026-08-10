@@ -849,7 +849,7 @@ export async function extractRecords(
   let fetched = 0
   let total: number | null = null
 
-  const result = await raceWithAbort(conn.query(soql), signal)
+  const result = await raceWithAbort(conn.query<SfRecord>(soql).promise(), signal)
   total = result.totalSize
   onProgress(0, total)
 
@@ -900,7 +900,7 @@ export async function extractRecords(
 
   let next = result
   while (!next.done && !signal.aborted) {
-    next = await raceWithAbort(conn.queryMore(next.nextRecordsUrl!), signal)
+    next = await raceWithAbort(conn.queryMore<SfRecord>(next.nextRecordsUrl!).promise(), signal)
     processRecords(next.records)
   }
 
@@ -953,7 +953,7 @@ export async function extractSoql(
     return flat
   }
 
-  const result = await raceWithAbort(conn.query(soql), signal)
+  const result = await raceWithAbort(conn.query<SfRecord>(soql).promise(), signal)
   total = result.totalSize
   onProgress(0, total)
 
@@ -969,7 +969,7 @@ export async function extractSoql(
 
   let next = result
   while (!next.done && !signal.aborted) {
-    next = await raceWithAbort(conn.queryMore(next.nextRecordsUrl!), signal)
+    next = await raceWithAbort(conn.queryMore<SfRecord>(next.nextRecordsUrl!).promise(), signal)
     processRecords(next.records)
   }
 
@@ -1029,7 +1029,9 @@ export async function writebackOneBatch(
   if (opts.operation === 'insert') {
     rawResults = await sobject.insert(records as SfRecord[], dmlOpts)
   } else if (opts.operation === 'update') {
-    rawResults = await sobject.update(records as SfRecord[], dmlOpts)
+    // update() requires a non-optional Id per record (unlike insert/upsert) — the
+    // caller (field-mapper UI) guarantees every row has one mapped for this operation.
+    rawResults = await sobject.update(records as (SfRecord & { Id: string })[], dmlOpts)
   } else if (opts.operation === 'upsert') {
     rawResults = await sobject.upsert(records as SfRecord[], opts.externalIdField || 'Id', dmlOpts)
   } else if (opts.operation === 'delete') {
@@ -1096,7 +1098,9 @@ export async function writebackBatch(
     if (opts.operation === 'insert') {
       rawResults = await sobject.insert(batch as SfRecord[], dmlOpts)
     } else if (opts.operation === 'update') {
-      rawResults = await sobject.update(batch as any, dmlOpts)
+      // update() requires a non-optional Id per record (unlike insert/upsert) — the
+      // caller (field-mapper UI) guarantees every row has one mapped for this operation.
+      rawResults = await sobject.update(batch as (SfRecord & { Id: string })[], dmlOpts)
     } else if (opts.operation === 'upsert') {
       rawResults = await sobject.upsert(batch as SfRecord[], opts.externalIdField || 'Id', dmlOpts)
     } else if (opts.operation === 'delete') {

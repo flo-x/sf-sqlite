@@ -9,14 +9,6 @@
         <div class="progress-val">{{ total.toLocaleString() }}</div>
         <div class="progress-lbl">Total</div>
       </div>
-      <div v-if="type === 'writeback'" class="progress-stat">
-        <div class="progress-val" style="color: var(--success)">{{ succeeded.toLocaleString() }}</div>
-        <div class="progress-lbl">Success</div>
-      </div>
-      <div v-if="type === 'writeback'" class="progress-stat">
-        <div class="progress-val" style="color: var(--danger)">{{ failed.toLocaleString() }}</div>
-        <div class="progress-lbl">Failed</div>
-      </div>
       <div class="progress-stat">
         <div class="progress-val">{{ rps }}</div>
         <div class="progress-lbl">rec/s</div>
@@ -31,7 +23,6 @@
     </div>
     <div v-if="status === 'error'" class="alert alert-error" style="margin-top: 8px;">{{ errorMsg }}</div>
     <div v-else-if="status === 'success'" class="alert alert-success" style="margin-top: 8px;">Completed successfully — {{ fetched.toLocaleString() }} records</div>
-    <div v-else-if="status === 'partial'" class="alert alert-info" style="margin-top: 8px;">Completed with errors — {{ succeeded.toLocaleString() }} succeeded, {{ failed.toLocaleString() }} failed</div>
   </div>
 </template>
 
@@ -42,8 +33,6 @@ const props = defineProps<{
   type: 'extract' | 'writeback'
   fetched: number
   total?: number | null
-  succeeded?: number
-  failed?: number
   rps?: number
   status?: string
   errorMsg?: string

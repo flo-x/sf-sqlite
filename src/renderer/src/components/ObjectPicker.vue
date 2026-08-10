@@ -53,7 +53,7 @@ const open = ref(false)
 const highlightIdx = ref(-1)
 const pickerEl = ref<HTMLElement>()
 const dropdownEl = ref<HTMLElement>()
-let highlightedEl: HTMLElement | null = null
+const highlightedEl = ref<HTMLElement | null>(null)
 
 watch(() => props.modelValue, (v) => {
   if (v !== search.value) search.value = v
@@ -106,7 +106,7 @@ function moveHighlight(delta: number): void {
   highlightIdx.value = Math.max(0, Math.min(max, highlightIdx.value + delta))
   // Scroll highlighted item into view
   setTimeout(() => {
-    highlightedEl?.scrollIntoView({ block: 'nearest' })
+    highlightedEl.value?.scrollIntoView({ block: 'nearest' })
   })
 }
 

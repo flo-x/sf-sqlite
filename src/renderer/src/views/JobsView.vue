@@ -404,7 +404,12 @@
             <div class="form-group"><label>Target Salesforce Object</label><ObjectPicker v-model="wbEditForm.sfObject" :objects="conn.sfObjects" :refreshing="sfRefreshing" @update:modelValue="wbOnObjectChange" @refresh="refreshObjects" /></div>
             <template v-if="wbSfFields.length">
               <div class="form-group"><FieldMapper v-model="wbEditForm.fieldMap" :sfFields="wbSfFields" /></div>
-              <div v-if="wbEditForm.operation === 'upsert'" class="form-group"><label>External ID Field (SF)</label><input v-model="wbEditForm.externalIdField" type="text" placeholder="Id" /></div>
+              <div v-if="wbEditForm.operation === 'upsert'" class="form-group">
+                <label>Use an External ID instead of the record ID</label>
+                <select v-model="wbEditForm.externalIdField">
+                  <option v-for="f in wbUpsertExtIdFields" :key="f.name" :value="f.name">{{ f.name }}{{ f.label && f.label !== f.name ? ` — ${f.label}` : '' }}</option>
+                </select>
+              </div>
             </template>
             <div v-else-if="wbEditForm.sfObject" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Loading field list…</div>
             <div v-if="!wbEditForm.useBulkApi" class="form-row">
@@ -512,7 +517,12 @@
             <div class="form-group"><label>Target Salesforce Object</label><ObjectPicker v-model="wbEditForm.sfObject" :objects="conn.sfObjects" :refreshing="sfRefreshing" @update:modelValue="wbOnObjectChange" @refresh="refreshObjects" /></div>
             <template v-if="wbSfFields.length">
               <div class="form-group"><FieldMapper v-model="wbEditForm.fieldMap" :sfFields="wbSfFields" /></div>
-              <div v-if="wbEditForm.operation === 'upsert'" class="form-group"><label>External ID Field (SF)</label><input v-model="wbEditForm.externalIdField" type="text" placeholder="Id" /></div>
+              <div v-if="wbEditForm.operation === 'upsert'" class="form-group">
+                <label>Use an External ID instead of the record ID</label>
+                <select v-model="wbEditForm.externalIdField">
+                  <option v-for="f in wbUpsertExtIdFields" :key="f.name" :value="f.name">{{ f.name }}{{ f.label && f.label !== f.name ? ` — ${f.label}` : '' }}</option>
+                </select>
+              </div>
             </template>
             <div v-else-if="wbEditForm.sfObject" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">Loading field list…</div>
             <div v-if="!wbEditForm.useBulkApi" class="form-row">
@@ -594,7 +604,7 @@
                 <div class="bulk-phase-row">
                   <span class="spinner" style="width:14px;height:14px;border-width:2px;flex-shrink:0;"></span>
                   <template v-if="execBulkPhase === 'uploading'">Uploading to Salesforce… <strong>{{ execBulkUploaded.toLocaleString() }}</strong> rows sent</template>
-                  <template v-else-if="execBulkPhase === 'processing'">Salesforce processing <span class="badge badge-gray" style="font-size:11px;">{{ execBulkJobState }}</span> — <strong>{{ execBulkProcessed.toLocaleString() }}</strong> processed, <span style="color:var(--danger);">{{ execFailed.toLocaleString() }}</span> failed</template>
+                  <template v-else-if="execBulkPhase === 'processing'">Salesforce processing <span class="badge badge-gray" style="font-size:11px;">{{ execBulkJobState }}</span> — <strong>{{ execBulkProcessed.toLocaleString() }}</strong> / <strong>{{ execBulkUploaded.toLocaleString() }}</strong> processed, <span style="color:var(--danger);">{{ execFailed.toLocaleString() }}</span> failed</template>
                   <template v-else-if="execBulkPhase === 'downloading'">Downloading results from Salesforce…</template>
                   <template v-else>Starting Bulk API 2.0 job…</template>
                 </div>
@@ -924,7 +934,7 @@ function startNewExtractJob(): void {
   newJobMenuOpen.value = false
   selectedJob.value = null
   creating.value = 'extract'
-  exEditForm.value = { name: '', mode: 'structured', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: '', additionalIndexes: [] }
+  exEditForm.value = { name: '', comment: '', mode: 'structured', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: '', additionalIndexes: [] }
   exFields.value = []
   exSaveError.value = ''
 }
@@ -933,7 +943,7 @@ function startNewWbJob(): void {
   newJobMenuOpen.value = false
   selectedJob.value = null
   creating.value = 'writeback'
-  wbEditForm.value = { name: '', sqlQuery: '', sfObject: '', operation: 'insert', fieldMap: [], externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null, useBulkApi: false, customHeaders: '' }
+  wbEditForm.value = { name: '', comment: '', sqlQuery: '', sfObject: '', operation: 'insert', fieldMap: [], externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null, useBulkApi: false, customHeaders: '' }
   wbPreviewResult.value = null
   wbPreviewError.value = ''
   wbRowCountResult.value = null
@@ -1084,6 +1094,9 @@ function exResetForm(): void {
 }
 
 async function exSelectJob(id: number): Promise<void> {
+  if (wbSelectedJobId.value != null) {
+    wbCaptureExecState(wbSelectedJobId.value, true)
+  }
   selectedJob.value = { id, type: 'extract' }
   exDetailTab.value = 'definition'
   exClearMsg.value = ''
@@ -1097,7 +1110,7 @@ async function exOnObjectChange(name: string, resetFields = true): Promise<void>
   if (!name) return
   exLoadingFields.value = true
   try {
-    exFields.value = await window.api.describeObject(name)
+    exFields.value = (await window.api.describeObject(name)).fields
     if (resetFields) {
       exEditForm.value.fields = exFields.value.filter((f) => !f.name.includes('.')).map((f) => f.name)
       exEditForm.value.customExpressions = []
@@ -1252,7 +1265,7 @@ function exApplyPendingSoql(): void {
     selectedJob.value = null
     creating.value = 'extract'
     exFields.value = []
-    exEditForm.value = { name: '', mode: 'soql', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: soql, additionalIndexes: [] }
+    exEditForm.value = { name: '', comment: '', mode: 'soql', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: soql, additionalIndexes: [] }
   }
 }
 
@@ -1296,6 +1309,11 @@ const wbSfFields = ref<FieldDescriptor[]>([])
 const schemaPanel = ref<HTMLElement | null>(null)
 const schemaTab = ref<'sqlite' | 'sf'>('sqlite')
 const wbOperations = ['insert', 'update', 'upsert', 'delete', 'undelete']
+
+/** Fields eligible as upsert match keys: the standard record Id plus any custom External ID fields. */
+const wbUpsertExtIdFields = computed(() =>
+  wbSfFields.value.filter((f) => f.name === 'Id' || f.externalId)
+)
 
 interface WbEditForm {
   id?: number
@@ -1549,6 +1567,7 @@ interface SavedExecState {
   cachedAt: number; sql: string; operation: string; columns: string[]; totalRows: number
   succeeded: number; failed: number; runId: string | null
   jobDone: boolean; isBulkApi: boolean; error: string | null; warn: string | null
+  bulkPhase: 'uploading' | 'processing' | 'downloading' | ''; bulkUploaded: number; bulkProcessed: number; bulkJobState: string
   pageOffset: number; failedTotal: number
   distinctErrors: { message: string; count: number }[]
   filterSuccess: boolean; filterError: boolean; filterPending: boolean; filterQueued: boolean
@@ -1563,6 +1582,8 @@ function wbCaptureExecState(jobId: number, force = false): void {
     succeeded: execSucceeded.value, failed: execFailed.value,
     runId: execRunId.value, jobDone: execJobDone.value,
     isBulkApi: execIsBulkApi.value, error: execError.value, warn: execWarn.value,
+    bulkPhase: execBulkPhase.value, bulkUploaded: execBulkUploaded.value,
+    bulkProcessed: execBulkProcessed.value, bulkJobState: execBulkJobState.value,
     pageOffset: execPageOffset.value, failedTotal: execFailedTotal.value,
     distinctErrors: execFailedDistinctErrors.value.slice(),
     filterSuccess: execFilterSuccess.value, filterError: execFilterError.value,
@@ -1583,8 +1604,8 @@ async function wbRestoreExecState(jobId: number): Promise<void> {
   execFailedTotal.value = s.failedTotal; execFailedDistinctErrors.value = s.distinctErrors
   execFilterSuccess.value = s.filterSuccess; execFilterError.value = s.filterError
   execFilterPending.value = s.filterPending; execFilterQueued.value = s.filterQueued ?? true
-  execBulkPhase.value = ''; execBulkUploaded.value = 0
-  execBulkProcessed.value = 0; execBulkJobState.value = ''
+  execBulkPhase.value = s.bulkPhase ?? ''; execBulkUploaded.value = s.bulkUploaded ?? 0
+  execBulkProcessed.value = s.bulkProcessed ?? 0; execBulkJobState.value = s.bulkJobState ?? ''
   execPageRows.value = []
   // Restore the page data from the exec table if a run exists.
   // For Bulk API, the exec table only exists when there are failed rows.
@@ -1647,9 +1668,9 @@ function wbLoadJobIntoForm(j: WritebackJob): void {
     distributionKey: j.distributionKey ? [...j.distributionKey] : null,
     useBulkApi: j.useBulkApi, customHeaders: j.customHeaders ?? ''
   }
-  wbPreviewResult.value = null; wbRowCountResult.value = null; wbRowCountError.value = ''
+  wbPreviewResult.value = null; wbPreviewError.value = ''; wbRowCountResult.value = null; wbRowCountError.value = ''
   wbSfFields.value = []
-  if (j.sfObject) window.api.describeObject(j.sfObject).then((f) => { wbSfFields.value = f })
+  if (j.sfObject) window.api.describeObject(j.sfObject).then((r) => { wbSfFields.value = r.fields })
 }
 
 function wbResetDefinitionForm(): void {
@@ -1662,7 +1683,7 @@ async function wbSelectJob(id: number): Promise<void> {
     wbCaptureExecState(wbSelectedJobId.value, true)
   }
   selectedJob.value = { id, type: 'writeback' }
-  wbDetailTab.value = 'definition'
+  wbDetailTab.value = wbActiveRuns.value.has(id) ? 'execution' : 'definition'
   await wbRestoreExecState(id)
   const j = wbJobs.value.find((x) => x.id === id)
   if (j) wbLoadJobIntoForm(j)
@@ -1685,7 +1706,7 @@ async function wbRunRowCount(): Promise<void> {
 
 async function wbOnObjectChange(name: string): Promise<void> {
   if (!name) return
-  wbSfFields.value = await window.api.describeObject(name)
+  wbSfFields.value = (await window.api.describeObject(name)).fields
   wbInitFieldMap()
 }
 
@@ -1805,6 +1826,20 @@ function wbStartRunMonitor(jobId: number, runId: string): void {
         if (e.succeeded !== undefined) execSucceeded.value = e.succeeded
         if (e.failed !== undefined) execFailed.value = e.failed
         if (e.jobState) execBulkJobState.value = e.jobState
+      }
+    } else {
+      // Job is running but not currently viewed — keep the cache up to date so
+      // navigating back restores accurate progress instead of a blank phase card.
+      const cached = execStateCache.value.get(jobId)
+      if (cached) {
+        cached.bulkPhase = e.phase
+        if (e.bulkUploaded !== undefined) cached.bulkUploaded = e.bulkUploaded
+        if (e.phase === 'processing') {
+          if (e.total !== undefined) cached.bulkProcessed = e.total
+          if (e.succeeded !== undefined) cached.succeeded = e.succeeded
+          if (e.failed !== undefined) cached.failed = e.failed
+          if (e.jobState) cached.bulkJobState = e.jobState
+        }
       }
     }
   })
@@ -1958,6 +1993,11 @@ async function wbRetryFailed(): Promise<void> {
   execFailedDistinctErrors.value = []; execJobDone.value = false
   execFilterSuccess.value = execFilterError.value = execFilterPending.value = execFilterQueued.value = true
   failedErrorFilter.value = ''
+  // Retries always run over the REST Collections API, regardless of whether the
+  // original job used Bulk API 2.0 — switch the UI out of Bulk mode so it polls
+  // for live progress instead of waiting on Bulk-only job:progress phase events.
+  execIsBulkApi.value = false
+  execBulkPhase.value = ''; execBulkUploaded.value = 0; execBulkProcessed.value = 0; execBulkJobState.value = ''
   const newRunId = await window.api.retryFailed(execRunId.value, id)
   execRunId.value = newRunId; wbActiveRuns.value.set(id, newRunId); jobs.startJob(newRunId, 'writeback', id)
   startExecPoll(newRunId)
@@ -2019,7 +2059,7 @@ function wbApplyPendingSql(): void {
     selectedJob.value = null; creating.value = 'writeback'
     wbPreviewResult.value = null; wbPreviewError.value = ''; wbSaveError.value = ''
     wbSfFields.value = []
-    wbEditForm.value = { name: '', sqlQuery: sql, sfObject: '', operation: 'insert', fieldMap: [], externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null, useBulkApi: false, customHeaders: '' }
+    wbEditForm.value = { name: '', comment: '', sqlQuery: sql, sfObject: '', operation: 'insert', fieldMap: [], externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null, useBulkApi: false, customHeaders: '' }
   }
 }
 

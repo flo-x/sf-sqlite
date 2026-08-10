@@ -25,7 +25,8 @@ import type {
   ScriptLog,
   ScriptComplete,
   ScriptProgress,
-  DatabaseWasteInfo
+  DatabaseWasteInfo,
+  DebugFlags
 } from '../shared/types'
 
 const api = {
@@ -453,10 +454,10 @@ const api = {
     ipcRenderer.invoke('app:check-for-updates'),
 
   // ── Diagnostics / Debug ───────────────────────────────────────────────────
-  getDebugFlags: (): Promise<{ sfCliExec: boolean; sfCliAuth: boolean; oauthFlow: boolean }> =>
+  getDebugFlags: (): Promise<DebugFlags> =>
     ipcRenderer.invoke('debug:get-flags'),
 
-  setDebugFlags: (flags: { sfCliExec?: boolean; sfCliAuth?: boolean; oauthFlow?: boolean }): Promise<void> =>
+  setDebugFlags: (flags: Partial<DebugFlags>): Promise<void> =>
     ipcRenderer.invoke('debug:set-flags', flags),
 
   getDebugLogs: (): Promise<string[]> =>

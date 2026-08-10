@@ -167,7 +167,7 @@
           <div class="toolbar-right">
             <button
               class="btn btn-ghost btn-sm"
-              @click="csvImporting ? window.api.cancelCsvDirectImport() : (csvDirectFile = null, csvError = '', csvSuccess = '', csvCancelled = '')"
+              @click="cancelOrResetDirectImport"
             >✕ Cancel</button>
           </div>
         </div>
@@ -355,6 +355,21 @@
         </div>
       </div>
     </div>
+
+    <!-- CSV large-file warning modal -->
+    <div v-if="csvLargeFileWarning" class="vacuum-overlay" @click.self="csvLargeFileWarning = false">
+      <div class="vacuum-modal">
+        <div class="vacuum-modal-title">File too large for preview</div>
+        <div class="vacuum-modal-body">
+          <p>This file exceeds the 200 MB limit for preview mode. Loading it would require several gigabytes of memory.</p>
+          <p style="margin-top:8px;">Enable <strong>Direct load (no preview)</strong> to import large files efficiently, without loading the entire file into memory.</p>
+        </div>
+        <div class="vacuum-modal-actions">
+          <button class="btn btn-secondary" @click="csvLargeFileWarning = false">Dismiss</button>
+          <button class="btn btn-primary" @click="csvLargeFileWarning = false; csvDirectLoad = true">Switch to Direct load</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div v-else class="empty-state" style="height:100%;">
@@ -437,6 +452,7 @@ const csvPasteFormat = ref<'csv' | 'excel'>('csv')
 const csvDirectLoad = ref(false)
 type CsvDirectFile = { filePath: string; fileName: string }
 const csvDirectFile = ref<CsvDirectFile | null>(null)
+const csvLargeFileWarning = ref(false)
 
 watch(csvDirectLoad, () => {
   csvPreview.value = null
@@ -511,6 +527,7 @@ async function pickCsvFile(): Promise<void> {
     return
   }
   const preview = await window.api.csvPickAndPreview()
+  if (preview?.tooLarge) { csvLargeFileWarning.value = true; return }
   if (preview) loadCsvPreview(preview, 'file')
 }
 
@@ -525,6 +542,10 @@ async function onCsvDrop(e: DragEvent): Promise<void> {
     csvTableName.value = file.name.replace(/\.[^.]+$/, '').replace(/[^\w]/g, '_').toLowerCase()
     csvError.value = ''
     csvSuccess.value = ''
+    return
+  }
+  if (file.size > 200 * 1024 * 1024) {
+    csvLargeFileWarning.value = true
     return
   }
   const preview = await window.api.csvPreviewPath(filePath)
@@ -637,6 +658,17 @@ async function importCsv(): Promise<void> {
   }
 }
 
+function cancelOrResetDirectImport(): void {
+  if (csvImporting.value) {
+    window.api.cancelCsvDirectImport()
+    return
+  }
+  csvDirectFile.value = null
+  csvError.value = ''
+  csvSuccess.value = ''
+  csvCancelled.value = ''
+}
+
 async function directImportCsv(): Promise<void> {
   if (!csvDirectFile.value || !csvTableName.value.trim()) return
   csvError.value = ''
@@ -647,9 +679,9 @@ async function directImportCsv(): Promise<void> {
   const offProgress = window.api.onCsvDirectImportProgress((n) => {
     csvImportProgress.value = n
   })
+  const tableName = csvTableName.value.trim()
   try {
     const ifExists = csvReplace.value ? 'replace' as const : 'append' as const
-    const tableName = csvTableName.value.trim()
     const count = await window.api.csvDirectImport(csvDirectFile.value.filePath, tableName, ifExists)
     csvSuccess.value = `Imported ${count.toLocaleString()} rows into "${tableName}"`
     rowCountCache.delete(tableName)

@@ -7,32 +7,9 @@
  * even in packaged builds where the DevTools console is not accessible.
  */
 import type { BrowserWindow } from 'electron'
+import type { DebugFlags } from '../shared/types'
 
-export interface DebugFlags {
-  /** Logs every SF CLI command: resolved path, args, stdout, stderr, errors. */
-  sfCliExec: boolean
-  /** Logs credential extraction in connectCliOrg: token length, instanceUrl, source. */
-  sfCliAuth: boolean
-  /** Logs the full OAuth 2.0 flow: callback server port, auth URL, callback
-   *  params, token exchange result, and jsforce identity call. */
-  oauthFlow: boolean
-  /** Logs LLM execute_sql tool calls: query text, row/column counts, errors. */
-  llmSql: boolean
-  /** Logs LLM execute_ddl tool calls: statement, approval result, execution outcome. */
-  llmDdl: boolean
-  /** Logs LLM execute_javascript tool calls: code length, log lines, duration, errors. */
-  llmJavascript: boolean
-  /** Logs LLM get_editor_content / get_editor_selection tool calls: which view
-   *  answered, content length, truncation, or timeout. */
-  llmEditor: boolean
-  /** Logs the SQL query for SQLite→SF jobs and the SOQL query for SF→SQLite jobs
-   *  at the moment the job starts. */
-  jobQueries: boolean
-  /** Logs every SQL statement executed during a writeback job run, including
-   *  the CREATE TABLE AS SELECT sent to the DB worker, plus a summary line for
-   *  each batch read and batch update applied to the exec table. */
-  wbSql: boolean
-}
+export type { DebugFlags }
 
 const MAX_ENTRIES = 500
 

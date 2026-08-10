@@ -53,6 +53,8 @@ export interface CsvPreview {
   headers: string[]
   rows: string[][]
   totalLines: number
+  /** Set to true when the file exceeds the preview size limit. No rows or headers are populated. */
+  tooLarge?: true
 }
 
 export interface OrgInfo {
@@ -110,6 +112,23 @@ export interface FieldDescriptor {
   referenceTo?: string[]
   /** Relationship name used for the nested Ext-ID syntax (the `__r` form). */
   relationshipName?: string | null
+}
+
+/** A reverse lookup/master-detail: another object has a field pointing at this one. */
+export interface ChildRelationshipDescriptor {
+  /** SOQL parent→child relationship name (unnamed / non-queryable relationships are filtered out). */
+  relationshipName: string
+  /** API name of the object that holds the lookup field. */
+  childSObject: string
+  /** Field on the child object that references this object. */
+  field: string
+  cascadeDelete: boolean
+  restrictedDelete: boolean
+}
+
+export interface DescribeResult {
+  fields: FieldDescriptor[]
+  childRelationships: ChildRelationshipDescriptor[]
 }
 
 export interface ExtractJob {
@@ -316,4 +335,33 @@ export interface DatabaseWasteInfo {
   pageSize: number
   wastedBytes: number
   wastedPct: number
+}
+
+/** Debug logging toggles, shared by the main-process logger, the preload
+ *  bridge, and the Diagnostics tab in Settings — kept in one place so the
+ *  three never drift out of sync with each other. */
+export interface DebugFlags {
+  /** Logs every SF CLI command: resolved path, args, stdout, stderr, errors. */
+  sfCliExec: boolean
+  /** Logs credential extraction in connectCliOrg: token length, instanceUrl, source. */
+  sfCliAuth: boolean
+  /** Logs the full OAuth 2.0 flow: callback server port, auth URL, callback
+   *  params, token exchange result, and jsforce identity call. */
+  oauthFlow: boolean
+  /** Logs LLM execute_sql tool calls: query text, row/column counts, errors. */
+  llmSql: boolean
+  /** Logs LLM execute_ddl tool calls: statement, approval result, execution outcome. */
+  llmDdl: boolean
+  /** Logs LLM execute_javascript tool calls: code length, log lines, duration, errors. */
+  llmJavascript: boolean
+  /** Logs LLM get_editor_content / get_editor_selection tool calls: which view
+   *  answered, content length, truncation, or timeout. */
+  llmEditor: boolean
+  /** Logs the SQL query for SQLite→SF jobs and the SOQL query for SF→SQLite jobs
+   *  at the moment the job starts. */
+  jobQueries: boolean
+  /** Logs every SQL statement executed during a writeback job run, including
+   *  the CREATE TABLE AS SELECT sent to the DB worker, plus a summary line for
+   *  each batch read and batch update applied to the exec table. */
+  wbSql: boolean
 }

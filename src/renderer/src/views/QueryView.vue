@@ -551,9 +551,7 @@ watch(() => queryStore.activeTabKey, (newKey, oldKey) => {
 })
 
 watch(executingMode, (mode) => {
-  if (schemaTab.value !== 'ai') {
-    schemaTab.value = mode === 'soql' ? 'sf' : 'sqlite'
-  }
+  schemaTab.value = mode === 'soql' ? 'sf' : 'sqlite'
 })
 
 watch(() => conn.dbConnected, async (v) => {

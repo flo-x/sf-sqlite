@@ -618,6 +618,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useUiPrefs } from '../composables/useUiPrefs'
+import type { DebugFlags } from '../../../shared/types'
 
 interface LlmSettings {
   provider: 'openai' | 'anthropic' | 'mistral' | 'ollama' | 'litellm'
@@ -782,12 +783,12 @@ async function checkForUpdatesManual(): Promise<void> {
 }
 
 // ── Diagnostics tab ────────────────────────────────────────────────────────
-const diagFlags = ref({ sfCliExec: false, sfCliAuth: false, oauthFlow: false, llmSql: false, llmDdl: false, llmJavascript: false, llmEditor: false, jobQueries: false })
+const diagFlags = ref<DebugFlags>({ sfCliExec: false, sfCliAuth: false, oauthFlow: false, llmSql: false, llmDdl: false, llmJavascript: false, llmEditor: false, jobQueries: false, wbSql: false })
 const diagLogs = ref<string[]>([])
 const diagCopied = ref(false)
 const diagLogEl = ref<HTMLElement | null>(null)
 
-async function toggleFlag(flag: 'sfCliExec' | 'sfCliAuth' | 'oauthFlow' | 'llmSql' | 'llmDdl' | 'llmJavascript' | 'llmEditor' | 'jobQueries', value: boolean): Promise<void> {
+async function toggleFlag(flag: keyof DebugFlags, value: boolean): Promise<void> {
   diagFlags.value[flag] = value
   await window.api.setDebugFlags({ [flag]: value })
 }
@@ -836,7 +837,7 @@ onMounted(async () => {
   })
 
   try {
-    const raw = await window.api.getLlmSettings() as LlmSettings & {
+    const raw = await window.api.getLlmSettings() as unknown as LlmSettings & {
       encryptionAvailable?: boolean
       openaiKeySet?: boolean
       anthropicKeySet?: boolean

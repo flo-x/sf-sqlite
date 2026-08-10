@@ -13,7 +13,7 @@ export interface ActiveJob {
   rps: number
   status: 'running' | 'success' | 'partial' | 'error' | 'cancelled'
   errorMsg?: string
-  rowStatuses: Map<number, { status: 'success' | 'error'; message?: string }>
+  rowStatuses: Map<number, { status: 'success' | 'error' | 'processing'; message?: string }>
 }
 
 export const useJobStore = defineStore('job', () => {

@@ -68,7 +68,7 @@
             </div>
             <div v-if="msg.result !== undefined" class="ai-tool-row" :class="{ 'ai-tool-row-error': parseToolResult(msg.result ?? '').type === 'error' }">
               <span class="ai-tool-row-label">Result</span>
-              <button class="ai-tool-snippet" @click="openToolResultModal(msg.toolName, msg.result ?? '')">
+              <button class="ai-tool-snippet" @click="openToolResultModal(msg.toolName ?? '', msg.result ?? '')">
                 <code>{{ truncate(toolResultSummary(msg.result ?? ''), 120) }}</code>
               </button>
             </div>
