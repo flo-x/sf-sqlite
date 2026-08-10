@@ -233,6 +233,7 @@ import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { useConnectionStore } from '../stores/connection'
+import { buildSelectionContextBlock, type EditorSelectionSnapshot } from '../utils/editorAiContext'
 
 function renderMarkdown(text: string): string {
   return DOMPurify.sanitize(marked.parse(text) as string)
@@ -281,6 +282,13 @@ interface AiMessage {
 }
 
 const conn = useConnectionStore()
+
+const props = defineProps<{
+  // Synchronously returns the host view's current editor selection (or null),
+  // so it can be embedded in the outgoing chat message. Optional because not
+  // every host of AiChatPanel necessarily owns an editor.
+  getEditorSelection?: () => EditorSelectionSnapshot | null
+}>()
 
 const emit = defineEmits<{
   (e: 'insert-sql', sql: string): void
@@ -672,6 +680,19 @@ async function sendMessage(): Promise<void> {
   const apiMessages = messages.value
     .filter(m => m.role === 'user' || m.role === 'assistant')
     .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+
+  // Prepend the current editor selection (if any) to the outgoing message only —
+  // NOT to the displayed bubble, and not to earlier history, which already
+  // reflects whatever selection existed when it was originally sent (if any).
+  // Kept out of the system prompt so that stays stable for provider prompt caching.
+  const selection = props.getEditorSelection ? props.getEditorSelection() : null
+  const lastIdx = apiMessages.length - 1
+  if (lastIdx >= 0) {
+    apiMessages[lastIdx] = {
+      ...apiMessages[lastIdx],
+      content: `${buildSelectionContextBlock(selection)}\n\n${apiMessages[lastIdx].content}`
+    }
+  }
 
   try {
     const result = await window.api.llmChat({

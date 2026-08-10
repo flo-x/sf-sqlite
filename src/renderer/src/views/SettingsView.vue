@@ -331,7 +331,7 @@
         <h3 class="settings-section-title">System Prompt</h3>
         <p class="settings-hint" style="margin-top:0;margin-bottom:14px">
           This prompt is sent to the AI at the start of every conversation.
-          Use <code class="prompt-code">{{ schemaPlaceholder }}</code> where you want the live database schema (DDL) to be inserted.
+          Use <code class="prompt-code">{{ schemaPlaceholder }}</code> where you want the live database schema (DDL) to be inserted — placing it at the very end (as the default template does) gets the best result from provider-side prompt caching, since everything before it then stays identical across turns and databases.
           Leave blank to use the built-in default.
         </p>
 
@@ -560,6 +560,11 @@
             <span class="diag-flag-hint">Logs every execute_javascript call: code length, worker log lines, duration, errors.</span>
           </label>
           <label class="diag-flag-row">
+            <input type="checkbox" :checked="diagFlags.llmEditor" @change="toggleFlag('llmEditor', ($event.target as HTMLInputElement).checked)" />
+            <span class="diag-flag-label">AI — Editor context tools</span>
+            <span class="diag-flag-hint">Logs every get_editor_content / get_editor_selection call: which view answered, content length, truncation, or timeout.</span>
+          </label>
+          <label class="diag-flag-row">
             <input type="checkbox" :checked="diagFlags.jobQueries" @change="toggleFlag('jobQueries', ($event.target as HTMLInputElement).checked)" />
             <span class="diag-flag-label">Job queries</span>
             <span class="diag-flag-hint">Logs the SQL query at the start of each SQLite→SF job and the SOQL query at the start of each SF→SQLite job.</span>
@@ -777,12 +782,12 @@ async function checkForUpdatesManual(): Promise<void> {
 }
 
 // ── Diagnostics tab ────────────────────────────────────────────────────────
-const diagFlags = ref({ sfCliExec: false, sfCliAuth: false, oauthFlow: false, llmSql: false, llmDdl: false, llmJavascript: false, jobQueries: false })
+const diagFlags = ref({ sfCliExec: false, sfCliAuth: false, oauthFlow: false, llmSql: false, llmDdl: false, llmJavascript: false, llmEditor: false, jobQueries: false })
 const diagLogs = ref<string[]>([])
 const diagCopied = ref(false)
 const diagLogEl = ref<HTMLElement | null>(null)
 
-async function toggleFlag(flag: 'sfCliExec' | 'sfCliAuth' | 'oauthFlow' | 'llmSql' | 'llmDdl' | 'llmJavascript' | 'jobQueries', value: boolean): Promise<void> {
+async function toggleFlag(flag: 'sfCliExec' | 'sfCliAuth' | 'oauthFlow' | 'llmSql' | 'llmDdl' | 'llmJavascript' | 'llmEditor' | 'jobQueries', value: boolean): Promise<void> {
   diagFlags.value[flag] = value
   await window.api.setDebugFlags({ [flag]: value })
 }

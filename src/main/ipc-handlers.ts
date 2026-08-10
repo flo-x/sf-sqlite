@@ -1,7 +1,7 @@
 import { ipcMain, dialog, BrowserWindow, safeStorage, app, net } from 'electron'
 import { randomUUID } from 'crypto'
 import { join } from 'path'
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, statSync } from 'fs'
 import * as db from './database'
 import * as sf from './salesforce'
 import * as recent from './recentDbs'
@@ -12,12 +12,14 @@ import { dbWorker } from './DbWorkerClient'
 import {
   sendMessage,
   listModels,
-  buildSystemPrompt,
+  buildSystemPromptParts,
   DEFAULT_SYSTEM_PROMPT_TEMPLATE,
   getActiveModel,
   EXECUTE_SQL_TOOL,
   EXECUTE_DDL_TOOL,
   EXECUTE_JAVASCRIPT_TOOL,
+  GET_EDITOR_CONTENT_TOOL,
+  GET_EDITOR_SELECTION_TOOL,
   DEFAULT_SETTINGS,
   type LlmSettings,
   type ChatMessage
@@ -89,6 +91,19 @@ const pendingConfirms = new Map<string, (approved: boolean) => void>()
 // Cancel functions for in-flight LLM JavaScript executions, keyed by conversationId.
 // Calling the function terminates the worker and resolves the runTool promise with an error.
 const pendingToolCancels = new Map<string, () => void>()
+
+/** Result of a get_editor_content / get_editor_selection tool call, supplied by whichever
+ * renderer view (Query Editor or Script Editor) is currently active. */
+interface EditorContentResponse {
+  content: string
+  source: 'query' | 'scripts'
+  language: 'sql' | 'javascript'
+  truncated: boolean
+}
+
+// Resolvers for in-flight "get editor content/selection" requests, keyed by conversationId.
+// Only one such request can be pending per conversation at a time.
+const pendingEditorRequests = new Map<string, (response: EditorContentResponse | null) => void>()
 
 // ── Per-run writeback state ──────────────────────────────────────────────────
 // Each REST API run creates a TEMP SQLite table (_wb_exec_<runId>) that holds
@@ -385,7 +400,7 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
       job.rowLimit ? `LIMIT ${job.rowLimit}` : ''
     ].filter(Boolean).join(' ')
     debugLog('jobQueries', `[SF→SQLite] job="${job.name}" (id=${jobId}) SOQL (structured):\n${soqlPreview}`)
-    const fields = await sf.describeObject(job.sfObject)
+    const { fields } = await sf.describeObject(job.sfObject)
     const selectedFieldMeta = fields.filter((f) => job.fields.includes(f.name))
 
     const priorIndexes = job.writeMode === 'replace'
@@ -1070,6 +1085,9 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('db:vacuum', () => db.vacuumDatabase())
 
+  /** Files larger than this are refused in preview mode to prevent OOM. */
+  const CSV_PREVIEW_SIZE_LIMIT = 200 * 1024 * 1024 // 200 MB
+
   ipcMain.handle('csv:pick-and-preview', async () => {
     const result = await dialog.showOpenDialog({
       title: 'Select CSV file',
@@ -1077,11 +1095,18 @@ export function registerIpcHandlers(): void {
       properties: ['openFile']
     })
     if (result.canceled || !result.filePaths[0]) return null
-    return db.previewCsvFile(result.filePaths[0])
+    const filePath = result.filePaths[0]
+    if (statSync(filePath).size > CSV_PREVIEW_SIZE_LIMIT) {
+      return { filePath, headers: [], rows: [], totalLines: 0, tooLarge: true as const }
+    }
+    return db.previewCsvFile(filePath)
   })
 
   ipcMain.handle('csv:preview-path', (_e, filePath: string) => {
     assertCsvPath(filePath)
+    if (statSync(filePath).size > CSV_PREVIEW_SIZE_LIMIT) {
+      return { filePath, headers: [], rows: [], totalLines: 0, tooLarge: true as const }
+    }
     return db.previewCsvFile(filePath)
   })
 
@@ -1455,10 +1480,21 @@ export function registerIpcHandlers(): void {
             newState.inFlight += batchRows.length
             // For Bulk API retries, columns are already SF field names — build the
             // record directly without going through mapRowToRecord.
+            // Columns that use the Bulk ext-ID dot-notation (e.g. "Account.AccountNumber")
+            // must be converted to the REST nested-object shape ({ Account: { AccountNumber } }).
             const records = isBulk
               ? batchRows.map((b) => {
                   const rec: Record<string, unknown> = {}
-                  for (let i = 0; i < columns.length; i++) { rec[columns[i]] = b.row[i] ?? null }
+                  for (let i = 0; i < columns.length; i++) {
+                    const col = columns[i]
+                    const value = b.row[i] ?? null
+                    const dotIdx = col.indexOf('.')
+                    if (dotIdx !== -1) {
+                      rec[col.slice(0, dotIdx)] = { [col.slice(dotIdx + 1)]: value }
+                    } else {
+                      rec[col] = value
+                    }
+                  }
                   return rec
                 })
               : batchRows.map((b) => mapRowToRecord(b.row, columns, activeMappings))
@@ -1532,7 +1568,7 @@ export function registerIpcHandlers(): void {
     return getFailedRowsByRunId(runId)
   })
 
-  // Forward scheduler events to the renderer so ExtractView / WritebackView can
+  // Forward scheduler events to the renderer so JobsView can
   // show running/queued badges for script-triggered jobs.
   scheduler.onExternalEvent((e) => {
     send(`job:external-${e.event}`, { type: e.type, jobId: e.jobId })
@@ -1736,6 +1772,7 @@ export function registerIpcHandlers(): void {
     const result = await sendMessage({
       settings,
       systemPrompt: 'You are a test assistant.',
+      systemPromptSchema: '',
       messages: [{ role: 'user', content: 'Reply with exactly: {"explanation":"ok","warnings":[]}' }],
       tools: [],
       runTool: async () => '',
@@ -1770,6 +1807,19 @@ export function registerIpcHandlers(): void {
     }
   })
 
+  // ── LLM editor content/selection response ─────────────────────────────────────
+  // Whichever view (Query Editor or Script Editor) currently has its listener
+  // registered (see onActivated/onDeactivated in QueryView.vue / ScriptsView.vue)
+  // answers here in response to an 'llm:get-editor-request' push event.
+
+  ipcMain.handle('llm:editor-response', (_e, { conversationId, response }: { conversationId: string; response: EditorContentResponse | null }): void => {
+    const resolve = pendingEditorRequests.get(conversationId)
+    if (resolve) {
+      pendingEditorRequests.delete(conversationId)
+      resolve(response)
+    }
+  })
+
   // ── LLM JavaScript cancel ──────────────────────────────────────────────────
 
   ipcMain.handle('llm:cancel-tool', (_e, cid: string): void => {
@@ -1801,7 +1851,11 @@ export function registerIpcHandlers(): void {
         schemaText = '(No database open)'
       }
 
-      const systemPrompt = buildSystemPrompt(schemaText, settings.systemPromptTemplate)
+      // Split so the (large, DB-independent) instructions block can be kept
+      // separate from the schema for Anthropic's cache_control breakpoints —
+      // see the systemPromptSchema field passed to sendMessage below.
+      const { instructions: systemPromptInstructions, schema: systemPromptSchema } = buildSystemPromptParts(schemaText, settings.systemPromptTemplate)
+      const systemPrompt = systemPromptInstructions + systemPromptSchema
 
       // Save user messages to history
       const lastUserMsg = messages[messages.length - 1]
@@ -1822,8 +1876,9 @@ export function registerIpcHandlers(): void {
       const result = await sendMessage({
         settings,
         systemPrompt,
+        systemPromptSchema,
         messages,
-        tools: [EXECUTE_SQL_TOOL, EXECUTE_DDL_TOOL, EXECUTE_JAVASCRIPT_TOOL],
+        tools: [EXECUTE_SQL_TOOL, EXECUTE_DDL_TOOL, EXECUTE_JAVASCRIPT_TOOL, GET_EDITOR_CONTENT_TOOL, GET_EDITOR_SELECTION_TOOL],
         runTool: async (name, args) => {
           if (name === 'execute_sql') {
             const ROW_CAP = 5000
@@ -1998,6 +2053,33 @@ export function registerIpcHandlers(): void {
             }
             debugLog('llmJavascript', `Worker finished OK in ${outcome.durationMs}ms — ${logs.length} log line(s)`)
             return JSON.stringify({ ok: true, output: logs, durationMs: outcome.durationMs })
+          }
+
+          if (name === 'get_editor_content' || name === 'get_editor_selection') {
+            const kind = name === 'get_editor_content' ? 'content' : 'selection'
+            debugLog('llmEditor', `${name} called`)
+
+            win?.webContents.send('llm:get-editor-request', { conversationId, kind })
+
+            const EDITOR_REQUEST_TIMEOUT_MS = 5000
+            const response = await new Promise<EditorContentResponse | null>(resolve => {
+              const timer = setTimeout(() => {
+                pendingEditorRequests.delete(conversationId)
+                resolve(null)
+              }, EDITOR_REQUEST_TIMEOUT_MS)
+              pendingEditorRequests.set(conversationId, (r) => {
+                clearTimeout(timer)
+                resolve(r)
+              })
+            })
+
+            if (!response) {
+              debugLog('llmEditor', `${name}: no editor responded in time`)
+              return JSON.stringify({ error: 'No Query Editor or Script Editor is currently open, or it did not respond. Ask the user to paste the text instead.' })
+            }
+
+            debugLog('llmEditor', `${name} — source: ${response.source}, ${response.content.length} chars${response.truncated ? ' (truncated)' : ''}`)
+            return JSON.stringify(response)
           }
 
           return JSON.stringify({ error: `Unknown tool: ${name}` })

@@ -61,6 +61,11 @@ export interface ToolDefinition {
 export interface SendMessageOptions {
   settings: LlmSettings
   systemPrompt: string
+  /** Schema-only trailing portion of systemPrompt — i.e. systemPrompt with this
+   *  exact suffix removed leaves the DB-independent instructions block. Used
+   *  only by the Anthropic path to place the schema in its own cache_control
+   *  breakpoint, separate from the (much larger, stable) instructions block. */
+  systemPromptSchema: string
   messages: ChatMessage[]
   tools: ToolDefinition[]
   runTool: (name: string, args: Record<string, unknown>) => Promise<string>
@@ -215,14 +220,27 @@ function trimMessages(
 export const DEFAULT_SYSTEM_PROMPT_TEMPLATE = `You are an expert SQLite data analyst and SQL assistant. You help users both analyze data and write SQL queries, and sometimes JavaScript code for data processing.
 
 ## Database Schema
-{{schema}}
-
-## Database Schema (above)
-The Database Schema section above contains the full list of tables and their columns as they exist right now in the open database. You should use it to:
+The full list of tables and their columns, as they exist right now in the open database, is provided in the "## Live Database Schema" section at the very end of this system prompt. You should use it to:
 - Answer questions about the data structure (table names, column names, types, relationships) without calling execute_sql.
 - Understand what data is available before deciding how to approach an analysis or query.
 - Infer likely foreign-key relationships from column naming conventions (e.g. a column named "customer_id" in an orders table likely joins to a "customers" table).
-Do not query the database for the schema. The schema is provided above, use that information whenever necesary.
+Do not query the database for the schema. It is provided at the end of this prompt — use that information whenever necessary.
+
+## Editor Context Tools
+
+The user may be working in the SQL Query Editor or the JavaScript Script Editor while talking to you, and may refer to what's on their screen instead of pasting it into the chat.
+
+**Current selection is provided inline, automatically.** Every user message is preceded by a \`<user_selection>\` block reflecting their editor selection at the moment they sent it. It has one of three states:
+- \`status="none"\` — nothing is selected right now. If the user refers to "this" or "the selected part" while this is the state, tell them nothing appears to be selected, or fall back to \`get_editor_content\` if their intent seems to be "the whole thing".
+- \`status="present"\` — the selected text is included directly inside the block (this only happens for selections under ~2 KB). Use it only if it's actually relevant to the user's message below it; otherwise ignore it.
+- \`status="too_large"\` — there is a selection, but it was too big to include inline. Call the \`get_editor_selection\` tool yourself if you actually need its contents; otherwise ignore it.
+The block's \`source\`/\`language\` attributes tell you whether it came from the Query Editor (SQL) or the Script Editor (JavaScript).
+
+**Tools, for everything the inline block doesn't cover:**
+- \`get_editor_selection\` — fetches the current selection directly. Use this when the inline block says \`status="too_large"\` and you need the content, or when you need to re-check the selection later in a multi-step task (the inline block only reflects the selection at send time). Returns an empty string if nothing is selected.
+- \`get_editor_content\` — gets the full editor contents (active tab only, if the Query Editor has multiple tabs open). Use this when the user says something like "my query", "my script", "what I have so far", or "the whole thing".
+- Both tools' results also carry \`source\`/\`language\` fields, same as the inline block.
+- If neither editor is currently open (e.g. the user is on another screen), these tools return an error — in that case, ask the user to paste the relevant text instead.
 
 ## Detecting User Intent
 
@@ -443,22 +461,62 @@ WRONG (never do this — code embedded in markdown inside explanation):
 {"explanation":"Here is the script:\n\`\`\`javascript\ndb.execute('CREATE TABLE ...')\n\`\`\`","warnings":[]}
 
 CORRECT (raw code string in the javascript key, no fences):
-{"javascript":"db.execute('DROP TABLE IF EXISTS ai_revenue_by_month')\ndb.execute('CREATE TABLE ai_revenue_by_month (month TEXT, total_revenue REAL, order_count INTEGER)')\nconst { rows } = db.query(\"SELECT strftime('%Y-%m', created_at) AS month, SUM(amount) AS total, COUNT(*) AS cnt FROM orders GROUP BY month ORDER BY month\")\ndb.transaction(() => {\n  for (const [month, total, cnt] of rows) {\n    db.execute('INSERT INTO ai_revenue_by_month VALUES (?, ?, ?)', [month, total, cnt])\n  }\n})\nconsole.log('Created table ai_revenue_by_month with ' + rows.length + ' rows')","explanation":"Creates a table ai_revenue_by_month with one row per calendar month. Run this script, then query SELECT * FROM ai_revenue_by_month to review the results.","warnings":[]}`
+{"javascript":"db.execute('DROP TABLE IF EXISTS ai_revenue_by_month')\ndb.execute('CREATE TABLE ai_revenue_by_month (month TEXT, total_revenue REAL, order_count INTEGER)')\nconst { rows } = db.query(\"SELECT strftime('%Y-%m', created_at) AS month, SUM(amount) AS total, COUNT(*) AS cnt FROM orders GROUP BY month ORDER BY month\")\ndb.transaction(() => {\n  for (const [month, total, cnt] of rows) {\n    db.execute('INSERT INTO ai_revenue_by_month VALUES (?, ?, ?)', [month, total, cnt])\n  }\n})\nconsole.log('Created table ai_revenue_by_month with ' + rows.length + ' rows')","explanation":"Creates a table ai_revenue_by_month with one row per calendar month. Run this script, then query SELECT * FROM ai_revenue_by_month to review the results.","warnings":[]}
+
+## Live Database Schema
+{{schema}}`
+
+export interface SystemPromptParts {
+  /**
+   * Everything before the {{schema}} placeholder — stable across turns and
+   * across databases, since it never depends on live schema state. This is the
+   * part worth keeping as a fixed prefix for provider-side prompt caching
+   * (OpenAI's automatic prefix caching, Anthropic's cache_control breakpoints).
+   */
+  instructions: string
+  /**
+   * The literal schema text (plus any template text placed after the
+   * placeholder, for custom templates) — changes whenever the open database's
+   * structure changes.
+   */
+  schema: string
+}
 
 /**
- * Build the final system prompt by injecting the live schema DDL into the
- * template. Pass a custom template (from user settings) to override the
- * default; if omitted or blank the built-in DEFAULT_SYSTEM_PROMPT_TEMPLATE is used.
+ * Splits a system prompt template around its {{schema}} placeholder so callers
+ * can keep the large, DB-independent instructions block separate from the
+ * volatile live schema. DEFAULT_SYSTEM_PROMPT_TEMPLATE places {{schema}} at the
+ * very end for exactly this reason — see the "Live Database Schema" section.
+ * Pass a custom template (from user settings) to override the default; if
+ * omitted or blank the built-in DEFAULT_SYSTEM_PROMPT_TEMPLATE is used.
  */
-export function buildSystemPrompt(schemaText: string, customTemplate?: string): string {
+export function buildSystemPromptParts(schemaText: string, customTemplate?: string): SystemPromptParts {
   const template = (customTemplate && customTemplate.trim()) ? customTemplate : DEFAULT_SYSTEM_PROMPT_TEMPLATE
-  return template.replace('{{schema}}', schemaText)
+  const placeholderIdx = template.indexOf('{{schema}}')
+  if (placeholderIdx === -1) {
+    // No placeholder — e.g. a custom template that omits {{schema}} entirely.
+    // Mirrors the old template.replace('{{schema}}', ...) behavior, which was a
+    // no-op in this case: the schema is simply not included anywhere.
+    return { instructions: template, schema: '' }
+  }
+  const before = template.slice(0, placeholderIdx)
+  const after = template.slice(placeholderIdx + '{{schema}}'.length)
+  return { instructions: before, schema: schemaText + after }
+}
+
+/** Build the final, single-string system prompt by injecting the live schema
+ * DDL into the template. Used by every provider except Anthropic, which uses
+ * buildSystemPromptParts() directly to place the schema in its own cache
+ * breakpoint instead. */
+export function buildSystemPrompt(schemaText: string, customTemplate?: string): string {
+  const { instructions, schema } = buildSystemPromptParts(schemaText, customTemplate)
+  return instructions + schema
 }
 
 // ── Main sendMessage ───────────────────────────────────────────────────────────
 
 export async function sendMessage(opts: SendMessageOptions): Promise<SendMessageResult> {
-  const { settings, systemPrompt, messages, tools, runTool, onChunk, onToolCall, onToolResult } = opts
+  const { settings, systemPrompt, systemPromptSchema, messages, tools, runTool, onChunk, onToolCall, onToolResult } = opts
   const maxTokens = getContextWindow(settings)
   const model = getActiveModel(settings)
 
@@ -478,7 +536,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
         reply = await sendOpenAI(settings, model, systemPrompt, trimmed, tools, runTool, onChunk, onToolCall, onToolResult, onIterationLog)
         break
       case 'anthropic':
-        reply = await sendAnthropic(settings, model, systemPrompt, trimmed, tools, runTool, onChunk, onToolCall, onToolResult, onIterationLog)
+        reply = await sendAnthropic(settings, model, systemPrompt, systemPromptSchema, trimmed, tools, runTool, onChunk, onToolCall, onToolResult, onIterationLog)
         break
       case 'mistral':
         reply = await sendMistral(settings, model, systemPrompt, trimmed, tools, runTool, onChunk, onToolCall, onToolResult, onIterationLog)
@@ -650,6 +708,7 @@ async function sendAnthropic(
   settings: LlmSettings,
   model: string,
   systemPrompt: string,
+  systemPromptSchema: string,
   messages: ChatMessage[],
   tools: ToolDefinition[],
   runTool: (name: string, args: Record<string, unknown>) => Promise<string>,
@@ -666,6 +725,19 @@ async function sendAnthropic(
     input_schema: t.parameters as Anthropic.Tool['input_schema']
   }))
 
+  // Split into two cache breakpoints: the (large, DB-independent) instructions
+  // block stays cached across virtually every turn and every conversation,
+  // while the schema block — small but changes whenever the open database's
+  // structure does — gets its own breakpoint so a schema change only misses
+  // the cache for that one block instead of invalidating the whole prompt.
+  const systemPromptInstructions = systemPrompt.slice(0, systemPrompt.length - systemPromptSchema.length)
+  const anthropicSystem = systemPromptSchema
+    ? [
+        { type: 'text' as const, text: systemPromptInstructions, cache_control: { type: 'ephemeral' as const } },
+        { type: 'text' as const, text: systemPromptSchema, cache_control: { type: 'ephemeral' as const } }
+      ]
+    : [{ type: 'text' as const, text: systemPromptInstructions, cache_control: { type: 'ephemeral' as const } }]
+
   let fullReply = ''
   let loopMessages: Anthropic.MessageParam[] = messages.map(m => ({
     role: m.role,
@@ -681,14 +753,7 @@ async function sendAnthropic(
       const stream = client.messages.stream({
         model,
         max_tokens: settings.anthropicExtendedThinking ? 16_000 : 4_096,
-        system: [
-          {
-            type: 'text',
-            text: systemPrompt,
-            // Prompt caching — system prompt is stable across turns
-            cache_control: { type: 'ephemeral' }
-          }
-        ],
+        system: anthropicSystem,
         messages: loopMessages,
         ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
         temperature: 0.1
@@ -1172,6 +1237,25 @@ export const EXECUTE_DDL_TOOL: ToolDefinition = {
     },
     required: ['statement', 'reason']
   }
+}
+
+export const GET_EDITOR_CONTENT_TOOL: ToolDefinition = {
+  name: 'get_editor_content',
+  description:
+    'Get the full contents of the editor the user currently has open — the SQL in the Query Editor, or the code in the Script Editor. ' +
+    'If the Query Editor has multiple tabs open, only the active tab is returned. ' +
+    'Use this when the user refers to "my query", "my script", "what I have", or similar, instead of asking them to paste it.',
+  parameters: { type: 'object', properties: {}, required: [] }
+}
+
+export const GET_EDITOR_SELECTION_TOOL: ToolDefinition = {
+  name: 'get_editor_selection',
+  description:
+    'Get the text currently selected/highlighted by the user in the Query Editor or Script Editor. ' +
+    'Returns an empty string if nothing is selected. ' +
+    'Note: small selections (under ~2 KB) are already included inline in the user\'s message as a <user_selection> block — ' +
+    'only call this tool when that block says status="too_large", or when you need to re-check the selection later in a multi-step task.',
+  parameters: { type: 'object', properties: {}, required: [] }
 }
 
 export const EXECUTE_JAVASCRIPT_TOOL: ToolDefinition = {

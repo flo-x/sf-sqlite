@@ -22,6 +22,9 @@ export interface DebugFlags {
   llmDdl: boolean
   /** Logs LLM execute_javascript tool calls: code length, log lines, duration, errors. */
   llmJavascript: boolean
+  /** Logs LLM get_editor_content / get_editor_selection tool calls: which view
+   *  answered, content length, truncation, or timeout. */
+  llmEditor: boolean
   /** Logs the SQL query for SQLite→SF jobs and the SOQL query for SF→SQLite jobs
    *  at the moment the job starts. */
   jobQueries: boolean
@@ -40,6 +43,7 @@ let flags: DebugFlags = {
   llmSql: false,
   llmDdl: false,
   llmJavascript: false,
+  llmEditor: false,
   jobQueries: false,
   wbSql: false,
 }

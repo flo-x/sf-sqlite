@@ -335,7 +335,7 @@ if (result.rowsFailed > 0) {
         <span class="ai-drawer-title">AI Assistant</span>
         <button class="ai-drawer-close" title="Close" @click="aiDrawerOpen = false">✕</button>
       </div>
-      <AiChatPanel @insert-js="insertJsFromAi" @insert-sql="openInQueryEditor" style="flex:1;min-height:0;overflow:hidden;" />
+      <AiChatPanel :get-editor-selection="getEditorSelectionSnapshot" @insert-js="insertJsFromAi" @insert-sql="openInQueryEditor" style="flex:1;min-height:0;overflow:hidden;" />
     </div>
   </div>
 
@@ -353,6 +353,7 @@ import { registerQuitHandler } from '../composables/useQuitHandlers'
 import { useConnectionStore } from '../stores/connection'
 import { useJobStore } from '../stores/job'
 import AiChatPanel from '../components/AiChatPanel.vue'
+import { buildEditorContentResponse, type EditorSelectionSnapshot } from '../utils/editorAiContext'
 import type { SavedScript, ScriptLog, ScriptComplete, ScriptDraft } from '../../../shared/types'
 
 const conn = useConnectionStore()
@@ -685,6 +686,36 @@ const editorArea = ref<HTMLElement | null>(null)
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
 const scriptViewStates = new Map<number | null, monaco.editor.ICodeEditorViewState>()
 
+// ── AI assistant editor-context tool support ──────────────────────────────────
+// Answers the get_editor_content / get_editor_selection tool calls (see
+// ipc-handlers.ts) while this view is the active one. Registered/unregistered in
+// onActivated/onDeactivated rather than onMounted/onBeforeUnmount because
+// <keep-alive> in App.vue keeps this view instance alive in the background —
+// without this, a stale listener here could answer a request meant for the
+// Query Editor.
+let offLlmGetEditorRequest: (() => void) | null = null
+
+// Used both by the get_editor_selection tool listener below and by the
+// AiChatPanel :get-editor-selection prop (inline selection context on send).
+function getEditorSelectionSnapshot(): EditorSelectionSnapshot | null {
+  if (!editor) return null
+  const model = editor.getModel()
+  const sel = editor.getSelection()
+  if (!sel || !model || sel.isEmpty()) return null
+  return { content: model.getValueInRange(sel), source: 'scripts', language: 'javascript' }
+}
+
+function registerEditorAiContextListener(): void {
+  offLlmGetEditorRequest = window.api.onLlmGetEditorRequest(({ conversationId, kind }) => {
+    if (!editor) {
+      window.api.sendEditorResponse(conversationId, null)
+      return
+    }
+    const text = kind === 'selection' ? (getEditorSelectionSnapshot()?.content ?? '') : editor.getValue()
+    window.api.sendEditorResponse(conversationId, buildEditorContentResponse(text, 'scripts', 'javascript'))
+  })
+}
+
 function initEditor(): void {
   if (!monacoContainer.value || editor) return
   editor = monaco.editor.create(monacoContainer.value, {
@@ -859,6 +890,7 @@ onMounted(async () => {
 // Editor" clicks work correctly after the initial mount.
 onActivated(() => {
   window.addEventListener('keydown', onKeydown)
+  registerEditorAiContextListener()
   applyPendingCode()
   if (editor) {
     const vs = scriptViewStates.get(activeScript.savedId) ?? null
@@ -868,6 +900,8 @@ onActivated(() => {
 
 onDeactivated(() => {
   window.removeEventListener('keydown', onKeydown)
+  offLlmGetEditorRequest?.()
+  offLlmGetEditorRequest = null
   if (editor) {
     const vs = editor.saveViewState()
     if (vs) {
@@ -882,6 +916,8 @@ onBeforeUnmount(() => {
   }
   unregisterQuitHandler?.()
   window.removeEventListener('blur', onWindowBlur)
+  offLlmGetEditorRequest?.()
+  offLlmGetEditorRequest = null
   editor?.dispose()
   editor = null
   teardownListeners()

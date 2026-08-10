@@ -163,7 +163,7 @@
         <span class="ai-drawer-title">AI Assistant</span>
         <button class="ai-drawer-close" title="Close" @click="aiDrawerOpen = false">✕</button>
       </div>
-      <AiChatPanel @insert-sql="insertSqlFromAi" @insert-js="openInScriptEditor" style="flex:1;min-height:0;overflow:hidden;" />
+      <AiChatPanel :get-editor-selection="getEditorSelectionSnapshot" @insert-sql="insertSqlFromAi" @insert-js="openInScriptEditor" style="flex:1;min-height:0;overflow:hidden;" />
     </div>
 
     <!-- Unsaved dialog -->
@@ -238,6 +238,7 @@ import DataGrid from '../components/DataGrid.vue'
 import SchemaBrowser from '../components/SchemaBrowser.vue'
 import SFSchemaBrowser from '../components/SFSchemaBrowser.vue'
 import AiChatPanel from '../components/AiChatPanel.vue'
+import { buildEditorContentResponse, type EditorSelectionSnapshot } from '../utils/editorAiContext'
 import type { JobResult, SavedQuery, QueryDraft, PagedQueryResult, SortCriterion } from '../../../shared/types'
 
 const QUERY_PAGE_SIZE = 100000
@@ -250,6 +251,35 @@ const editorArea = ref<HTMLElement | null>(null)
 const schemaPanel = ref<HTMLElement | null>(null)
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
 const tabViewStates = new Map<string, monaco.editor.ICodeEditorViewState>()
+
+// ── AI assistant editor-context tool support ──────────────────────────────────
+// Answers the get_editor_content / get_editor_selection tool calls (see
+// ipc-handlers.ts) while this view is the active one. Registered/unregistered in
+// onActivated/onDeactivated rather than onMounted/onUnmounted because <keep-alive>
+// in App.vue keeps this view instance alive in the background — without this, a
+// stale listener here could answer a request meant for the Script Editor.
+let offLlmGetEditorRequest: (() => void) | null = null
+
+// Used both by the get_editor_selection tool listener below and by the
+// AiChatPanel :get-editor-selection prop (inline selection context on send).
+function getEditorSelectionSnapshot(): EditorSelectionSnapshot | null {
+  if (!editor) return null
+  const model = editor.getModel()
+  const sel = editor.getSelection()
+  if (!sel || !model || sel.isEmpty()) return null
+  return { content: model.getValueInRange(sel), source: 'query', language: 'sql' }
+}
+
+function registerEditorAiContextListener(): void {
+  offLlmGetEditorRequest = window.api.onLlmGetEditorRequest(({ conversationId, kind }) => {
+    if (!editor) {
+      window.api.sendEditorResponse(conversationId, null)
+      return
+    }
+    const text = kind === 'selection' ? (getEditorSelectionSnapshot()?.content ?? '') : editor.getValue()
+    window.api.sendEditorResponse(conversationId, buildEditorContentResponse(text, 'query', 'sql'))
+  })
+}
 
 const executingMode = ref<'sqlite' | 'soql'>('sqlite')
 const schemaTab = ref<'sqlite' | 'sf'>('sqlite')
@@ -438,9 +468,12 @@ onDeactivated(() => {
       tabViewStates.set(queryStore.activeTabKey, vs)
     }
   }
+  offLlmGetEditorRequest?.()
+  offLlmGetEditorRequest = null
 })
 
 onActivated(() => {
+  registerEditorAiContextListener()
   if (!editor || !activeTab.value) return
   const model = editor.getModel()
   if (model && model.getValue() !== activeTab.value.sqlText) {
@@ -916,6 +949,8 @@ onUnmounted(() => {
   window.removeEventListener('blur', onWindowBlur)
   if (idleDraftTimer !== null) clearTimeout(idleDraftTimer)
   unregisterQuitHandler?.()
+  offLlmGetEditorRequest?.()
+  offLlmGetEditorRequest = null
   editor?.dispose()
 })
 </script>

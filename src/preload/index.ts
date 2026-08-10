@@ -7,7 +7,7 @@ import type {
   CliOrg,
   CliOrgsResult,
   SObjectSummary,
-  FieldDescriptor,
+  DescribeResult,
   ExtractJob,
   ExtractJobInput,
   RunHistoryEntry,
@@ -187,7 +187,7 @@ const api = {
   listObjects: (): Promise<SObjectSummary[]> =>
     ipcRenderer.invoke('sf:list-objects'),
 
-  describeObject: (name: string): Promise<FieldDescriptor[]> =>
+  describeObject: (name: string): Promise<DescribeResult> =>
     ipcRenderer.invoke('sf:describe', name),
 
   runSoqlQuery: (soql: string): Promise<QueryResult> =>
@@ -486,6 +486,20 @@ const api = {
 
   confirmLlmStatement: (conversationId: string, approved: boolean): Promise<void> =>
     ipcRenderer.invoke('llm:confirm-response', { conversationId, approved }),
+
+  // Fired when the assistant calls the get_editor_content / get_editor_selection tool.
+  // Whichever view (Query Editor or Script Editor) is currently active should reply
+  // via sendEditorResponse.
+  onLlmGetEditorRequest: (cb: (e: { conversationId: string; kind: 'content' | 'selection' }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { conversationId: string; kind: 'content' | 'selection' }): void => cb(data)
+    ipcRenderer.on('llm:get-editor-request', handler)
+    return () => ipcRenderer.removeListener('llm:get-editor-request', handler)
+  },
+
+  sendEditorResponse: (
+    conversationId: string,
+    response: { content: string; source: 'query' | 'scripts'; language: 'sql' | 'javascript'; truncated: boolean } | null
+  ): Promise<void> => ipcRenderer.invoke('llm:editor-response', { conversationId, response }),
 
   cancelTool: (conversationId: string): Promise<void> =>
     ipcRenderer.invoke('llm:cancel-tool', conversationId),
