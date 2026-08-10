@@ -36,6 +36,9 @@ export interface SortCriterion {
  * A single page of query results used for server-side pagination.
  * `rows` contains only the current page; `totalCount` is the full result-set size.
  * When `sql` is non-empty the caller can request additional pages via db:query-page.
+ * Note: when `truncatedByBytes` is set, `rows.length` can be less than the requested
+ * page size — callers must advance pagination by `rows.length`, not a fixed page size,
+ * or later rows in the same logical page will be silently skipped.
  */
 export interface PagedQueryResult {
   columns: string[]
@@ -46,6 +49,9 @@ export interface PagedQueryResult {
   offset: number
   pageSize: number
   sql: string
+  /** True when the page was cut short because its estimated in-memory size exceeded
+   *  the fetch byte limit, even though more rows were available for this page. */
+  truncatedByBytes?: boolean
 }
 
 export interface CsvPreview {

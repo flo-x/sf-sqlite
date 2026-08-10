@@ -310,6 +310,7 @@
             :onSortChange="previewTotal > EXPLORER_PAGE_SIZE ? handlePreviewSortChange : undefined"
             :externalSortCriteria="previewTotal > EXPLORER_PAGE_SIZE ? previewSort : undefined"
             :onExportCsv="exportTableCsv"
+            exportCsvLabel="Export the full table as CSV"
             :exportingCsv="exportingCsv"
             style="flex:1;"
           />

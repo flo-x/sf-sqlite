@@ -91,10 +91,16 @@
                 ↓ {{ (displayRowCount - ((externalOffset ?? 0) + rows.length)).toLocaleString() }} more rows — press <strong>Next</strong> to continue
               </td>
             </tr>
-            <!-- Data-size truncation warning -->
+            <!-- Data-size truncation warning (client-side render guard: this page's rows are already in memory) -->
             <tr v-if="isTruncated" class="truncated-rows-row">
               <td :colspan="(showRowNumbers ? 1 : 0) + displayCols.length" class="truncated-rows-td">
-                ⚠ Display limit reached ({{ ((maxDataBytes ?? 104857600) / 1048576).toLocaleString(undefined, { maximumFractionDigits: 0 }) }} MB) — showing first {{ effectiveRows.length.toLocaleString() }} of {{ rows.length.toLocaleString() }} rows. Reduce page size or export to CSV to access the full data.
+                ⚠ Display limit reached ({{ ((maxDataBytes ?? DEFAULT_MAX_BYTES) / 1048576).toLocaleString(undefined, { maximumFractionDigits: 0 }) }} MB) — showing first {{ effectiveRows.length.toLocaleString() }} of {{ rows.length.toLocaleString() }} rows. Reduce page size or export to CSV to access the full data.
+              </td>
+            </tr>
+            <!-- Server-side truncation warning: fewer rows were fetched for this page than requested -->
+            <tr v-if="!isTruncated && serverTruncatedByBytes" class="truncated-rows-row">
+              <td :colspan="(showRowNumbers ? 1 : 0) + displayCols.length" class="truncated-rows-td">
+                ⚠ This page was cut short after reaching the {{ ((maxDataBytes ?? DEFAULT_MAX_BYTES) / 1048576).toLocaleString(undefined, { maximumFractionDigits: 0 }) }} MB fetch limit ({{ rows.length.toLocaleString() }} rows loaded). Click Next to continue, or narrow your query with a WHERE/LIMIT clause.
               </td>
             </tr>
           </tbody>
@@ -135,7 +141,13 @@
         <div v-if="onPageChange && displayRowCount > rows.length" style="margin-left: auto; display:flex; gap:6px; align-items:center;">
           <button class="btn btn-ghost btn-sm" :disabled="(externalOffset ?? 0) === 0" @click="onPageChange(Math.max(0, (externalOffset ?? 0) - PAGE))">‹ Prev</button>
           <span style="font-size:12px;">{{ (externalOffset ?? 0) + 1 }}–{{ Math.min((externalOffset ?? 0) + rows.length, displayRowCount) }} / {{ displayRowCount.toLocaleString() }}</span>
-          <button class="btn btn-ghost btn-sm" :disabled="(externalOffset ?? 0) + rows.length >= displayRowCount" @click="onPageChange((externalOffset ?? 0) + PAGE)">Next ›</button>
+          <!--
+            Next advances by the number of rows actually returned for this page (not the
+            nominal page size): when serverTruncatedByBytes cut this page short, fewer rows
+            than requested came back, and advancing by a fixed page size would silently skip
+            the remaining rows in this window.
+          -->
+          <button class="btn btn-ghost btn-sm" :disabled="(externalOffset ?? 0) + rows.length >= displayRowCount" @click="onPageChange((externalOffset ?? 0) + rows.length)">Next ›</button>
         </div>
       </div>
     </template>
@@ -185,9 +197,15 @@ const props = defineProps<{
    * Maximum estimated byte size of the rows data allowed to render.
    * When the rows received exceed this limit, only the rows that fit are rendered
    * and a warning row is shown at the bottom.
-   * Defaults to 100 MB (100 * 1024 * 1024).
+   * Defaults to 200 MB (200 * 1024 * 1024).
    */
   maxDataBytes?: number
+  /**
+   * Set when the parent's server-side fetch stopped early because this page's estimated
+   * size exceeded its own byte limit (fewer rows than requested were returned). Shows a
+   * distinct warning from the client-side render guard above.
+   */
+  serverTruncatedByBytes?: boolean
 }>()
 
 const emit = defineEmits<{ cellEdit: [row: number, col: number, value: string] }>()
@@ -429,7 +447,8 @@ function onHeaderClick(origIdx: number, e: MouseEvent): void {
 }
 
 // ── Data-size guard ────────────────────────────────────────────────────────────
-const DEFAULT_MAX_BYTES = 100 * 1024 * 1024  // 100 MB
+// Matches MAX_QUERY_PAGE_BYTES in src/main/database.ts — keep both in sync.
+const DEFAULT_MAX_BYTES = 200 * 1024 * 1024  // 200 MB
 
 /**
  * Finds the first row index at which the cumulative estimated byte size of the

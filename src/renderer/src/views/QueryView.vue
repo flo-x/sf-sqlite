@@ -112,10 +112,12 @@
           :durationMs="activeTab.result.durationMs"
           :showRowNumbers="true"
           :totalRowCount="activeTab.result.totalCount"
+          :serverTruncatedByBytes="activeTab.result.truncatedByBytes"
           :onPageChange="activeTab.result.sql ? navigateResultPage : undefined"
           :externalOffset="activeTab.result.offset"
           :pageSize="QUERY_PAGE_SIZE"
           :onExportCsv="exportCsv"
+          exportCsvLabel="Export the full result as CSV"
           :onSortChange="activeTab.result.sql ? handleSortChange : undefined"
           :externalSortCriteria="activeTab.result.sql ? activeTab.sortCriteria : undefined"
           style="height: 100%;"
@@ -707,8 +709,8 @@ async function navigateResultPage(newOffset: number): Promise<void> {
   if (!tab?.result?.sql) return
   try {
     const orderBy = sortCriteriaToOrderBy(tab)
-    const { rows } = await window.api.queryPage(tab.result.sql, newOffset, QUERY_PAGE_SIZE, orderBy)
-    queryStore.updateResultPage(tab.key, rows, newOffset)
+    const { rows, truncatedByBytes } = await window.api.queryPage(tab.result.sql, newOffset, QUERY_PAGE_SIZE, orderBy)
+    queryStore.updateResultPage(tab.key, rows, newOffset, truncatedByBytes)
   } catch {
     // Silently ignore — the current page stays displayed
   }
@@ -723,8 +725,8 @@ async function handleSortChange(criteria: SortCriterion[]): Promise<void> {
       column: tab.result!.columns[c.colIdx],
       dir: c.dir
     }))
-    const { rows } = await window.api.queryPage(tab.result.sql, 0, QUERY_PAGE_SIZE, orderBy)
-    queryStore.updateResultPage(tab.key, rows, 0)
+    const { rows, truncatedByBytes } = await window.api.queryPage(tab.result.sql, 0, QUERY_PAGE_SIZE, orderBy)
+    queryStore.updateResultPage(tab.key, rows, 0, truncatedByBytes)
   } catch {
     // Silently ignore — the current page stays displayed
   }

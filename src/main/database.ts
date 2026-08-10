@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3'
 import { join, dirname } from 'path'
-import { mkdirSync, writeFileSync, existsSync, readFileSync, createReadStream } from 'fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync, createReadStream, createWriteStream } from 'fs'
+import type { WriteStream } from 'fs'
+import { rename, unlink } from 'fs/promises'
 import type {
   TableInfo,
   TableColumn,
@@ -360,6 +362,50 @@ export function executeQuery(sql: string): QueryResult {
 }
 
 /**
+ * Cap on the estimated in-memory size of a single fetched page (queryInit/queryPage).
+ * Keeps a single page from ballooning renderer/IPC memory when rows are very wide
+ * (e.g. long text/BLOB columns), independent of the row-count page size.
+ * Mirrors DataGrid.vue's DEFAULT_MAX_BYTES render guard — keep both in sync.
+ */
+const MAX_QUERY_PAGE_BYTES = 200 * 1024 * 1024 // 200 MB
+
+/** Same rough heuristic as DataGrid.vue's truncatedAt: 2 bytes/char (UTF-16) per cell. */
+function estimateRowBytes(row: unknown[]): number {
+  let total = 0
+  for (const cell of row) {
+    if (cell !== null && cell !== undefined) {
+      total += String(cell).length * 2
+    }
+  }
+  return total
+}
+
+/**
+ * Pulls up to `pageSize` rows from `pageStmt` one at a time, stopping early if the
+ * running estimated byte size exceeds MAX_QUERY_PAGE_BYTES (always keeping at least
+ * one row so a single oversized row can't produce an empty page).
+ */
+function fetchPageWithByteCap(
+  pageStmt: Database.Statement,
+  pageSize: number,
+  offset: number
+): { rows: unknown[][]; truncatedByBytes: boolean } {
+  const rows: unknown[][] = []
+  let bytes = 0
+  let truncatedByBytes = false
+  for (const row of pageStmt.raw(true).iterate(pageSize, offset) as IterableIterator<unknown[]>) {
+    const rowBytes = estimateRowBytes(row)
+    if (rows.length > 0 && bytes + rowBytes > MAX_QUERY_PAGE_BYTES) {
+      truncatedByBytes = true
+      break
+    }
+    rows.push(row)
+    bytes += rowBytes
+  }
+  return { rows, truncatedByBytes }
+}
+
+/**
  * Execute a SQL statement and return only the first page of rows plus the total row count.
  * For SELECT statements this runs two queries (COUNT + LIMIT/OFFSET) in the same synchronous
  * call so that the renderer never needs all rows at once.
@@ -368,7 +414,7 @@ export function executeQuery(sql: string): QueryResult {
 export function queryInit(
   sql: string,
   pageSize: number
-): { columns: string[]; rows: unknown[][]; totalCount: number; durationMs: number; error?: string } {
+): { columns: string[]; rows: unknown[][]; totalCount: number; durationMs: number; error?: string; truncatedByBytes?: boolean } {
   const d = getDb()
   const start = Date.now()
   try {
@@ -378,8 +424,11 @@ export function queryInit(
       const totalCount = countRow._cnt
       const pageStmt = d.prepare(`SELECT * FROM (${sql}) LIMIT ? OFFSET ?`)
       const columns = pageStmt.columns().map((c) => c.name)
-      const rows = pageSize > 0 ? pageStmt.raw(true).all(pageSize, 0) as unknown[][] : []
-      return { columns, rows, totalCount, durationMs: Date.now() - start }
+      if (pageSize <= 0) {
+        return { columns, rows: [], totalCount, durationMs: Date.now() - start }
+      }
+      const { rows, truncatedByBytes } = fetchPageWithByteCap(pageStmt, pageSize, 0)
+      return { columns, rows, totalCount, durationMs: Date.now() - start, truncatedByBytes }
     } else {
       const info = stmt.run()
       return {
@@ -424,6 +473,87 @@ export function exportToCsv(columns: string[], rows: unknown[][], filePath: stri
   const header = columns.map(escape).join(',')
   const body = rows.map((r) => r.map(escape).join(',')).join('\n')
   writeFileSync(filePath, header + '\n' + body, 'utf-8')
+}
+
+function csvEscapeCell(v: unknown): string {
+  if (v === null || v === undefined) return ''
+  const s = String(v)
+  return s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')
+    ? '"' + s.replace(/"/g, '""') + '"'
+    : s
+}
+
+/**
+ * Writes the full result of `sql` to `filePath` as CSV, streaming rows one at a time
+ * from the SQLite cursor so the process never holds more than a small write buffer
+ * (plus one row) in memory, regardless of the result-set size.
+ * Writes to a temp file and renames on success so a failed/cancelled export never
+ * leaves a corrupt partial CSV at the destination path.
+ */
+export async function streamQueryToCsv(sql: string, filePath: string): Promise<{ error?: string }> {
+  const d = getDb()
+  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`
+  const FLUSH_THRESHOLD = 10 * 1024 * 1024 // flush to disk roughly every 10 MB of CSV text
+
+  const writeChunk = (stream: WriteStream, chunk: string): Promise<void> =>
+    new Promise((resolve, reject) => {
+      if (stream.write(chunk)) {
+        resolve()
+      } else {
+        stream.once('drain', resolve)
+        stream.once('error', reject)
+      }
+    })
+
+  const endStream = (stream: WriteStream): Promise<void> =>
+    new Promise((resolve, reject) => {
+      stream.end((err?: Error | null) => (err ? reject(err) : resolve()))
+    })
+
+  try {
+    const stmt = d.prepare(sql)
+    if (!stmt.reader) {
+      // Non-SELECT statement: same trivial single-row shape as executeQuery().
+      const info = stmt.run()
+      const csv = 'changes,lastInsertRowid\n' + `${info.changes},${Number(info.lastInsertRowid)}`
+      writeFileSync(tmpPath, csv, 'utf-8')
+    } else {
+      const columns = stmt.columns().map((c) => c.name)
+      const stream = createWriteStream(tmpPath)
+      // Row iteration below is mostly synchronous (better-sqlite3 only yields to the
+      // event loop at the `await writeChunk` backpressure points), so a stream error
+      // firing outside of those windows wouldn't reach a `once('error', ...)` added
+      // inline. Registering it up front on this wrapper promise catches it regardless
+      // of when it fires, rather than crashing the process as an unhandled 'error' event.
+      await new Promise<void>((resolve, reject) => {
+        stream.once('error', reject)
+        void (async () => {
+          try {
+            let buffer = columns.map(csvEscapeCell).join(',')
+            for (const row of stmt.raw(true).iterate() as IterableIterator<unknown[]>) {
+              buffer += '\n' + row.map(csvEscapeCell).join(',')
+              if (buffer.length >= FLUSH_THRESHOLD) {
+                await writeChunk(stream, buffer)
+                buffer = ''
+              }
+            }
+            if (buffer.length > 0) {
+              await writeChunk(stream, buffer)
+            }
+            await endStream(stream)
+            resolve()
+          } catch (err) {
+            reject(err)
+          }
+        })()
+      })
+    }
+    await rename(tmpPath, filePath)
+    return {}
+  } catch (err: unknown) {
+    await unlink(tmpPath).catch(() => {})
+    return { error: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 export function createTableFromFields(
@@ -693,7 +823,7 @@ export function queryPage(
   offset: number,
   limit: number,
   orderBy?: { column: string; dir: 'asc' | 'desc' }[]
-): { columns: string[]; rows: unknown[][] } {
+): { columns: string[]; rows: unknown[][]; truncatedByBytes?: boolean } {
   assertSelectOnly(sql)
   const d = getDb()
   try {
@@ -705,8 +835,8 @@ export function queryPage(
     if (limit === 0) {
       return { columns, rows: [] }
     }
-    const rows = stmt.raw(true).all(limit, offset) as unknown[][]
-    return { columns, rows }
+    const { rows, truncatedByBytes } = fetchPageWithByteCap(stmt, limit, offset)
+    return { columns, rows, truncatedByBytes }
   } catch (err) {
     throw new Error(err instanceof Error ? err.message : String(err))
   }

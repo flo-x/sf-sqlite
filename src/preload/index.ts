@@ -47,10 +47,10 @@ const api = {
     ipcRenderer.invoke('db:query', sql),
 
   // ── Server-side paginated query access ────────────────────────────────────
-  queryInit: (sql: string, pageSize: number): Promise<{ columns: string[]; rows: unknown[][]; totalCount: number; durationMs: number; error?: string }> =>
+  queryInit: (sql: string, pageSize: number): Promise<{ columns: string[]; rows: unknown[][]; totalCount: number; durationMs: number; error?: string; truncatedByBytes?: boolean }> =>
     ipcRenderer.invoke('db:query-init', sql, pageSize),
 
-  queryPage: (sql: string, offset: number, limit: number, orderBy?: { column: string; dir: 'asc' | 'desc' }[]): Promise<{ columns: string[]; rows: unknown[][] }> =>
+  queryPage: (sql: string, offset: number, limit: number, orderBy?: { column: string; dir: 'asc' | 'desc' }[]): Promise<{ columns: string[]; rows: unknown[][]; truncatedByBytes?: boolean }> =>
     ipcRenderer.invoke('db:query-page', sql, offset, limit, orderBy),
 
   exportQueryCsv: (sql: string): Promise<string | null> =>

@@ -125,10 +125,10 @@ export const useQueryStore = defineStore('query', () => {
     }
   }
 
-  function updateResultPage(key: string, rows: unknown[][], offset: number): void {
+  function updateResultPage(key: string, rows: unknown[][], offset: number, truncatedByBytes?: boolean): void {
     const tab = tabs.value.find((t) => t.key === key)
     if (tab?.result) {
-      tab.result = { ...tab.result, rows, offset }
+      tab.result = { ...tab.result, rows, offset, truncatedByBytes }
     }
   }
 

@@ -1037,26 +1037,16 @@ export function registerIpcHandlers(): void {
   ) => db.queryPage(sql, offset, limit, orderBy))
 
   ipcMain.handle('db:export-query-csv', async (_e, sql: string) => {
-    const csvEscape = (v: unknown): string => {
-      if (v === null || v === undefined) return ''
-      const s = String(v)
-      return s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')
-        ? '"' + s.replace(/"/g, '""') + '"'
-        : s
-    }
-    const result = db.executeQuery(sql)
-    if (result.error || !result.columns.length) return null
-    const csv = [
-      result.columns.map(csvEscape).join(','),
-      ...result.rows.map((r) => r.map(csvEscape).join(','))
-    ].join('\n')
     const saveResult = await dialog.showSaveDialog({
       title: 'Export to CSV',
       filters: [{ name: 'CSV', extensions: ['csv'] }],
       defaultPath: 'export.csv'
     })
     if (saveResult.canceled || !saveResult.filePath) return null
-    writeFileSync(saveResult.filePath, csv, 'utf-8')
+    // Streams rows straight from the SQLite cursor to disk, so the full result
+    // set is never held in memory at once (see streamQueryToCsv for details).
+    const result = await db.streamQueryToCsv(sql, saveResult.filePath)
+    if (result.error) return null
     return saveResult.filePath
   })
 
