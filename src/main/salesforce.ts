@@ -10,7 +10,7 @@ import { promisify } from 'util'
 import { readFile, access } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { OrgInfo, CliOrg, CliDiagnosticStep, CliOrgsResult, SObjectSummary, FieldDescriptor, QueryResult } from '../shared/types'
+import type { OrgInfo, CliOrg, CliDiagnosticStep, CliOrgsResult, SObjectSummary, FieldDescriptor, ChildRelationshipDescriptor, DescribeResult, QueryResult } from '../shared/types'
 import { debugLog } from './debug-logger'
 
 const execFileAsync = promisify(execFile)
@@ -780,11 +780,11 @@ export async function listObjects(): Promise<SObjectSummary[]> {
   })
 }
 
-export async function describeObject(name: string): Promise<FieldDescriptor[]> {
+export async function describeObject(name: string): Promise<DescribeResult> {
   return withSessionRefresh(async () => {
     const conn = getConnection()
     const meta = await conn.describe(name)
-    return meta.fields.map(
+    const fields = meta.fields.map(
       (f: SfField): FieldDescriptor => ({
         name: f.name,
         label: f.label,
@@ -802,6 +802,16 @@ export async function describeObject(name: string): Promise<FieldDescriptor[]> {
         relationshipName: (f.relationshipName as string | null | undefined) ?? null
       })
     )
+    const childRelationships: ChildRelationshipDescriptor[] = (meta.childRelationships ?? [])
+      .filter((r) => !r.deprecatedAndHidden && !!r.relationshipName)
+      .map((r): ChildRelationshipDescriptor => ({
+        relationshipName: r.relationshipName!,
+        childSObject: r.childSObject,
+        field: r.field,
+        cascadeDelete: !!r.cascadeDelete,
+        restrictedDelete: !!r.restrictedDelete
+      }))
+    return { fields, childRelationships }
   })
 }
 

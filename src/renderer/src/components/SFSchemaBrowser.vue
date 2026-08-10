@@ -42,6 +42,28 @@
               <span class="sf-sb-fname">{{ field.name }}</span>
               <span class="sf-sb-flabel">{{ field.label }}</span>
             </div>
+            <template v-if="(relCache.get(obj.name) ?? []).length">
+              <div class="sf-sb-section" @click.stop="toggleRels(obj.name)">
+                <span class="sf-sb-chevron">{{ relExpanded.has(obj.name) ? '▼' : '▶' }}</span>
+                Related via
+                <span class="sf-sb-rel-count">({{ (relCache.get(obj.name) ?? []).length }})</span>
+              </div>
+              <template v-if="relExpanded.has(obj.name)">
+                <div
+                  v-for="rel in (relCache.get(obj.name) ?? [])"
+                  :key="`${rel.childSObject}.${rel.field}`"
+                  class="sf-sb-rel-node"
+                  draggable="true"
+                  @dragstart="onDragStart($event, relInsertText(rel))"
+                  @dblclick.stop="emit('insert', relInsertText(rel))"
+                  :title="relTitle(rel)"
+                >
+                  <span class="sf-sb-col-badge badge badge-green">↔</span>
+                <span class="sf-sb-fname">{{ rel.relationshipName }}</span>
+                <span class="sf-sb-flabel">{{ rel.childSObject }}.{{ rel.field }}</span>
+                </div>
+              </template>
+            </template>
           </template>
         </template>
       </template>
@@ -53,7 +75,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useConnectionStore } from '../stores/connection'
-import type { SObjectSummary, FieldDescriptor } from '../../../shared/types'
+import type { SObjectSummary, FieldDescriptor, ChildRelationshipDescriptor } from '../../../shared/types'
 
 const props = defineProps<{ objects: SObjectSummary[] }>()
 const emit = defineEmits<{ insert: [text: string] }>()
@@ -69,7 +91,9 @@ async function ensureObjectsLoaded(): Promise<void> {
 async function refresh(): Promise<void> {
   refreshing.value = true
   fieldCache.value = new Map()
+  relCache.value = new Map()
   expanded.value = new Set()
+  relExpanded.value = new Set()
   try {
     await conn.refreshSFObjects()
   } finally {
@@ -82,7 +106,9 @@ watch(() => conn.sfConnected, ensureObjectsLoaded)
 
 const search = ref('')
 const expanded = ref<Set<string>>(new Set())
+const relExpanded = ref<Set<string>>(new Set())
 const fieldCache = ref<Map<string, FieldDescriptor[]>>(new Map())
+const relCache = ref<Map<string, ChildRelationshipDescriptor[]>>(new Map())
 const loadingFields = ref<Set<string>>(new Set())
 
 const filtered = computed(() => {
@@ -94,6 +120,12 @@ const filtered = computed(() => {
       o.label.toLowerCase().includes(q) ||
       (fieldCache.value.get(o.name) ?? []).some(
         (f) => f.name.toLowerCase().includes(q) || f.label.toLowerCase().includes(q)
+      ) ||
+      (relCache.value.get(o.name) ?? []).some(
+        (r) =>
+          r.relationshipName.toLowerCase().includes(q) ||
+          r.childSObject.toLowerCase().includes(q) ||
+          r.field.toLowerCase().includes(q)
       )
   )
 })
@@ -107,18 +139,36 @@ async function toggle(name: string): Promise<void> {
   if (!fieldCache.value.has(name)) {
     loadingFields.value.add(name)
     try {
-      const fields = await window.api.describeObject(name)
-      fieldCache.value.set(name, fields)
+      const result = await window.api.describeObject(name)
+      fieldCache.value.set(name, result.fields)
+      relCache.value.set(name, result.childRelationships)
     } catch {
       fieldCache.value.set(name, [])
+      relCache.value.set(name, [])
     } finally {
       loadingFields.value.delete(name)
     }
   }
 }
 
+function toggleRels(name: string): void {
+  if (relExpanded.value.has(name)) {
+    relExpanded.value.delete(name)
+  } else {
+    relExpanded.value.add(name)
+  }
+}
+
 function onDragStart(e: DragEvent, name: string): void {
   e.dataTransfer?.setData('text/plain', name)
+}
+
+function relInsertText(rel: ChildRelationshipDescriptor): string {
+  return rel.relationshipName
+}
+
+function relTitle(rel: ChildRelationshipDescriptor): string {
+  return `${rel.relationshipName} — ${rel.childSObject}.${rel.field}`
 }
 
 function shortType(t: string): string {
@@ -157,6 +207,11 @@ function fieldBadgeClass(t: string): string {
 .sf-sb-loading { display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 26px; font-size: 12px; color: var(--text-muted); }
 .sf-sb-field-node { display: flex; align-items: center; gap: 5px; padding: 3px 8px 3px 26px; cursor: grab; font-size: 12px; }
 .sf-sb-field-node:hover { background: var(--surface2); }
+.sf-sb-section { display: flex; align-items: center; gap: 4px; padding: 8px 8px 2px 26px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); cursor: pointer; user-select: none; }
+.sf-sb-section:hover { color: var(--text); }
+.sf-sb-rel-count { font-weight: 500; text-transform: none; letter-spacing: 0; }
+.sf-sb-rel-node { display: flex; align-items: center; gap: 5px; padding: 3px 8px 3px 26px; cursor: grab; font-size: 12px; }
+.sf-sb-rel-node:hover { background: var(--surface2); }
 .sf-sb-col-badge { width: 16px; height: 16px; font-size: 9px; border-radius: 2px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .sf-sb-fname { font-family: monospace; white-space: nowrap; }
 .sf-sb-flabel { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-muted); margin-left: 4px; }

@@ -145,7 +145,7 @@ async function ensureRelObjectFields(sfFieldName: string): Promise<void> {
   try {
     const fields = await window.api.describeObject(relObject)
     const next = new Map(relObjectFieldsMap.value)
-    next.set(sfFieldName, fields)
+    next.set(sfFieldName, fields.fields)
     relObjectFieldsMap.value = next
   } catch (_e) {
     // silently ignore; the select will stay empty
