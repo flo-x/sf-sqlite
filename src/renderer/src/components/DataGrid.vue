@@ -72,14 +72,15 @@
                 :class="['dg-td', {
                   'frozen-td': col.frozen,
                   'last-frozen-td': col.frozen && col.displayIdx === frozenCount - 1,
-                  'cell-focused': isCellFocused(vi, col.origIdx)
+                  'cell-focused': isCellFocused(vi, col.origIdx),
+                  'cell-expanded': isCellExpanded(vi, col.origIdx)
                 }]"
                 :style="col.frozen ? frozenTdStyle(col) : undefined"
                 :contenteditable="editable ? 'true' : undefined"
                 @mousedown="onCellMousedown(vi, col.origIdx, $event)"
                 @blur="editable ? onCellEdit(scrollOffset + vi + (externalOffset ?? 0), col.origIdx, ($event.target as HTMLElement).innerText) : undefined"
               ><em v-if="row[col.origIdx] === null || row[col.origIdx] === undefined" class="cell-null">&lt;null&gt;</em
-              ><template v-else>{{ formatCell(row[col.origIdx]) }}</template></td>
+              ><template v-else><span v-if="!editable && isLongCellText(row[col.origIdx])" class="cell-expand-icon" @mousedown.stop.prevent="toggleCellExpand(vi, col.origIdx, ($event.currentTarget as HTMLElement).parentElement)">{{ isCellExpanded(vi, col.origIdx) ? '⌄' : '›' }}</span>{{ formatCell(row[col.origIdx]) }}</template></td>
             </tr>
             <!-- Virtual scroll bottom spacer -->
             <tr v-if="paddingBottomPx > 0" class="vspacer" aria-hidden="true" :style="{ height: paddingBottomPx + 'px' }">
@@ -259,6 +260,16 @@ const paddingBottomPx = computed(() => {
 const selectedRowsMap = reactive(new Map<number, boolean>())
 interface FocusedCell { rowIdx: number; origIdx: number }
 const focusedCell = ref<FocusedCell | null>(null)
+/**
+ * The single cell (if any) currently expanded via its "›" long-text icon.
+ * Unlike focusedCell, expansion is independent of row selection and persists
+ * through it — it's only cleared when the underlying row identity changes
+ * (new rows/page/sort) or the icon is clicked again. Only one cell can be
+ * expanded at a time: expanding another cell replaces this ref's value.
+ */
+const expandedCell = ref<FocusedCell | null>(null)
+/** Cells whose formatted text is at least this long get the expand icon instead of always-on click-to-wrap. */
+const LONG_TEXT_THRESHOLD = 100
 const tableWrap = ref<HTMLElement | null>(null)
 let lastClickedRow: number | null = null
 
@@ -315,6 +326,7 @@ watch(
     internalSortCriteria.value = []
     clearSelection()
     focusedCell.value = null
+    expandedCell.value = null
     scrollOffset.value = 0
     lastClickedRow = null
     // Let the browser auto-size columns by content, then snapshot those
@@ -356,6 +368,7 @@ watch(
     scrollOffset.value = 0
     clearSelection()
     focusedCell.value = null
+    expandedCell.value = null
     lastClickedRow = null
     // Reset DOM scroll position so the virtual window starts at the top.
     if (tableWrap.value) {
@@ -369,6 +382,7 @@ watch(
   () => {
     clearSelection()
     focusedCell.value = null
+    expandedCell.value = null
     lastClickedRow = null
   }
 )
@@ -443,6 +457,11 @@ function onHeaderClick(origIdx: number, e: MouseEvent): void {
   }
   scrollOffset.value = 0
   clearSelection()
+  // Sorting reorders which underlying row a given positional rowIdx points to,
+  // so any cell addressed by position (focus/expand) must be cleared here too —
+  // otherwise it would silently end up "attached" to a different row's data.
+  focusedCell.value = null
+  expandedCell.value = null
   lastClickedRow = null
 }
 
@@ -517,9 +536,45 @@ function isCellFocused(vi: number, origIdx: number): boolean {
   )
 }
 
+function isLongCellText(v: unknown): boolean {
+  return formatCell(v).length >= LONG_TEXT_THRESHOLD
+}
+
+function isCellExpanded(vi: number, origIdx: number): boolean {
+  return (
+    expandedCell.value !== null &&
+    expandedCell.value.rowIdx === vi + scrollOffset.value &&
+    expandedCell.value.origIdx === origIdx
+  )
+}
+
+/**
+ * Toggles the expand icon: expanding a cell replaces any previously expanded one and
+ * selects its text; collapsing leaves selection untouched.
+ */
+function toggleCellExpand(vi: number, origIdx: number, tdEl: HTMLElement | null): void {
+  const rowIdx = vi + scrollOffset.value
+  if (expandedCell.value?.rowIdx === rowIdx && expandedCell.value?.origIdx === origIdx) {
+    expandedCell.value = null
+  } else {
+    expandedCell.value = { rowIdx, origIdx }
+    if (tdEl) selectCellText(tdEl)
+  }
+}
+
 function selectCellText(el: HTMLElement): void {
   const range = document.createRange()
-  range.selectNodeContents(el)
+  // Select only the value content: skip the leading "›"/"⌄" expand icon (if present)
+  // and any Vue fragment-anchor comment nodes, so neither ends up in the selection.
+  const nodes = Array.from(el.childNodes).filter(
+    (n) => n.nodeType !== Node.COMMENT_NODE && !(n instanceof HTMLElement && n.classList.contains('cell-expand-icon'))
+  )
+  if (nodes.length > 0) {
+    range.setStartBefore(nodes[0])
+    range.setEndAfter(nodes[nodes.length - 1])
+  } else {
+    range.selectNodeContents(el)
+  }
   const sel = window.getSelection()
   sel?.removeAllRanges()
   sel?.addRange(range)
@@ -537,6 +592,24 @@ function onCellMousedown(vi: number, colOrigIdx: number, e: MouseEvent): void {
   }
 
   // Row is already selected.
+
+  // Long-text cells are expanded exclusively via this same-cell-when-selected mousedown
+  // (mirroring the click-to-wrap flow below) or by clicking the "›" icon directly —
+  // never via the legacy focusedCell mechanism.
+  if (isLongCellText(visibleRows.value[vi]?.[colOrigIdx])) {
+    if (isCellExpanded(vi, colOrigIdx)) {
+      // Already expanded (and already auto-selected when it was expanded) — let the
+      // browser handle cursor placement / drag-select over the revealed text as usual.
+      e.stopPropagation()
+      return
+    }
+    // Collapsed + row already selected → a second mousedown here has the same effect
+    // as clicking the icon: expand and select the cell's text.
+    e.stopPropagation()
+    e.preventDefault()
+    toggleCellExpand(vi, colOrigIdx, e.currentTarget as HTMLElement)
+    return
+  }
 
   // If this exact cell is already focused, let the browser handle it
   // normally (cursor placement, character-by-character drag-select).
@@ -1010,6 +1083,7 @@ function onCellEdit(row: number, col: number, value: string): void {
   white-space: nowrap;
   max-width: 0; /* required for text-overflow to work in fixed-layout tables */
   border-right: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  vertical-align: top; /* keep cells anchored to the top when a sibling cell's wrap/expand grows the row */
 }
 
 .dg-th {
@@ -1021,13 +1095,33 @@ function onCellEdit(row: number, col: number, value: string): void {
   outline: 2px solid var(--primary);
   outline-offset: -2px;
   white-space: normal;       /* allow text to wrap vertically */
-  word-break: break-word;    /* break long words at column boundary */
+  word-break: break-all;     /* wrap at any character, irrespective of word/space boundaries */
   overflow-wrap: break-word;
   text-overflow: clip;       /* no ellipsis in focused mode */
   /* max-width: 0 and overflow: hidden are inherited from .dg-td —
      keeping max-width:0 is what makes table-layout:fixed honour the wrap point */
   user-select: text;
 }
+
+/* cell expanded via its "›" long-text icon — same wrap treatment as cell-focused,
+   but no outline: this is a persistent content-reveal state, not a selection state. */
+.dg-td.cell-expanded {
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: break-word;
+  text-overflow: clip;
+  user-select: text;
+}
+
+.cell-expand-icon {
+  display: inline-block;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-weight: 700;
+  margin-right: 4px;
+  user-select: none;
+}
+.cell-expand-icon:hover { color: var(--primary); }
 
 /* ── Header ── */
 .dg-th {
@@ -1168,6 +1262,7 @@ function onCellEdit(row: number, col: number, value: string): void {
 .rn-td {
   z-index: 2;
   background: var(--surface);
+  vertical-align: top;
 }
 
 /* ── Body rows ── */
