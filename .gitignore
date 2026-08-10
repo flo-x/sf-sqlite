@@ -7,3 +7,4 @@ dist/
 *.tsbuildinfo
 TODO_INTERNAL.md
 *.code-workspace
+.cursor/*.log
