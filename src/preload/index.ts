@@ -263,7 +263,7 @@ const api = {
   ): Promise<number> =>
     ipcRenderer.invoke('writeback:exec-count', runId, filter),
 
-  retryFailed: (runId: string, jobId: number): Promise<string> =>
+  retryFailed: (runId: string, jobId: number): Promise<{ runId: string; isBulk: boolean }> =>
     ipcRenderer.invoke('writeback:retry', runId, jobId),
 
   getUserTableNames: (): Promise<string[]> =>

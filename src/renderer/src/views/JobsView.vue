@@ -1993,14 +1993,16 @@ async function wbRetryFailed(): Promise<void> {
   execFailedDistinctErrors.value = []; execJobDone.value = false
   execFilterSuccess.value = execFilterError.value = execFilterPending.value = execFilterQueued.value = true
   failedErrorFilter.value = ''
-  // Retries always run over the REST Collections API, regardless of whether the
-  // original job used Bulk API 2.0 — switch the UI out of Bulk mode so it polls
-  // for live progress instead of waiting on Bulk-only job:progress phase events.
-  execIsBulkApi.value = false
   execBulkPhase.value = ''; execBulkUploaded.value = 0; execBulkProcessed.value = 0; execBulkJobState.value = ''
-  const newRunId = await window.api.retryFailed(execRunId.value, id)
+
+  const { runId: newRunId, isBulk } = await window.api.retryFailed(execRunId.value, id)
+
+  // Switch the UI into the correct mode for this retry.
+  // Large Bulk retries (> 50 K failed rows) stay in Bulk mode and receive
+  // job:progress phase events; smaller ones drop to REST and use polling.
+  execIsBulkApi.value = isBulk
   execRunId.value = newRunId; wbActiveRuns.value.set(id, newRunId); jobs.startJob(newRunId, 'writeback', id)
-  startExecPoll(newRunId)
+  if (!isBulk) { startExecPoll(newRunId) }
   wbStartRunMonitor(id, newRunId)
 }
 

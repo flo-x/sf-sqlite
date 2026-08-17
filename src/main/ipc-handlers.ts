@@ -149,6 +149,12 @@ const wbRunStates = new Map<string, WbRunState>()
 const WB_RUN_STATE_CAP = 5
 /** Rows per chunk when streaming data to the Bulk API upload. */
 const CHUNK = 5000
+/**
+ * When retrying failed rows from a Bulk API run, use Bulk API 2.0 again when the
+ * failure count exceeds this threshold.  Below it, the REST Collections API is used
+ * instead (gives per-row success tracking and is faster for small batches).
+ */
+const BULK_RETRY_THRESHOLD = 50_000
 
 function addWbRunState(runId: string, state: WbRunState): void {
   wbRunStates.set(runId, state)
@@ -1390,7 +1396,7 @@ export function registerIpcHandlers(): void {
     return runId
   })
 
-  ipcMain.handle('writeback:retry', async (_e, prevRunId: string, jobId: number): Promise<string> => {
+  ipcMain.handle('writeback:retry', async (_e, prevRunId: string, jobId: number): Promise<{ runId: string; isBulk: boolean }> => {
     const job = db.listWritebackJobs().find((j) => j.id === jobId)
     if (!job) throw new Error(`Writeback job ${jobId} not found`)
 
@@ -1433,6 +1439,142 @@ export function registerIpcHandlers(): void {
     activeJobs.set(newRunId, abortCtrl)
     scheduler.registerRun('writeback', jobId, newRunId)
 
+    // Use Bulk API 2.0 again when the previous run was Bulk and the failure set
+    // is large enough to justify it.  Below the threshold, REST gives better
+    // per-row success tracking and is faster for small batches.
+    const useBulkRetry = (isBulk === true) && failedCount > BULK_RETRY_THRESHOLD
+
+    if (useBulkRetry) {
+      // ── Bulk API 2.0 retry path ─────────────────────────────────────────────
+      // Stream directly from the previous exec table (all rows are error rows in
+      // a Bulk exec table).  A new exec table for newRunId is created only if the
+      // retry itself produces failures — exactly like the original Bulk run.
+      const newState: WbRunState = {
+        sql: prevState.sql,
+        columns,
+        totalRows: 0,
+        loadingPhase: true, inFlight: 0,
+        distinctErrorCounts: new Map(),
+        isBulk: true
+      }
+      addWbRunState(newRunId, newState)
+      const runHistId = db.startWritebackRunHistory(jobId, true)
+
+      let bulkRetryExecTableCreated = false
+      let bulkRetryWarnMsg: string | null = null
+
+      const onFailedBatch = (sfColumns: string[], batch: Array<{ message: string; row: unknown[] }>): void => {
+        try {
+          if (!bulkRetryExecTableCreated) {
+            db.wbExecCreateBulkFailed(newRunId, sfColumns)
+            bulkRetryExecTableCreated = true
+          }
+          db.wbExecInsertBulkFailed(
+            newRunId,
+            sfColumns,
+            batch.map((e) => ({ message: e.message, errorPrefix: errorPrefix(e.message), row: e.row }))
+          )
+          for (const e of batch) {
+            const prefix = errorPrefix(e.message)
+            newState.distinctErrorCounts.set(prefix, (newState.distinctErrorCounts.get(prefix) ?? 0) + 1)
+          }
+          newState.totalRows += batch.length
+        } catch (dbErr) {
+          const msg = dbErr instanceof Error ? dbErr.message : String(dbErr)
+          debugLog('wbSql', `[${newRunId}] Bulk retry failed-rows batch insert: ${msg}`)
+          if (!bulkRetryWarnMsg) {
+            bulkRetryWarnMsg = `Some failed rows could not be saved to the exec table: ${msg}`
+          }
+        }
+      }
+
+      // Read from the previous Bulk exec table in CHUNK-sized pages.
+      // All rows in a Bulk exec table are error rows, so no status filter is needed.
+      // Columns are already Salesforce field names — use them as-is (dot-notation
+      // stays flat for the Bulk API CSV upload).
+      async function* makeRetryChunks(): AsyncGenerator<Record<string, unknown>[]> {
+        let offset = 0
+        while (!abortCtrl.signal.aborted) {
+          const batchRows = db.wbExecReadBatch(prevRunId, columns, offset, CHUNK)
+          if (batchRows.length === 0) { break }
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          yield batchRows.map((b) => {
+            const rec: Record<string, unknown> = {}
+            for (let i = 0; i < columns.length; i++) {
+              rec[columns[i]] = b.row[i] ?? null
+            }
+            return rec
+          })
+          offset += batchRows.length
+          if (batchRows.length < CHUNK) { break }
+        }
+      }
+
+      ;(async () => {
+        const startTime = Date.now()
+        try {
+          const result = await sf.writebackBulk2(
+            sfOpts,
+            makeRetryChunks(),
+            (progress) => {
+              const elapsed = (Date.now() - startTime) / 1000
+              send('job:progress', {
+                runId: newRunId,
+                type: 'writeback',
+                phase: progress.phase,
+                bulkUploaded: progress.uploaded,
+                succeeded: progress.phase === 'processing'
+                  ? (progress.processed ?? 0) - (progress.failed ?? 0)
+                  : undefined,
+                failed: progress.failed,
+                total: progress.phase === 'uploading' ? progress.uploaded : progress.processed,
+                jobState: progress.jobState,
+                elapsed
+              } as JobProgress)
+            },
+            abortCtrl.signal,
+            onFailedBatch
+          )
+
+          // Ensure columns are captured even when there are zero failures
+          // (onFailedBatch is never called in that case).
+          if (result.sfColumns.length > 0 && !newState.isBulk) {
+            newState.columns = result.sfColumns
+          }
+
+          const histStatus = result.failed === 0 ? 'success'
+            : result.succeeded === 0 ? 'error' : 'partial'
+          try {
+            db.finishWritebackRunHistory(runHistId, histStatus, result.succeeded + result.failed, result.succeeded, result.failed, Date.now() - startTime)
+          } catch { /* ignore secondary DB error so job:complete always fires */ }
+          const retryResult: JobResult = {
+            runId: newRunId, type: 'writeback', status: histStatus,
+            rowsSucceeded: result.succeeded, rowsFailed: result.failed,
+            columns: result.sfColumns,
+            warnMsg: bulkRetryWarnMsg ?? undefined
+          }
+          send('job:complete', retryResult)
+          scheduler.notifyComplete(retryResult)
+        } catch (err) {
+          const cancelled = isAbortError(err)
+          const msg = cancelled ? 'Cancelled by user' : (err instanceof Error ? err.message : String(err))
+          try {
+            db.finishWritebackRunHistory(runHistId, cancelled ? 'cancelled' : 'error', 0, 0, 0, Date.now() - startTime, cancelled ? undefined : msg)
+          } catch { /* ignore secondary DB error so job:complete always fires */ }
+          const retryResult: JobResult = { runId: newRunId, type: 'writeback', status: cancelled ? 'cancelled' : 'error', errorMsg: cancelled ? undefined : msg }
+          send('job:complete', retryResult)
+          scheduler.notifyComplete(retryResult)
+        } finally {
+          activeJobs.delete(newRunId)
+        }
+      })().catch((secondaryErr) => {
+        console.error(`[writeback bulk retry] Unexpected secondary error in run ${newRunId}:`, secondaryErr)
+      })
+
+      return { runId: newRunId, isBulk: true }
+    }
+
+    // ── REST Collections API retry path ────────────────────────────────────────
     const newState: WbRunState = {
       sql: prevState.sql,
       columns,
@@ -1465,13 +1607,12 @@ export function registerIpcHandlers(): void {
           while (!signal.aborted) {
             const myOffset = mainOffset
             const batchRows = wbReadBatch(newRunId, columns, myOffset, batchSize, 'Retry Phase 2')
-            if (!batchRows.length) break
+            if (!batchRows.length) { break }
             mainOffset += batchRows.length
             newState.inFlight += batchRows.length
-            // For Bulk API retries, columns are already SF field names — build the
-            // record directly without going through mapRowToRecord.
-            // Columns that use the Bulk ext-ID dot-notation (e.g. "Account.AccountNumber")
-            // must be converted to the REST nested-object shape ({ Account: { AccountNumber } }).
+            // For Bulk API retries falling back to REST, columns are already SF field
+            // names — build records directly.  Dot-notation fields must be converted
+            // to nested REST objects ({ RelationshipName: { ExtIdField: value } }).
             const records = isBulk
               ? batchRows.map((b) => {
                   const rec: Record<string, unknown> = {}
@@ -1490,7 +1631,6 @@ export function registerIpcHandlers(): void {
               : batchRows.map((b) => mapRowToRecord(b.row, columns, activeMappings))
             const results = await sf.writebackOneBatch(sfOpts, records, signal)
             newState.inFlight -= batchRows.length
-            const rtOk = results.filter((r) => r.success).length
             const rtUpdates = results.map((r, i) => ({
               rowid: batchRows[i].rowid,
               sfId: r.id ?? null,
@@ -1536,7 +1676,7 @@ export function registerIpcHandlers(): void {
       console.error(`[writeback retry] Unexpected secondary error in run ${newRunId}:`, secondaryErr)
     })
 
-    return newRunId
+    return { runId: newRunId, isBulk: false }
   })
 
   ipcMain.handle('job:cancel', (_e, runId: string) => {
