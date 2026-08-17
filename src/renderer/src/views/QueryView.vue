@@ -52,6 +52,14 @@
               @click="executingMode = 'soql'"
             >SOQL</button>
           </div>
+          <div class="mode-info-wrap">
+            <button class="mode-info-btn" @click="toggleModeInfo" title="About execution modes">i</button>
+            <div v-if="modeInfoOpen" class="mode-info-popover" @click.stop>
+              <p><strong>SQLite</strong> — queries run against the local SQLite database.</p>
+              <p><strong>SOQL</strong> — queries run against Salesforce using the SOQL language. Requires an active Salesforce connection.</p>
+              <p><strong>Tip:</strong> Prefix any query with <code>sf </code> to run it as SOQL regardless of the toggle setting — useful for mixing SQLite and SOQL in the same editor session.</p>
+            </div>
+          </div>
           <button
             class="btn btn-primary btn-sm"
             :disabled="activeTab.executing || (executingMode === 'soql' && !conn.sfConnected)"
@@ -284,6 +292,28 @@ function registerEditorAiContextListener(): void {
 }
 
 const executingMode = ref<'sqlite' | 'soql'>('sqlite')
+const modeInfoOpen = ref(false)
+
+function closeModeInfo(): void {
+  modeInfoOpen.value = false
+}
+
+function toggleModeInfo(e: MouseEvent): void {
+  e.stopPropagation()
+  modeInfoOpen.value = !modeInfoOpen.value
+  if (modeInfoOpen.value) {
+    document.addEventListener('click', closeModeInfo)
+  } else {
+    document.removeEventListener('click', closeModeInfo)
+  }
+}
+
+watch(modeInfoOpen, (open) => {
+  if (!open) {
+    document.removeEventListener('click', closeModeInfo)
+  }
+})
+
 const schemaTab = ref<'sqlite' | 'sf'>('sqlite')
 const aiDrawerOpen = ref(false)
 const aiPanel = ref<HTMLElement | null>(null)
@@ -667,10 +697,54 @@ function getEffectiveQuery(): string {
   return model.getValueInRange(range)
 }
 
+/**
+ * Strips leading "--" comment lines from any query text. Used before mode detection
+ * so that comment headers don't hide a leading "sf " prefix.
+ */
+function stripLeadingCommentLines(text: string): string {
+  const lines = text.split('\n')
+  let start = 0
+  while (start < lines.length && lines[start].trim().startsWith('--')) {
+    start++
+  }
+  return lines.slice(start).join('\n')
+}
+
+/**
+ * Removes leading and trailing "--" comment lines from a SOQL query. Comment lines
+ * in the middle of the query are left alone — only ones bracketing the query (e.g.
+ * a header note above, or a trailing remark below) are stripped, since the SF API
+ * doesn't support SQL-style "--" comments in SOQL.
+ */
+function stripSoqlCommentLines(text: string): string {
+  const lines = text.split('\n')
+  let start = 0
+  let end = lines.length - 1
+  while (start <= end && lines[start].trim().startsWith('--')) start++
+  while (end >= start && lines[end].trim().startsWith('--')) end--
+  return lines.slice(start, end + 1).join('\n')
+}
+
 async function runQuery(mode: 'sqlite' | 'soql'): Promise<void> {
   const tab = activeTab.value
   if (!tab) return
-  const queryText = getEffectiveQuery()
+  let queryText = getEffectiveQuery()
+
+  // Strip leading comment lines before mode detection so a comment header
+  // doesn't mask a "sf " prefix.
+  queryText = stripLeadingCommentLines(queryText)
+
+  // Auto-detect SOQL: if the statement starts with "sf" followed by whitespace,
+  // strip that prefix and force SOQL mode regardless of the mode toggle.
+  const sfMatch = /^sf\s+([\s\S]*)/.exec(queryText)
+  if (sfMatch) {
+    mode = 'soql'
+    queryText = sfMatch[1].trimStart()
+  }
+
+  if (mode === 'soql') {
+    queryText = stripSoqlCommentLines(queryText)
+  }
   if (!queryText.trim()) return
 
   void saveDraftAllTabs()  // draft on execute (fire-and-forget)
@@ -947,6 +1021,7 @@ function startAiPanelResize(e: MouseEvent): void {
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('blur', onWindowBlur)
+  document.removeEventListener('click', closeModeInfo)
   if (idleDraftTimer !== null) clearTimeout(idleDraftTimer)
   unregisterQuitHandler?.()
   offLlmGetEditorRequest?.()
@@ -990,11 +1065,17 @@ onUnmounted(() => {
 .saved-query-del { opacity: 0.4; padding: 2px 6px !important; }
 .saved-query-del:hover { opacity: 1; }
 .execute-group { display: flex; align-items: center; gap: 0; }
-.execute-mode-toggle { display: flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin-right: 6px; }
+.execute-mode-toggle { display: flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin-right: 4px; }
 .mode-btn { padding: 3px 10px; font-size: 11px; font-weight: 600; background: var(--surface); border: none; cursor: pointer; color: var(--text-muted); transition: background 0.15s, color 0.15s; }
 .mode-btn + .mode-btn { border-left: 1px solid var(--border); }
 .mode-btn.active { background: var(--primary); color: #fff; }
 .mode-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.mode-info-wrap { position: relative; display: flex; align-items: center; margin-right: 8px; }
+.mode-info-btn { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-size: 10px; font-weight: 700; font-style: italic; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; line-height: 1; transition: color 0.15s, border-color 0.15s, background 0.15s; flex-shrink: 0; }
+.mode-info-btn:hover { color: var(--text); border-color: var(--text-muted); background: var(--surface2); }
+.mode-info-popover { position: absolute; top: calc(100% + 7px); left: 50%; transform: translateX(-50%); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-md); padding: 12px 14px; width: 290px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
+.mode-info-popover p { margin: 0; font-size: 12px; color: var(--text); line-height: 1.55; }
+.mode-info-popover code { font-family: monospace; font-size: 11px; background: var(--surface2); padding: 1px 4px; border-radius: 3px; }
 .schema-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .schema-tab { flex: 1; padding: 6px 4px; font-size: 12px; font-weight: 500; background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; color: var(--text-muted); transition: color 0.15s; }
 .schema-tab:hover { color: var(--text); }
