@@ -1426,9 +1426,13 @@ const schemaPanel = ref<HTMLElement | null>(null)
 const schemaTab = ref<'sqlite' | 'sf'>('sqlite')
 const wbOperations = ['insert', 'update', 'upsert', 'delete', 'undelete']
 
-/** Fields eligible as upsert match keys: the standard record Id plus any custom External ID fields. */
+/**
+ * Fields eligible as upsert match keys: Salesforce accepts the record Id, any custom
+ * field marked External ID, or any field flagged `idLookup` (e.g. Contact.Email,
+ * User.Username, or the Name field on custom objects) — not just `externalId` fields.
+ */
 const wbUpsertExtIdFields = computed(() =>
-  wbSfFields.value.filter((f) => f.name === 'Id' || f.externalId)
+  wbSfFields.value.filter((f) => f.name === 'Id' || f.externalId || f.idLookup)
 )
 
 interface WbEditForm {
