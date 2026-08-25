@@ -387,40 +387,66 @@ function registerSQLite(): void {
 
   monaco.languages.registerCompletionItemProvider('sqlite', {
     triggerCharacters: ['.', ' '],
-    provideCompletionItems: (model, position) => {
+    provideCompletionItems: (model, position, _context, token) => {
+      // Snapshot the inputs immediately (before the async delay) so stale
+      // model state is never read after the cursor has moved.
       const word = model.getWordUntilPosition(position)
       const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: word.startColumn, endColumn: word.endColumn }
       const textBefore = model.getValueInRange({ startLineNumber: 1, startColumn: 1, endLineNumber: position.lineNumber, endColumn: position.column }).toUpperCase()
+      const tables = conn.dbTables.slice()
 
-      const suggestions: monaco.languages.CompletionItem[] = []
-
-      // Table names after FROM / JOIN
-      if (/\b(FROM|JOIN|UPDATE|INTO)\s+\w*$/.test(textBefore)) {
-        for (const t of conn.dbTables) {
-          suggestions.push({ label: t.name, kind: monaco.languages.CompletionItemKind.Class, insertText: t.name, range })
-        }
-      }
-
-      // Column names after tableName.
-      const dotMatch = textBefore.match(/(\w+)\.\s*\w*$/)
-      if (dotMatch) {
-        const tbl = conn.dbTables.find((t) => t.name.toUpperCase() === dotMatch[1].toUpperCase())
-        if (tbl) {
-          for (const c of tbl.columns) {
-            suggestions.push({ label: c.name, kind: monaco.languages.CompletionItemKind.Field, insertText: c.name, range })
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          if (token.isCancellationRequested) {
+            resolve({ suggestions: [] })
+            return
           }
-        }
-      }
 
-      // Always: table names + column names + keywords
-      for (const t of conn.dbTables) {
-        suggestions.push({ label: t.name, kind: monaco.languages.CompletionItemKind.Class, insertText: t.name, range, sortText: 'b' + t.name })
-        for (const c of t.columns) {
-          suggestions.push({ label: c.name, detail: t.name, kind: monaco.languages.CompletionItemKind.Field, insertText: c.name, range, sortText: 'c' + c.name })
-        }
-      }
+          const suggestions: monaco.languages.CompletionItem[] = []
 
-      return { suggestions }
+          // After a dot: columns of the matching table, or all columns (deduped) if unknown prefix.
+          const dotMatch = textBefore.match(/(\w+)\.\s*\w*$/)
+          if (dotMatch) {
+            const tbl = tables.find((t) => t.name.toUpperCase() === dotMatch[1].toUpperCase())
+            if (tbl) {
+              for (const c of tbl.columns) {
+                suggestions.push({ label: c.name, kind: monaco.languages.CompletionItemKind.Field, insertText: c.name, range })
+              }
+            } else {
+              const seen = new Set<string>()
+              for (const t of tables) {
+                for (const c of t.columns) {
+                  if (!seen.has(c.name)) {
+                    seen.add(c.name)
+                    suggestions.push({ label: c.name, kind: monaco.languages.CompletionItemKind.Field, insertText: c.name, range })
+                  }
+                }
+              }
+            }
+            resolve({ suggestions })
+            return
+          }
+
+          // After FROM / JOIN / UPDATE / INTO: suggest only table names.
+          if (/\b(FROM|JOIN|UPDATE|INTO)\s+\w*$/.test(textBefore)) {
+            for (const t of tables) {
+              suggestions.push({ label: t.name, kind: monaco.languages.CompletionItemKind.Class, insertText: t.name, range })
+            }
+            resolve({ suggestions })
+            return
+          }
+
+          // No specific context: suggest nothing.
+          resolve({ suggestions })
+        }, 500)
+
+        // If Monaco cancels this call (because a newer one was issued), clear
+        // the timer immediately so the previous promise never resolves with stale data.
+        token.onCancellationRequested(() => {
+          clearTimeout(timer)
+          resolve({ suggestions: [] })
+        })
+      })
     }
   })
 }
@@ -539,7 +565,12 @@ function initEditor(): void {
     ...EDITOR_BASE_OPTIONS,
     value: activeTab.value?.sqlText ?? '',
     language: 'sqlite',
+    quickSuggestions: { other: true, comments: false, strings: false },
     suggestOnTriggerCharacters: true,
+    acceptSuggestionOnEnter: "on",
+    wordBasedSuggestions: 'on',
+    acceptSuggestionOnCommitCharacter: false,
+    quickSuggestionsDelay: 500,
     dragAndDrop: false,
     dropIntoEditor: { enabled: false },
   })
@@ -547,6 +578,15 @@ function initEditor(): void {
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runQuery(executingMode.value))
   editor.addCommand(monaco.KeyCode.F5, () => runQuery(executingMode.value))
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveQuery())
+
+  // By default Monaco keeps the suggestions popup open when the cursor moves
+  // left or right. We override that so navigating with arrow keys always
+  // dismisses the popup, which feels more natural for a SQL editor.
+  editor.onKeyDown((e) => {
+    if (e.keyCode === monaco.KeyCode.LeftArrow || e.keyCode === monaco.KeyCode.RightArrow) {
+      editor!.trigger('', 'hideSuggestWidget', {})
+    }
+  })
 
   editor.onDidChangeModelContent(() => {
     const key = queryStore.activeTabKey
@@ -748,7 +788,8 @@ async function runQuery(mode: 'sqlite' | 'soql'): Promise<void> {
   if (!queryText.trim()) return
 
   void saveDraftAllTabs()  // draft on execute (fire-and-forget)
-  executingMode.value = mode
+  // Do not assign executingMode here: an "sf " prefix forces SOQL execution
+  // without changing the SQLite/SOQL toggle (so mixed sessions stay on SQLite).
   queryStore.setExecuting(tab.key, true)
   queryStore.updateSortCriteria(tab.key, [])
   try {
