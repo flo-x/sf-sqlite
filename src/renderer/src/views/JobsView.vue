@@ -45,8 +45,11 @@
         ]"
         @click="selectEntry(entry)"
       >
-        <span :class="entry.type === 'extract' ? 'type-icon-extract' : 'type-icon-wb'" class="job-row-icon">
-          {{ entry.type === 'extract' ? '⬇' : '⬆' }}
+        <span class="job-row-icons">
+          <span :class="entry.type === 'extract' ? 'type-icon-extract' : 'type-icon-wb'" class="job-row-icon">
+            {{ entry.type === 'extract' ? '⬇' : '⬆' }}
+          </span>
+          <span v-if="entry.type === 'writeback'" class="type-icon-wb job-row-op-icon">{{ wbOpIcon(entry.operation) }}</span>
         </span>
         <span class="job-row-main">
           <span class="job-row-name-row">
@@ -855,6 +858,8 @@ interface ListEntry {
   sortName: string
   /** Optional user comment, shown in the row when hovering. */
   comment: string | null
+  /** Writeback jobs only: DML operation, shown as a second icon next to the arrow. */
+  operation?: WritebackJob['operation']
 }
 
 const filteredJobs = computed((): ListEntry[] => {
@@ -883,7 +888,8 @@ const filteredJobs = computed((): ListEntry[] => {
       subtitle: `${j.sfObject}  ${j.operation}`,
       sortObject: j.sfObject,
       sortName: j.name,
-      comment: j.comment
+      comment: j.comment,
+      operation: j.operation
     }))
   return [...exEntries, ...wbEntries].sort((a, b) => {
     // 1) SF object name
@@ -2152,6 +2158,15 @@ function runStatusIcon(s: string): string {
   if (s === 'cancelled') return '⊘'
   return '?'
 }
+/** Short letter code shown next to the writeback arrow icon to indicate the DML operation. */
+function wbOpIcon(op: WritebackJob['operation'] | undefined): string {
+  if (op === 'insert') return 'I'
+  if (op === 'update') return 'U'
+  if (op === 'upsert') return 'IU'
+  if (op === 'delete') return 'D'
+  if (op === 'undelete') return 'UD'
+  return ''
+}
 
 onMounted(async () => {
   if (conn.bothConnected) {
@@ -2261,8 +2276,10 @@ function onDocKeydown(e: KeyboardEvent): void {
 .job-row-wb.running { background: color-mix(in srgb, #166534 5%, transparent); }
 .job-row-extract.running.selected { background: color-mix(in srgb, #0176d3 15%, transparent); }
 .job-row-wb.running.selected { background: color-mix(in srgb, #166534 15%, transparent); }
-.job-row-icon { font-size: 12px; flex-shrink: 0; }
-.job-row-detailed .job-row-icon { align-self: flex-start; margin-top: 2px; }
+.job-row-icons { display: flex; align-items: center; flex-shrink: 0; width: 28px; }
+.job-row-detailed .job-row-icons { align-self: flex-start; margin-top: 2px; }
+.job-row-icon { font-size: 12px; flex-shrink: 0; width: 12px; text-align: center; box-sizing: border-box; }
+.job-row-op-icon { font-family: Georgia, 'Times New Roman', Times, serif; font-size: 13px; font-weight: 700; line-height: 1; flex-shrink: 0; width: 16px; text-align: left; box-sizing: border-box; letter-spacing: -1px; }
 .job-row-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .job-row-name-row { display: flex; align-items: center; gap: 3px; min-width: 0; }
 .job-row-name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); flex: 1; min-width: 0; }
