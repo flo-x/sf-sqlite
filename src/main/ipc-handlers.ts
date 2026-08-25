@@ -25,6 +25,7 @@ import {
   type ChatMessage
 } from './llm'
 import { applyExtraCaCert, clearExtraCaCert, disablePatch, enablePatch, isPatchDisabled, getShellCaCertPath, getActiveCaCertPath } from './tls-patch'
+import { validateExtractJobInput, validateWritebackJobInput } from '../shared/jobValidation'
 import type {
   ExtractJob,
   ExtractJobInput,
@@ -292,8 +293,18 @@ function isAbortError(err: unknown): boolean {
 }
 
 async function startExtractRun(jobId: number, runId: string): Promise<JobResult> {
-  const job = db.listExtractJobs().find((j) => j.id === jobId)
+  const allJobs = db.listExtractJobs()
+  const job = allJobs.find((j) => j.id === jobId)
   if (!job) throw new Error(`Extract job ${jobId} not found`)
+
+  // The effective (draft-if-present, else saved) version is what's about to run. If its
+  // last silent autosave flagged it invalid, re-validate now for a fresh, accurate message
+  // and refuse to run — this is the enforcement point for every execution path, including
+  // headless Script runs that never touch the renderer's draft-save flow.
+  if (job.hasDraft && job.draftValid === false) {
+    const freshError = validateExtractJobInput(job, jobId, allJobs.filter((j) => j.id !== jobId))
+    throw new Error(freshError ?? job.draftError ?? 'This job has unsaved changes that failed validation.')
+  }
 
   // Verify (and if necessary refresh) the Salesforce session before starting.
   await sf.ensureConnected()
@@ -509,8 +520,18 @@ async function wbRunLoad(opts: { id: string; sql: string; signal: AbortSignal },
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function startWritebackRun(jobId: number, runId: string): Promise<WritebackScriptResult> {
-  const job = db.listWritebackJobs().find((j) => j.id === jobId)
+  const allJobs = db.listWritebackJobs()
+  const job = allJobs.find((j) => j.id === jobId)
   if (!job) throw new Error(`Writeback job ${jobId} not found`)
+
+  // The effective (draft-if-present, else saved) version is what's about to run. If its
+  // last silent autosave flagged it invalid, re-validate now for a fresh, accurate message
+  // and refuse to run — this is the enforcement point for every execution path, including
+  // headless Script runs that never touch the renderer's draft-save flow.
+  if (job.hasDraft && job.draftValid === false) {
+    const freshError = validateWritebackJobInput(job, jobId, allJobs.filter((j) => j.id !== jobId))
+    throw new Error(freshError ?? job.draftError ?? 'This job has unsaved changes that failed validation.')
+  }
 
   // Verify (and if necessary refresh) the Salesforce session before starting.
   await sf.ensureConnected()
@@ -1288,10 +1309,19 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('extract:delete', (_e, jobId: number) => db.deleteExtractJob(jobId))
   ipcMain.handle('extract:duplicate', (_e, jobId: number) => db.duplicateExtractJob(jobId))
   ipcMain.handle('extract:history', (_e, jobId: number) => db.getRunHistory(jobId))
+  ipcMain.handle('extract:draft:save', (_e, jobId: number, draft: ExtractJobInput) => db.saveExtractJobDraft(jobId, draft))
+  ipcMain.handle('extract:draft:clear', (_e, jobId: number) => db.clearExtractJobDraft(jobId))
 
   ipcMain.handle('extract:start', async (_e, jobId: number): Promise<string> => {
     const runId = randomUUID()
-    startExtractRun(jobId, runId)  // fire-and-forget; scheduler.registerRun called inside
+    startExtractRun(jobId, runId).catch((err) => {
+      // Safety net: startExtractRun should handle all errors internally,
+      // but if something escapes (e.g. our own pre-flight validation throw, or
+      // ensureConnected) before scheduler.registerRun runs, at least notify the renderer.
+      const msg = err instanceof Error ? err.message : String(err)
+      const jobResult: JobResult = { runId, type: 'extract', status: 'error', errorMsg: msg }
+      send('job:complete', jobResult)
+    })
     return runId
   })
 
@@ -1303,6 +1333,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('writeback:duplicate', (_e, jobId: number) => db.duplicateWritebackJob(jobId))
   ipcMain.handle('writeback:history', (_e, jobId: number) => db.getWritebackRunHistory(jobId))
   ipcMain.handle('writeback:preview', (_e, sql: string) => db.previewWritebackQuery(sql))
+  ipcMain.handle('writeback:draft:save', (_e, jobId: number, draft: WritebackJobInput) => db.saveWritebackJobDraft(jobId, draft))
+  ipcMain.handle('writeback:draft:clear', (_e, jobId: number) => db.clearWritebackJobDraft(jobId))
 
   // ── Exec-table access (REST API writeback) ────────────────────────────────────
 

@@ -151,10 +151,16 @@ export interface ExtractJob {
   additionalIndexes: string[]  // extra columns to index after the job runs
   comment: string | null
   createdAt: string
-  updatedAt: string
+  updatedAt: string  // timestamp of the last *explicit* Save, unaffected by draft autosaves
+  /** True when an auto-saved draft exists; all other fields above already reflect the draft (draft-if-present, else saved). */
+  hasDraft: boolean
+  /** Result of the last (silent) draft validation. Null when there's no draft. */
+  draftValid: boolean | null
+  /** Error message from the last draft validation, if draftValid is false. */
+  draftError: string | null
 }
 
-export type ExtractJobInput = Omit<ExtractJob, 'id' | 'createdAt' | 'updatedAt'>
+export type ExtractJobInput = Omit<ExtractJob, 'id' | 'createdAt' | 'updatedAt' | 'hasDraft' | 'draftValid' | 'draftError'>
 
 export interface RunHistoryEntry {
   id: number
@@ -194,10 +200,30 @@ export interface WritebackJob {
   customHeaders: string | null
   comment: string | null
   createdAt: string
-  updatedAt: string
+  updatedAt: string  // timestamp of the last *explicit* Save, unaffected by draft autosaves
+  /** True when an auto-saved draft exists; all other fields above already reflect the draft (draft-if-present, else saved). */
+  hasDraft: boolean
+  /** Result of the last (silent) draft validation. Null when there's no draft. */
+  draftValid: boolean | null
+  /** Error message from the last draft validation, if draftValid is false. */
+  draftError: string | null
 }
 
-export type WritebackJobInput = Omit<WritebackJob, 'id' | 'createdAt' | 'updatedAt'>
+export type WritebackJobInput = Omit<WritebackJob, 'id' | 'createdAt' | 'updatedAt' | 'hasDraft' | 'draftValid' | 'draftError'>
+
+/** Response to an extract-job draft autosave: the patched effective job, plus the freshly computed validation result. */
+export interface ExtractDraftSaveResult {
+  job: ExtractJob
+  valid: boolean
+  error: string | null
+}
+
+/** Response to a writeback-job draft autosave: the patched effective job, plus the freshly computed validation result. */
+export interface WritebackDraftSaveResult {
+  job: WritebackJob
+  valid: boolean
+  error: string | null
+}
 
 export interface JobListEntry {
   /** Display label used to identify the job in the scripts API (e.g. "Account: extract"). */

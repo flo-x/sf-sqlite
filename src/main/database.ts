@@ -20,8 +20,11 @@ import type {
   FieldDescriptor,
   SavedScript,
   SavedScriptInput,
-  DatabaseWasteInfo
+  DatabaseWasteInfo,
+  ExtractDraftSaveResult,
+  WritebackDraftSaveResult
 } from '../shared/types'
+import { validateExtractJobInput, validateWritebackJobInput } from '../shared/jobValidation'
 
 let db: Database.Database | null = null
 let currentPath: string | null = null
@@ -272,6 +275,17 @@ function initMetaTables(): void {
   const draftCols = (d.prepare(`PRAGMA table_info("_sf_bridge_query_drafts")`).all() as Array<{ name: string }>).map(c => c.name)
   if (!draftCols.includes('view_state')) {
     d.exec(`ALTER TABLE _sf_bridge_query_drafts ADD COLUMN view_state TEXT`)
+  }
+  // Job drafts: an auto-saved, silently-validated snapshot of a job's editable fields,
+  // kept separate from the explicitly-saved columns above until the user clicks Save.
+  for (const col of ['draft_json TEXT', 'draft_updated_at TEXT', 'draft_valid INTEGER', 'draft_error TEXT']) {
+    const [colName] = col.split(' ')
+    if (!extractCols.includes(colName)) {
+      d.exec(`ALTER TABLE _sf_bridge_extract_jobs ADD COLUMN ${col}`)
+    }
+    if (!wbCols.includes(colName)) {
+      d.exec(`ALTER TABLE _sf_bridge_writeback_jobs ADD COLUMN ${col}`)
+    }
   }
 }
 
@@ -693,18 +707,46 @@ export function listExtractJobs(): ExtractJob[] {
 export function saveExtractJob(job: ExtractJobInput): ExtractJob {
   const d = getDb()
   const now = new Date().toISOString()
+  const existingId = (job as ExtractJob).id ?? null
+  const validationError = validateExtractJobInput(job, existingId, listExtractJobs())
+  if (validationError) throw new Error(validationError)
   const customExprs = JSON.stringify(job.customExpressions ?? [])
-  const existing = d.prepare('SELECT id FROM _sf_bridge_extract_jobs WHERE id = ?').get((job as ExtractJob).id ?? 0)
+  const existing = existingId != null ? d.prepare('SELECT id FROM _sf_bridge_extract_jobs WHERE id = ?').get(existingId) : undefined
   if (existing) {
+    // Explicit Save always promotes the current fields into the saved columns and
+    // clears any draft, since the draft is now redundant with what was just saved.
     d.prepare(
-      `UPDATE _sf_bridge_extract_jobs SET name=?, sf_object=?, fields=?, custom_expressions=?, where_clause=?, row_limit=?, dest_table=?, write_mode=?, soql_query=?, additional_indexes=?, comment=?, updated_at=? WHERE id=?`
-    ).run(job.name, job.sfObject, JSON.stringify(job.fields), customExprs, job.whereClause ?? null, job.rowLimit ?? null, job.destTable, job.writeMode, job.soqlQuery ?? null, JSON.stringify(job.additionalIndexes ?? []), job.comment ?? null, now, (job as ExtractJob).id)
-    return rowToExtractJob(getDb().prepare('SELECT * FROM _sf_bridge_extract_jobs WHERE id=?').get((job as ExtractJob).id) as Record<string, unknown>)
+      `UPDATE _sf_bridge_extract_jobs SET name=?, sf_object=?, fields=?, custom_expressions=?, where_clause=?, row_limit=?, dest_table=?, write_mode=?, soql_query=?, additional_indexes=?, comment=?, updated_at=?, draft_json=NULL, draft_updated_at=NULL, draft_valid=NULL, draft_error=NULL WHERE id=?`
+    ).run(job.name, job.sfObject, JSON.stringify(job.fields), customExprs, job.whereClause ?? null, job.rowLimit ?? null, job.destTable, job.writeMode, job.soqlQuery ?? null, JSON.stringify(job.additionalIndexes ?? []), job.comment ?? null, now, existingId)
+    return rowToExtractJob(getDb().prepare('SELECT * FROM _sf_bridge_extract_jobs WHERE id=?').get(existingId) as Record<string, unknown>)
   }
   const info = d.prepare(
     `INSERT INTO _sf_bridge_extract_jobs (name,sf_object,fields,custom_expressions,where_clause,row_limit,dest_table,write_mode,soql_query,additional_indexes,comment,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(job.name, job.sfObject, JSON.stringify(job.fields), customExprs, job.whereClause ?? null, job.rowLimit ?? null, job.destTable, job.writeMode, job.soqlQuery ?? null, JSON.stringify(job.additionalIndexes ?? []), job.comment ?? null, now, now)
   return rowToExtractJob(d.prepare('SELECT * FROM _sf_bridge_extract_jobs WHERE id=?').get(info.lastInsertRowid) as Record<string, unknown>)
+}
+
+/**
+ * Autosaves the draft snapshot of an existing extract job's editable fields, separate
+ * from its saved columns. Silently (re)computes and stores a validation stamp so
+ * execution paths can cheaply check it without re-running validation every time.
+ */
+export function saveExtractJobDraft(jobId: number, draft: ExtractJobInput): ExtractDraftSaveResult {
+  const d = getDb()
+  const siblings = listExtractJobs().filter((j) => j.id !== jobId)
+  const error = validateExtractJobInput(draft, jobId, siblings)
+  const now = new Date().toISOString()
+  d.prepare(
+    `UPDATE _sf_bridge_extract_jobs SET draft_json=?, draft_updated_at=?, draft_valid=?, draft_error=? WHERE id=?`
+  ).run(JSON.stringify(draft), now, error ? 0 : 1, error, jobId)
+  const job = rowToExtractJob(d.prepare('SELECT * FROM _sf_bridge_extract_jobs WHERE id=?').get(jobId) as Record<string, unknown>)
+  return { job, valid: !error, error }
+}
+
+/** Discards an extract job's draft, reverting the effective version back to what was last explicitly saved. */
+export function clearExtractJobDraft(jobId: number): ExtractJob {
+  getDb().prepare(`UPDATE _sf_bridge_extract_jobs SET draft_json=NULL, draft_updated_at=NULL, draft_valid=NULL, draft_error=NULL WHERE id=?`).run(jobId)
+  return rowToExtractJob(getDb().prepare('SELECT * FROM _sf_bridge_extract_jobs WHERE id=?').get(jobId) as Record<string, unknown>)
 }
 
 export function deleteExtractJob(jobId: number): void {
@@ -744,17 +786,45 @@ export function listWritebackJobs(): WritebackJob[] {
 export function saveWritebackJob(job: WritebackJobInput): WritebackJob {
   const d = getDb()
   const now = new Date().toISOString()
-  const existing = d.prepare('SELECT id FROM _sf_bridge_writeback_jobs WHERE id=?').get((job as WritebackJob).id ?? 0)
+  const existingId = (job as WritebackJob).id ?? null
+  const validationError = validateWritebackJobInput(job, existingId, listWritebackJobs())
+  if (validationError) throw new Error(validationError)
+  const existing = existingId != null ? d.prepare('SELECT id FROM _sf_bridge_writeback_jobs WHERE id=?').get(existingId) : undefined
   if (existing) {
+    // Explicit Save always promotes the current fields into the saved columns and
+    // clears any draft, since the draft is now redundant with what was just saved.
     d.prepare(
-      `UPDATE _sf_bridge_writeback_jobs SET name=?,sql_query=?,sf_object=?,operation=?,field_map=?,external_id_field=?,batch_size=?,threads=?,distribution_key=?,use_bulk_api=?,custom_headers=?,comment=?,updated_at=? WHERE id=?`
-    ).run(job.name, job.sqlQuery, job.sfObject, job.operation, JSON.stringify(job.fieldMap), job.externalIdField ?? null, job.batchSize ?? null, job.threads ?? null, job.distributionKey?.length ? JSON.stringify(job.distributionKey) : null, job.useBulkApi ? 1 : 0, job.customHeaders ?? null, job.comment ?? null, now, (job as WritebackJob).id)
-    return rowToWritebackJob(d.prepare('SELECT * FROM _sf_bridge_writeback_jobs WHERE id=?').get((job as WritebackJob).id) as Record<string, unknown>)
+      `UPDATE _sf_bridge_writeback_jobs SET name=?,sql_query=?,sf_object=?,operation=?,field_map=?,external_id_field=?,batch_size=?,threads=?,distribution_key=?,use_bulk_api=?,custom_headers=?,comment=?,updated_at=?,draft_json=NULL,draft_updated_at=NULL,draft_valid=NULL,draft_error=NULL WHERE id=?`
+    ).run(job.name, job.sqlQuery, job.sfObject, job.operation, JSON.stringify(job.fieldMap), job.externalIdField ?? null, job.batchSize ?? null, job.threads ?? null, job.distributionKey?.length ? JSON.stringify(job.distributionKey) : null, job.useBulkApi ? 1 : 0, job.customHeaders ?? null, job.comment ?? null, now, existingId)
+    return rowToWritebackJob(d.prepare('SELECT * FROM _sf_bridge_writeback_jobs WHERE id=?').get(existingId) as Record<string, unknown>)
   }
   const info = d.prepare(
     `INSERT INTO _sf_bridge_writeback_jobs (name,sql_query,sf_object,operation,field_map,external_id_field,batch_size,threads,distribution_key,use_bulk_api,custom_headers,comment,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(job.name, job.sqlQuery, job.sfObject, job.operation, JSON.stringify(job.fieldMap), job.externalIdField ?? null, job.batchSize ?? null, job.threads ?? null, job.distributionKey?.length ? JSON.stringify(job.distributionKey) : null, job.useBulkApi ? 1 : 0, job.customHeaders ?? null, job.comment ?? null, now, now)
   return rowToWritebackJob(d.prepare('SELECT * FROM _sf_bridge_writeback_jobs WHERE id=?').get(info.lastInsertRowid) as Record<string, unknown>)
+}
+
+/**
+ * Autosaves the draft snapshot of an existing writeback job's editable fields, separate
+ * from its saved columns. Silently (re)computes and stores a validation stamp so
+ * execution paths can cheaply check it without re-running validation every time.
+ */
+export function saveWritebackJobDraft(jobId: number, draft: WritebackJobInput): WritebackDraftSaveResult {
+  const d = getDb()
+  const siblings = listWritebackJobs().filter((j) => j.id !== jobId)
+  const error = validateWritebackJobInput(draft, jobId, siblings)
+  const now = new Date().toISOString()
+  d.prepare(
+    `UPDATE _sf_bridge_writeback_jobs SET draft_json=?, draft_updated_at=?, draft_valid=?, draft_error=? WHERE id=?`
+  ).run(JSON.stringify(draft), now, error ? 0 : 1, error, jobId)
+  const job = rowToWritebackJob(d.prepare('SELECT * FROM _sf_bridge_writeback_jobs WHERE id=?').get(jobId) as Record<string, unknown>)
+  return { job, valid: !error, error }
+}
+
+/** Discards a writeback job's draft, reverting the effective version back to what was last explicitly saved. */
+export function clearWritebackJobDraft(jobId: number): WritebackJob {
+  getDb().prepare(`UPDATE _sf_bridge_writeback_jobs SET draft_json=NULL, draft_updated_at=NULL, draft_valid=NULL, draft_error=NULL WHERE id=?`).run(jobId)
+  return rowToWritebackJob(getDb().prepare('SELECT * FROM _sf_bridge_writeback_jobs WHERE id=?').get(jobId) as Record<string, unknown>)
 }
 
 export function deleteWritebackJob(jobId: number): void {
@@ -951,7 +1021,7 @@ function rowToScriptDraft(r: Record<string, unknown>): ScriptDraft {
 // ─── Row mappers ─────────────────────────────────────────────────────────────
 
 function rowToExtractJob(r: Record<string, unknown>): ExtractJob {
-  return {
+  const saved: ExtractJob = {
     id: Number(r.id),
     name: r.name as string,
     sfObject: r.sf_object as string,
@@ -965,7 +1035,23 @@ function rowToExtractJob(r: Record<string, unknown>): ExtractJob {
     additionalIndexes: r.additional_indexes ? JSON.parse(r.additional_indexes as string) : [],
     comment: (r.comment as string | null) ?? null,
     createdAt: r.created_at as string,
-    updatedAt: r.updated_at as string
+    updatedAt: r.updated_at as string,
+    hasDraft: false,
+    draftValid: null,
+    draftError: null
+  }
+  const draftJson = r.draft_json as string | null
+  if (!draftJson) return saved
+  const draft = JSON.parse(draftJson) as ExtractJobInput
+  return {
+    ...saved,
+    ...draft,
+    id: saved.id,
+    createdAt: saved.createdAt,
+    updatedAt: saved.updatedAt,
+    hasDraft: true,
+    draftValid: r.draft_valid == null ? null : r.draft_valid === 1,
+    draftError: (r.draft_error as string | null) ?? null
   }
 }
 
@@ -983,7 +1069,7 @@ function rowToRunHistory(r: Record<string, unknown>): RunHistoryEntry {
 }
 
 function rowToWritebackJob(r: Record<string, unknown>): WritebackJob {
-  return {
+  const saved: WritebackJob = {
     id: Number(r.id),
     name: r.name as string,
     sqlQuery: r.sql_query as string,
@@ -998,7 +1084,23 @@ function rowToWritebackJob(r: Record<string, unknown>): WritebackJob {
     customHeaders: (r.custom_headers as string | null) ?? null,
     comment: (r.comment as string | null) ?? null,
     createdAt: r.created_at as string,
-    updatedAt: r.updated_at as string
+    updatedAt: r.updated_at as string,
+    hasDraft: false,
+    draftValid: null,
+    draftError: null
+  }
+  const draftJson = r.draft_json as string | null
+  if (!draftJson) return saved
+  const draft = JSON.parse(draftJson) as WritebackJobInput
+  return {
+    ...saved,
+    ...draft,
+    id: saved.id,
+    createdAt: saved.createdAt,
+    updatedAt: saved.updatedAt,
+    hasDraft: true,
+    draftValid: r.draft_valid == null ? null : r.draft_valid === 1,
+    draftError: (r.draft_error as string | null) ?? null
   }
 }
 

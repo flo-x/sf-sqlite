@@ -205,17 +205,10 @@
         <div v-else-if="selectedJob?.type === 'extract'" class="job-detail">
           <div class="toolbar">
             <span style="font-weight:600;">{{ exSelectedJobData?.name }}</span>
-            <template v-if="exDetailTab === 'definition'">
-              <button v-if="!exThisJobIsRunning && !exThisJobIsQueued" class="btn btn-primary btn-sm" :disabled="exSaving" @click="exSave(true)">
-                <span v-if="exSaving" class="spinner" style="width:12px;height:12px;border-width:2px;margin-right:4px;"></span>
-                Save &amp; Execute
-              </button>
-              <button v-else class="btn btn-danger btn-sm" @click="exCancelRun">■ Cancel</button>
-            </template>
-            <template v-else>
-              <button v-if="!exThisJobIsRunning && !exThisJobIsQueued" class="btn btn-primary btn-sm" @click="exExecuteJob">▶ Execute</button>
-              <button v-else class="btn btn-danger btn-sm" @click="exCancelRun">■ Cancel</button>
-            </template>
+            <button v-if="!exThisJobIsRunning && !exThisJobIsQueued" class="btn btn-primary btn-sm" :disabled="exExecuting" @click="exExecuteJob">
+              <span v-if="exExecuting" class="spinner" style="width:12px;height:12px;border-width:2px;margin-right:4px;"></span>▶ Execute
+            </button>
+            <button v-else class="btn btn-danger btn-sm" @click="exCancelRun">■ Cancel</button>
             <div class="toolbar-right">
               <button class="btn btn-ghost btn-sm" @click="exDuplicateSelectedJob">Duplicate</button>
               <button class="btn btn-danger btn-sm" @click="exDeleteSelectedJob">Delete</button>
@@ -234,7 +227,7 @@
           <!-- Extract Definition tab -->
           <div v-if="exDetailTab === 'definition'" class="tab-panel definition-panel">
             <div class="form-actions">
-              <button class="btn btn-ghost btn-sm" @click="exResetForm">Reset</button>
+              <button class="btn btn-ghost btn-sm" :disabled="exThisJobIsRunning" @click="exOpenRevertDialog">Revert</button>
               <button class="btn btn-secondary btn-sm" :disabled="exSaving || exThisJobIsRunning" @click="exSave(false)">
                 <span v-if="exSaving" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>Save
               </button>
@@ -244,6 +237,7 @@
               <span v-if="exClearMsg" class="qs-msg" :class="exClearMsgError ? 'qs-msg-error' : 'qs-msg-ok'">{{ exClearMsg }}</span>
             </div>
             <div v-if="exSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ exSaveError }}</div>
+            <fieldset :disabled="exThisJobIsRunning" class="definition-fieldset">
             <div class="form-row-h">
               <div class="form-group"><label>Job Name Suffix</label><input v-model="exEditForm.name" type="text" placeholder="extract" /></div>
               <div class="form-group"><label>Comment</label><textarea v-model="exEditForm.comment" rows="2" placeholder="Optional note" class="comment-textarea" /></div>
@@ -307,6 +301,7 @@
               <div class="form-group"><label>Destination Table</label><input v-model="exEditForm.destTable" type="text" :placeholder="exEditForm.mode === 'soql' ? 'sf_results' : exEditForm.sfObject" /></div>
               <div class="form-group" style="flex:0 0 160px;"><label>Write Mode</label><select v-model="exEditForm.writeMode"><option value="replace">Replace</option><option value="append">Append</option></select></div>
             </div>
+            </fieldset>
           </div>
 
           <!-- Extract History tab -->
@@ -453,17 +448,10 @@
         <div v-else-if="selectedJob?.type === 'writeback'" class="job-detail">
           <div class="toolbar">
             <span style="font-weight:600;margin-right:4px;">{{ wbSelectedJobData?.name }}</span>
-            <template v-if="wbDetailTab === 'definition'">
-              <button v-if="!wbThisJobIsRunning && !wbThisJobIsQueued" class="btn btn-primary btn-sm" :disabled="wbSaving" @click="wbSave(true)">
-                <span v-if="wbSaving" class="spinner" style="width:12px;height:12px;border-width:2px;margin-right:4px;"></span>
-                Save &amp; Execute
-              </button>
-              <button v-else class="btn btn-danger btn-sm" @click="wbCancelRun">■ Cancel</button>
-            </template>
-            <template v-else>
-              <button v-if="!wbThisJobIsRunning && !wbThisJobIsQueued" class="btn btn-primary btn-sm" :disabled="wbSaving" @click="wbExecuteJob">▶ Execute</button>
-              <button v-else class="btn btn-danger btn-sm" @click="wbCancelRun">■ Cancel</button>
-            </template>
+            <button v-if="!wbThisJobIsRunning && !wbThisJobIsQueued" class="btn btn-primary btn-sm" :disabled="wbExecuting" @click="wbExecuteJob">
+              <span v-if="wbExecuting" class="spinner" style="width:12px;height:12px;border-width:2px;margin-right:4px;"></span>▶ Execute
+            </button>
+            <button v-else class="btn btn-danger btn-sm" @click="wbCancelRun">■ Cancel</button>
             <div class="toolbar-right">
               <button class="btn btn-ghost btn-sm" @click="wbDuplicateSelectedJob">Duplicate</button>
               <button class="btn btn-danger btn-sm" @click="wbDeleteSelectedJob">Delete</button>
@@ -483,12 +471,13 @@
           <!-- WB Definition tab -->
           <div v-if="wbDetailTab === 'definition'" class="tab-panel editor-body">
             <div class="form-actions">
-              <button class="btn btn-ghost btn-sm" @click="wbResetDefinitionForm">Reset</button>
+              <button class="btn btn-ghost btn-sm" :disabled="wbThisJobIsRunning" @click="wbOpenRevertDialog">Revert</button>
               <button class="btn btn-secondary btn-sm" :disabled="wbSaving || wbThisJobIsRunning" @click="wbSave(false)">
                 <span v-if="wbSaving" class="spinner" style="width:12px;height:12px;border-width:2px;"></span>Save
               </button>
             </div>
             <div v-if="wbSaveError" class="alert alert-error" style="margin-bottom:8px;">{{ wbSaveError }}</div>
+            <fieldset :disabled="wbThisJobIsRunning" class="definition-fieldset">
             <div class="form-row-h">
               <div class="form-group"><label>Job Name Suffix</label><input v-model="wbEditForm.name" type="text" placeholder="writeback" /></div>
               <div class="form-group"><label>Comment</label><textarea v-model="wbEditForm.comment" rows="2" placeholder="Optional note" class="comment-textarea" /></div>
@@ -559,6 +548,7 @@
                 </div>
               </div>
             </div>
+            </fieldset>
           </div>
 
           <!-- WB History tab -->
@@ -699,6 +689,28 @@
     <router-link to="/connections" class="btn btn-primary btn-sm">Go to Connections</router-link>
   </div>
 
+  <!-- ── Revert-to-saved confirmation modal ─────────────────────────────── -->
+  <Teleport to="body">
+    <div v-if="revertDialog" class="modal-backdrop" @click.self="revertDialog = null">
+      <div class="modal-box">
+        <div class="modal-header">
+          <span class="modal-title">Revert to saved version?</span>
+          <button class="btn btn-ghost btn-sm" @click="revertDialog = null">✕</button>
+        </div>
+        <div class="modal-body">
+          <p>
+            This discards any changes made to <strong>{{ revertDialog.name }}</strong> since it was last saved on
+            <strong>{{ formatDate(revertDialog.savedAt) }}</strong>, reloading the job definition from that saved version.
+          </p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary btn-sm" @click="revertDialog = null">Cancel</button>
+          <button class="btn btn-danger btn-sm" @click="confirmRevert">Revert</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
   <!-- ── "Update table with created record IDs" modal ─────────────────── -->
   <Teleport to="body">
     <div v-if="wbUpdateIdsOpen" class="modal-backdrop" @click.self="wbUpdateIdsOpen = false">
@@ -785,10 +797,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onActivated, onUnmounted, nextTick, toRaw } from 'vue'
+import { ref, computed, watch, onMounted, onActivated, onDeactivated, onUnmounted, nextTick, toRaw } from 'vue'
 import { useUiPrefs } from '../composables/useUiPrefs'
 import { useConnectionStore } from '../stores/connection'
 import { useJobStore } from '../stores/job'
+import { registerQuitHandler } from '../composables/useQuitHandlers'
 import ObjectPicker from '../components/ObjectPicker.vue'
 import SObjectFieldList from '../components/SObjectFieldList.vue'
 import FieldMapper from '../components/FieldMapper.vue'
@@ -797,7 +810,7 @@ import SchemaBrowser from '../components/SchemaBrowser.vue'
 import SFSchemaBrowser from '../components/SFSchemaBrowser.vue'
 import ProgressPanel from '../components/ProgressPanel.vue'
 import type {
-  ExtractJob, WritebackJob,
+  ExtractJob, ExtractJobInput, WritebackJob, WritebackJobInput,
   FieldDescriptor, FieldMapping,
   RunHistoryEntry, WritebackRunEntry,
   SortCriterion
@@ -823,6 +836,35 @@ interface SelectedJob { id: number; type: 'extract' | 'writeback' }
 const selectedJob = ref<SelectedJob | null>(null)
 // Which type of new job is being created (null = not creating)
 const creating = ref<'extract' | 'writeback' | null>(null)
+
+// ── Draft auto-save (existing jobs only — see exFlushDraft/wbFlushDraft) ──────
+const IDLE_DRAFT_MS = 5_000
+interface RevertDialog { type: 'extract' | 'writeback'; id: number; name: string; savedAt: string }
+const revertDialog = ref<RevertDialog | null>(null)
+
+/** Flushes the currently-selected job's draft (if any) — called whenever focus leaves it. */
+async function flushSelectedJobDraft(): Promise<void> {
+  const sel = selectedJob.value
+  if (!sel) return
+  if (sel.type === 'extract') await exFlushDraft(sel.id)
+  else await wbFlushDraft(sel.id)
+}
+
+/** Discards the draft and reloads the form from the last explicitly-saved version. */
+async function confirmRevert(): Promise<void> {
+  const dlg = revertDialog.value
+  if (!dlg) return
+  revertDialog.value = null
+  if (dlg.type === 'extract') {
+    const job = await window.api.clearExtractJobDraft(dlg.id)
+    exApplyDraftResult(job)
+    if (exSelectedJobId.value === dlg.id) { exSyncEditForm(job); exSaveError.value = '' }
+  } else {
+    const job = await window.api.clearWritebackJobDraft(dlg.id)
+    wbApplyDraftResult(job)
+    if (wbSelectedJobId.value === dlg.id) { wbLoadJobIntoForm(job); wbSaveError.value = '' }
+  }
+}
 
 // Resizable split
 const SPLIT_KEY = 'jobs-split-pct'
@@ -938,6 +980,7 @@ function runEntry(e: ListEntry): void {
 
 function startNewExtractJob(): void {
   newJobMenuOpen.value = false
+  void flushSelectedJobDraft()
   selectedJob.value = null
   creating.value = 'extract'
   exEditForm.value = { name: '', comment: '', mode: 'structured', sfObject: '', fields: [], customExpressions: [], whereClause: '', rowLimit: null, destTable: '', writeMode: 'replace', soqlQuery: '', additionalIndexes: [] }
@@ -947,6 +990,7 @@ function startNewExtractJob(): void {
 
 function startNewWbJob(): void {
   newJobMenuOpen.value = false
+  void flushSelectedJobDraft()
   selectedJob.value = null
   creating.value = 'writeback'
   wbEditForm.value = { name: '', comment: '', sqlQuery: '', sfObject: '', operation: 'insert', fieldMap: [], externalIdField: 'Id', batchSize: null, threads: null, distributionKey: null, useBulkApi: false, customHeaders: '' }
@@ -979,6 +1023,7 @@ const exLastRunIds = ref<Map<number, string>>(new Map())
 const exRunStartTimes = ref<Map<number, number>>(new Map())
 const exDetailTab = ref<'definition' | 'history' | 'execution'>('definition')
 const exSaving = ref(false)
+const exExecuting = ref(false)
 const exSaveError = ref('')
 const exLoadingFields = ref(false)
 const exFields = ref<FieldDescriptor[]>([])
@@ -1082,7 +1127,13 @@ async function exLoadJobs(): Promise<void> {
   }
 }
 
+// Set while exSyncEditForm assigns the form programmatically, so the exEditForm
+// watcher below doesn't mistake a freshly-loaded job for a user edit and schedule
+// a pointless idle autosave.
+let exSuppressAutosave = false
+
 function exSyncEditForm(j: ExtractJob): void {
+  exSuppressAutosave = true
   exEditForm.value = {
     id: j.id, name: j.name, comment: j.comment ?? '', mode: j.soqlQuery ? 'soql' : 'structured',
     sfObject: j.sfObject, fields: [...j.fields],
@@ -1092,14 +1143,19 @@ function exSyncEditForm(j: ExtractJob): void {
     soqlQuery: j.soqlQuery ?? '', additionalIndexes: [...(j.additionalIndexes ?? [])]
   }
   if (!j.soqlQuery && j.sfObject) exOnObjectChange(j.sfObject, false)
+  nextTick(() => { exSuppressAutosave = false })
 }
 
-function exResetForm(): void {
+function exOpenRevertDialog(): void {
   const j = exSelectedJobData.value
-  if (j) { exSyncEditForm(j); exSaveError.value = '' }
+  if (!j) return
+  revertDialog.value = { type: 'extract', id: j.id, name: j.name || j.sfObject || 'this job', savedAt: j.updatedAt }
 }
 
 async function exSelectJob(id: number): Promise<void> {
+  if (selectedJob.value && (selectedJob.value.type !== 'extract' || selectedJob.value.id !== id)) {
+    await flushSelectedJobDraft()
+  }
   if (wbSelectedJobId.value != null) {
     wbCaptureExecState(wbSelectedJobId.value, true)
   }
@@ -1127,41 +1183,70 @@ async function exOnObjectChange(name: string, resetFields = true): Promise<void>
   }
 }
 
+/** Builds the save/draft payload from the current form state. Name-trimming aside, this
+ * never mutates the form — silent draft autosaves must not surprise the user by rewriting
+ * what they typed (e.g. defaulting a blank name), unlike an explicit Save. */
+function exBuildJobPayload(): ExtractJobInput {
+  const isSoql = exEditForm.value.mode === 'soql'
+  const validColumns = isSoql ? null : new Set([...exEditForm.value.fields, ...exEditForm.value.customExpressions])
+  const cleanedIndexes = toRaw(exEditForm.value.additionalIndexes).filter((col) => validColumns === null || validColumns.has(col))
+  return {
+    name: exEditForm.value.name.trim(),
+    comment: exEditForm.value.comment.trim() || null,
+    sfObject: isSoql ? '' : exEditForm.value.sfObject,
+    fields: isSoql ? [] : toRaw(exEditForm.value.fields).slice(),
+    customExpressions: isSoql ? [] : toRaw(exEditForm.value.customExpressions).slice(),
+    whereClause: isSoql ? null : (exEditForm.value.whereClause || null),
+    rowLimit: isSoql ? null : (exEditForm.value.rowLimit != null && exEditForm.value.rowLimit !== ('' as unknown as null) ? Number(exEditForm.value.rowLimit) : null),
+    destTable: exEditForm.value.destTable || (isSoql ? 'sf_results' : exEditForm.value.sfObject),
+    writeMode: exEditForm.value.writeMode,
+    soqlQuery: isSoql ? exEditForm.value.soqlQuery.trim() : null,
+    additionalIndexes: cleanedIndexes
+  }
+}
+
+/** Patches the in-memory job list with a fresh effective (draft-merged) job, e.g. after a draft save/clear. */
+function exApplyDraftResult(job: ExtractJob): void {
+  const idx = exJobs.value.findIndex((j) => j.id === job.id)
+  if (idx !== -1) exJobs.value[idx] = job
+  else exJobs.value = [...exJobs.value, job]
+}
+
+/**
+ * Silently autosaves the current form into job `id`'s draft and validates it, without
+ * surfacing errors. Returns null if there's nothing to flush (job isn't loaded in the
+ * form, doesn't exist yet, or is currently running).
+ */
+async function exFlushDraft(id: number): Promise<{ valid: boolean; error: string | null } | null> {
+  if (exEditForm.value.id !== id || exActiveRuns.value.has(id)) return null
+  const result = await window.api.saveExtractJobDraft(id, exBuildJobPayload())
+  exApplyDraftResult(result.job)
+  return { valid: result.valid, error: result.error }
+}
+
+let exIdleDraftTimer: ReturnType<typeof setTimeout> | null = null
+function exScheduleIdleDraft(): void {
+  if (exIdleDraftTimer !== null) { clearTimeout(exIdleDraftTimer); exIdleDraftTimer = null }
+  const id = exEditForm.value.id
+  if (id == null || exActiveRuns.value.has(id)) return
+  exIdleDraftTimer = setTimeout(() => { exIdleDraftTimer = null; void exFlushDraft(id) }, IDLE_DRAFT_MS)
+}
+watch(exEditForm, () => {
+  if (exSuppressAutosave) return
+  exScheduleIdleDraft()
+}, { deep: true })
+// Leaving the Definition tab for another tab on the same job is also a "switch away".
+watch(exDetailTab, (newTab, oldTab) => {
+  if (oldTab === 'definition' && newTab !== 'definition') void flushSelectedJobDraft()
+})
+
 async function exSave(andExecute: boolean): Promise<void> {
   exSaveError.value = ''
   if (!exEditForm.value.name.trim()) exEditForm.value.name = 'extract'
-  const candidateName = exEditForm.value.name.trim()
   exSaving.value = true
   try {
-    const isSoql = exEditForm.value.mode === 'soql'
-    const candidatePrefix = isSoql ? 'soql' : exEditForm.value.sfObject.toLowerCase()
-    const duplicate = exJobs.value.find((j) => {
-      if (j.id === exEditForm.value.id) return false
-      const jPrefix = j.soqlQuery ? 'soql' : j.sfObject.toLowerCase()
-      return jPrefix === candidatePrefix && j.name.toLowerCase() === candidateName.toLowerCase()
-    })
-    if (duplicate) {
-      exSaveError.value = candidateName
-        ? `A job named "${candidateName}" already exists for ${candidatePrefix === 'soql' ? 'SOQL' : candidatePrefix}.`
-        : `An unnamed job already exists for ${candidatePrefix === 'soql' ? 'SOQL' : candidatePrefix}.`
-      exSaving.value = false
-      return
-    }
-    if (isSoql && !exEditForm.value.soqlQuery.trim()) { exSaveError.value = 'Please enter a SOQL query.'; exSaving.value = false; return }
-    const validColumns = isSoql ? null : new Set([...exEditForm.value.fields, ...exEditForm.value.customExpressions])
-    const cleanedIndexes = toRaw(exEditForm.value.additionalIndexes).filter((col) => validColumns === null || validColumns.has(col))
     const job = await window.api.saveExtractJob({
-      name: exEditForm.value.name.trim(),
-      comment: exEditForm.value.comment.trim() || null,
-      sfObject: isSoql ? '' : exEditForm.value.sfObject,
-      fields: isSoql ? [] : toRaw(exEditForm.value.fields).slice(),
-      customExpressions: isSoql ? [] : toRaw(exEditForm.value.customExpressions).slice(),
-      whereClause: isSoql ? null : (exEditForm.value.whereClause || null),
-      rowLimit: isSoql ? null : (exEditForm.value.rowLimit != null && exEditForm.value.rowLimit !== ('' as unknown as null) ? Number(exEditForm.value.rowLimit) : null),
-      destTable: exEditForm.value.destTable || (isSoql ? 'sf_results' : exEditForm.value.sfObject),
-      writeMode: exEditForm.value.writeMode,
-      soqlQuery: isSoql ? exEditForm.value.soqlQuery.trim() : null,
-      additionalIndexes: cleanedIndexes,
+      ...exBuildJobPayload(),
       ...(exEditForm.value.id ? { id: exEditForm.value.id } : {})
     } as Parameters<typeof window.api.saveExtractJob>[0])
     creating.value = null
@@ -1169,7 +1254,9 @@ async function exSave(andExecute: boolean): Promise<void> {
     selectedJob.value = { id: job.id, type: 'extract' }
     const saved = exJobs.value.find((j) => j.id === job.id)
     if (saved) exSyncEditForm(saved)
-    if (andExecute) await exExecuteJobById(job.id)
+    // The job was just explicitly saved (and thus already validated) — run it
+    // directly rather than immediately re-flushing an unchanged draft on top of it.
+    if (andExecute) await exQueueOrStart(job.id)
   } catch (e) {
     exSaveError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -1199,6 +1286,27 @@ async function exExecuteJob(): Promise<void> {
 }
 
 async function exExecuteJobById(id: number): Promise<void> {
+  if (exActiveRuns.value.has(id) || exJobQueue.value.includes(id)) return
+  exExecuting.value = true
+  try {
+    // Flush current edits into the draft first (so Execute always runs what's on
+    // screen), then re-validate — silently during the flush, but surfaced here.
+    const flush = await exFlushDraft(id)
+    const job = exJobs.value.find((j) => j.id === id)
+    const valid = flush ? flush.valid : !(job?.hasDraft && job.draftValid === false)
+    if (!valid) {
+      exSaveError.value = (flush ? flush.error : job?.draftError) ?? 'This job has invalid settings.'
+      if (exSelectedJobId.value === id) exDetailTab.value = 'definition'
+      return
+    }
+  } finally {
+    exExecuting.value = false
+  }
+  await exQueueOrStart(id)
+}
+
+/** Queues or starts a run for a job already known to be valid (skips the draft flush/validate step). */
+async function exQueueOrStart(id: number): Promise<void> {
   if (exActiveRuns.value.has(id) || exJobQueue.value.includes(id)) return
   if (exActiveRuns.value.size >= MAX_PARALLEL) {
     exJobQueue.value = [...exJobQueue.value, id]
@@ -1268,6 +1376,7 @@ function exApplyPendingSoql(): void {
   const soql = (window.history.state as Record<string, unknown>)?.pendingSoql
   if (typeof soql === 'string' && soql.trim()) {
     window.history.replaceState({ ...window.history.state, pendingSoql: undefined }, '')
+    void flushSelectedJobDraft()
     selectedJob.value = null
     creating.value = 'extract'
     exFields.value = []
@@ -1304,6 +1413,7 @@ const wbActiveRuns = ref<Map<number, string>>(new Map())
 const wbJobQueue = ref<number[]>([])
 const wbDetailTab = ref<'definition' | 'history' | 'execution'>('definition')
 const wbSaving = ref(false)
+const wbExecuting = ref(false)
 const wbSaveError = ref('')
 const wbPreviewLoading = ref(false)
 const wbPreviewResult = ref<{ columns: string[]; rows: unknown[][] } | null>(null)
@@ -1666,7 +1776,13 @@ async function wbLoadJobs(): Promise<void> {
   wbJobs.value.forEach((j, i) => wbHistoryMap.value.set(j.id, histories[i]))
 }
 
+// Set while wbLoadJobIntoForm assigns the form programmatically, so the wbEditForm
+// watcher below doesn't mistake a freshly-loaded job for a user edit and schedule
+// a pointless idle autosave.
+let wbSuppressAutosave = false
+
 function wbLoadJobIntoForm(j: WritebackJob): void {
+  wbSuppressAutosave = true
   wbEditForm.value = {
     id: j.id, name: j.name, comment: j.comment ?? '', sqlQuery: j.sqlQuery, sfObject: j.sfObject,
     operation: j.operation, fieldMap: [...j.fieldMap.map((m) => ({ ...m }))],
@@ -1677,14 +1793,19 @@ function wbLoadJobIntoForm(j: WritebackJob): void {
   wbPreviewResult.value = null; wbPreviewError.value = ''; wbRowCountResult.value = null; wbRowCountError.value = ''
   wbSfFields.value = []
   if (j.sfObject) window.api.describeObject(j.sfObject).then((r) => { wbSfFields.value = r.fields })
+  nextTick(() => { wbSuppressAutosave = false })
 }
 
-function wbResetDefinitionForm(): void {
+function wbOpenRevertDialog(): void {
   const j = wbSelectedJobData.value
-  if (j) { wbLoadJobIntoForm(j); wbPreviewError.value = ''; wbSaveError.value = '' }
+  if (!j) return
+  revertDialog.value = { type: 'writeback', id: j.id, name: j.name || j.sfObject || 'this job', savedAt: j.updatedAt }
 }
 
 async function wbSelectJob(id: number): Promise<void> {
+  if (selectedJob.value && (selectedJob.value.type !== 'writeback' || selectedJob.value.id !== id)) {
+    await flushSelectedJobDraft()
+  }
   if (wbSelectedJobId.value != null && wbSelectedJobId.value !== id) {
     wbCaptureExecState(wbSelectedJobId.value, true)
   }
@@ -1732,45 +1853,75 @@ function wbInitFieldMap(): void {
   }
 }
 
+/** Builds the save/draft payload from the current form state. Name-trimming aside, this
+ * never mutates the form — silent draft autosaves must not surprise the user by rewriting
+ * what they typed (e.g. defaulting a blank name), unlike an explicit Save. */
+function wbBuildJobPayload(): WritebackJobInput {
+  return {
+    name: wbEditForm.value.name.trim(),
+    comment: wbEditForm.value.comment.trim() || null,
+    sqlQuery: wbEditForm.value.sqlQuery, sfObject: wbEditForm.value.sfObject,
+    operation: wbEditForm.value.operation as WritebackJob['operation'],
+    fieldMap: toRaw(wbEditForm.value.fieldMap).map((m) => ({ ...toRaw(m) })),
+    externalIdField: wbEditForm.value.externalIdField || null,
+    batchSize: wbEditForm.value.batchSize, threads: wbEditForm.value.threads,
+    distributionKey: wbEditForm.value.distributionKey?.length ? [...toRaw(wbEditForm.value.distributionKey)] : null,
+    useBulkApi: wbEditForm.value.useBulkApi,
+    customHeaders: wbEditForm.value.customHeaders.trim() || null
+  }
+}
+
+/** Patches the in-memory job list with a fresh effective (draft-merged) job, e.g. after a draft save/clear. */
+function wbApplyDraftResult(job: WritebackJob): void {
+  const idx = wbJobs.value.findIndex((j) => j.id === job.id)
+  if (idx !== -1) wbJobs.value[idx] = job
+  else wbJobs.value = [...wbJobs.value, job]
+}
+
+/**
+ * Silently autosaves the current form into job `id`'s draft and validates it, without
+ * surfacing errors. Returns null if there's nothing to flush (job isn't loaded in the
+ * form, doesn't exist yet, or is currently running).
+ */
+async function wbFlushDraft(id: number): Promise<{ valid: boolean; error: string | null } | null> {
+  if (wbEditForm.value.id !== id || wbActiveRuns.value.has(id)) return null
+  const result = await window.api.saveWritebackJobDraft(id, wbBuildJobPayload())
+  wbApplyDraftResult(result.job)
+  return { valid: result.valid, error: result.error }
+}
+
+let wbIdleDraftTimer: ReturnType<typeof setTimeout> | null = null
+function wbScheduleIdleDraft(): void {
+  if (wbIdleDraftTimer !== null) { clearTimeout(wbIdleDraftTimer); wbIdleDraftTimer = null }
+  const id = wbEditForm.value.id
+  if (id == null || wbActiveRuns.value.has(id)) return
+  wbIdleDraftTimer = setTimeout(() => { wbIdleDraftTimer = null; void wbFlushDraft(id) }, IDLE_DRAFT_MS)
+}
+watch(wbEditForm, () => {
+  if (wbSuppressAutosave) return
+  wbScheduleIdleDraft()
+}, { deep: true })
+// Leaving the Definition tab for another tab on the same job is also a "switch away".
+watch(wbDetailTab, (newTab, oldTab) => {
+  if (oldTab === 'definition' && newTab !== 'definition') void flushSelectedJobDraft()
+})
+
 async function wbSave(andExecute: boolean): Promise<void> {
   wbSaveError.value = ''
-  if (wbEditForm.value.operation === 'delete') {
-    const badMappings = wbEditForm.value.fieldMap.filter((m) => !m.excluded && m.sfField && m.sfField !== 'Id')
-    if (badMappings.length > 0) { wbSaveError.value = `Delete operations only send the Id field. Please uncheck: ${badMappings.map((m) => m.sfField).join(', ')}.`; return }
-  }
   if (!wbEditForm.value.name.trim()) wbEditForm.value.name = 'writeback'
-  const wbCandidateName = wbEditForm.value.name.trim()
-  const wbCandidateObj = wbEditForm.value.sfObject.toLowerCase()
-  const wbDuplicate = wbJobs.value.find((j) => {
-    if (j.id === wbEditForm.value.id) return false
-    return j.sfObject.toLowerCase() === wbCandidateObj && j.name.toLowerCase() === wbCandidateName.toLowerCase()
-  })
-  if (wbDuplicate) {
-    wbSaveError.value = wbCandidateName
-      ? `A job named "${wbCandidateName}" already exists for ${wbEditForm.value.sfObject}.`
-      : `An unnamed job already exists for ${wbEditForm.value.sfObject}.`
-    return
-  }
   wbSaving.value = true
   try {
     const job = await window.api.saveWritebackJob({
-      ...(wbEditForm.value.id ? { id: wbEditForm.value.id } : {}),
-      name: wbCandidateName,
-      comment: wbEditForm.value.comment.trim() || null,
-      sqlQuery: wbEditForm.value.sqlQuery, sfObject: wbEditForm.value.sfObject,
-      operation: wbEditForm.value.operation as WritebackJob['operation'],
-      fieldMap: toRaw(wbEditForm.value.fieldMap).map((m) => ({ ...toRaw(m) })),
-      externalIdField: wbEditForm.value.externalIdField || null,
-      batchSize: wbEditForm.value.batchSize, threads: wbEditForm.value.threads,
-      distributionKey: wbEditForm.value.distributionKey?.length ? [...toRaw(wbEditForm.value.distributionKey)] : null,
-      useBulkApi: wbEditForm.value.useBulkApi,
-      customHeaders: wbEditForm.value.customHeaders.trim() || null
+      ...wbBuildJobPayload(),
+      ...(wbEditForm.value.id ? { id: wbEditForm.value.id } : {})
     } as Parameters<typeof window.api.saveWritebackJob>[0])
     creating.value = null
     await wbLoadJobs()
     selectedJob.value = { id: job.id, type: 'writeback' }
     wbLoadJobIntoForm(job)
-    if (andExecute) await wbExecuteJobById(job.id)
+    // The job was just explicitly saved (and thus already validated) — run it
+    // directly rather than immediately re-flushing an unchanged draft on top of it.
+    if (andExecute) await wbQueueOrStart(job.id)
   } catch (e) {
     wbSaveError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -1784,6 +1935,27 @@ async function wbExecuteJob(): Promise<void> {
 }
 
 async function wbExecuteJobById(id: number): Promise<void> {
+  if (wbActiveRuns.value.has(id) || wbJobQueue.value.includes(id)) return
+  wbExecuting.value = true
+  try {
+    // Flush current edits into the draft first (so Execute always runs what's on
+    // screen), then re-validate — silently during the flush, but surfaced here.
+    const flush = await wbFlushDraft(id)
+    const job = wbJobs.value.find((j) => j.id === id)
+    const valid = flush ? flush.valid : !(job?.hasDraft && job.draftValid === false)
+    if (!valid) {
+      wbSaveError.value = (flush ? flush.error : job?.draftError) ?? 'This job has invalid settings.'
+      if (wbSelectedJobId.value === id) wbDetailTab.value = 'definition'
+      return
+    }
+  } finally {
+    wbExecuting.value = false
+  }
+  await wbQueueOrStart(id)
+}
+
+/** Queues or starts a run for a job already known to be valid (skips the draft flush/validate step). */
+async function wbQueueOrStart(id: number): Promise<void> {
   if (wbActiveRuns.value.has(id) || wbJobQueue.value.includes(id)) return
   if (wbActiveRuns.value.size >= MAX_PARALLEL) {
     wbJobQueue.value = [...wbJobQueue.value, id]
@@ -2064,6 +2236,7 @@ function wbApplyPendingSql(): void {
   const sql = (window.history.state as Record<string, unknown>)?.pendingSql
   if (typeof sql === 'string' && sql.trim()) {
     window.history.replaceState({ ...window.history.state, pendingSql: undefined }, '')
+    void flushSelectedJobDraft()
     selectedJob.value = null; creating.value = 'writeback'
     wbPreviewResult.value = null; wbPreviewError.value = ''; wbSaveError.value = ''
     wbSfFields.value = []
@@ -2128,6 +2301,7 @@ const offWbExternalStarted = window.api.onExternalJobStarted((e) => {
 })
 
 let offRunEvicted: (() => void) | null = null
+let unregisterQuitHandler: (() => void) | null = null
 
 // ═════════════════════════════════════════════════════════════════════════════
 // ─── Shared lifecycle & utilities ────────────────────────────────────────────
@@ -2180,6 +2354,7 @@ onMounted(async () => {
   })
   document.addEventListener('click', onDocClick)
   document.addEventListener('keydown', onDocKeydown)
+  unregisterQuitHandler = registerQuitHandler(() => flushSelectedJobDraft())
 })
 
 onActivated(async () => {
@@ -2188,12 +2363,19 @@ onActivated(async () => {
   wbApplyPendingSql()
 })
 
+// Fires when navigating away to another route (e.g. Query, Explorer) — the whole
+// router-view is kept alive, so this is our hook for "switched away from Jobs".
+onDeactivated(() => {
+  void flushSelectedJobDraft()
+})
+
 onUnmounted(() => {
   offRunEvicted?.(); offRunEvicted = null
   offExternalQueued(); offExternalStarted()
   offWbExternalQueued(); offWbExternalStarted()
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('keydown', onDocKeydown)
+  unregisterQuitHandler?.(); unregisterQuitHandler = null
 })
 
 // Initial connection (either side completes the pair false → true)
@@ -2215,6 +2397,7 @@ watch(() => conn.dbPath, async (newPath, oldPath) => {
   }
   if (oldPath && conn.sfConnected) {
     // Switching from one DB to another while SF is connected
+    await flushSelectedJobDraft()
     selectedJob.value = null
     creating.value = null
     await Promise.all([exLoadJobs(), wbLoadJobs()])
@@ -2322,6 +2505,11 @@ function onDocKeydown(e: KeyboardEvent): void {
 
 /* ── Form elements ─────────────────────────────────────────────────────────── */
 .form-actions { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+/* Wraps the Definition tab's fields so they can all be disabled at once while a job is running,
+   without a <fieldset>'s default border/margin disrupting the surrounding flex/block layout.
+   (display:contents drops the fieldset's own box, but the disabled state still cascades to
+   descendant form controls per spec — the browser's default disabled styling applies to them.) */
+.definition-fieldset { display: contents; border: none; margin: 0; padding: 0; }
 .where-textarea { resize: vertical; min-height: 44px; line-height: 1.4; font-family: monospace; width: 100%; box-sizing: border-box; }
 .soql-textarea { resize: vertical; min-height: 120px; line-height: 1.5; font-family: monospace; font-size: 12px; width: 100%; box-sizing: border-box; }
 .sql-query-textarea { font-family: monospace; font-size: 12px; field-sizing: content; min-height: 96px; resize: vertical; width: 100%; }
@@ -2442,7 +2630,7 @@ function onDocKeydown(e: KeyboardEvent): void {
 
 /* ── Update IDs modal ──────────────────────────────────────────────────────── */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 200; display: flex; align-items: center; justify-content: center; }
-.modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 32px rgba(0,0,0,0.25); display: flex; flex-direction: column; max-height: 90vh; overflow: hidden; }
+.modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 32px rgba(0,0,0,0.25); display: flex; flex-direction: column; max-height: 90vh; overflow: hidden; width: 440px; }
 .update-ids-modal { width: 520px; }
 .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .modal-title { font-size: 14px; font-weight: 600; color: var(--text); }

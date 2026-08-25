@@ -10,9 +10,11 @@ import type {
   DescribeResult,
   ExtractJob,
   ExtractJobInput,
+  ExtractDraftSaveResult,
   RunHistoryEntry,
   WritebackJob,
   WritebackJobInput,
+  WritebackDraftSaveResult,
   WritebackRunEntry,
   SavedQuery,
   QueryDraft,
@@ -213,6 +215,12 @@ const api = {
   startExtract: (jobId: number): Promise<string> =>
     ipcRenderer.invoke('extract:start', jobId),
 
+  saveExtractJobDraft: (jobId: number, draft: ExtractJobInput): Promise<ExtractDraftSaveResult> =>
+    ipcRenderer.invoke('extract:draft:save', jobId, draft),
+
+  clearExtractJobDraft: (jobId: number): Promise<ExtractJob> =>
+    ipcRenderer.invoke('extract:draft:clear', jobId),
+
   // ── Write-back Jobs ──────────────────────────────────────────────────────────
   listWritebackJobs: (): Promise<WritebackJob[]> =>
     ipcRenderer.invoke('writeback:list'),
@@ -234,6 +242,12 @@ const api = {
 
   startWriteback: (jobId: number): Promise<string> =>
     ipcRenderer.invoke('writeback:start', jobId),
+
+  saveWritebackJobDraft: (jobId: number, draft: WritebackJobInput): Promise<WritebackDraftSaveResult> =>
+    ipcRenderer.invoke('writeback:draft:save', jobId, draft),
+
+  clearWritebackJobDraft: (jobId: number): Promise<WritebackJob> =>
+    ipcRenderer.invoke('writeback:draft:clear', jobId),
 
   // ── Exec-table access (REST writeback) ───────────────────────────────────────
   /** Polling endpoint: returns total/queued/succeeded/failed counts from the exec table. */
