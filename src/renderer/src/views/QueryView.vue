@@ -463,7 +463,7 @@ function onGlobalKeydown(e: KeyboardEvent): void {
 }
 
 // ── Draft auto-save ────────────────────────────────────────────────────────────
-const IDLE_DRAFT_MS = 60_000
+const IDLE_DRAFT_MS = 15_000
 let idleDraftTimer: ReturnType<typeof setTimeout> | null = null
 let unregisterQuitHandler: (() => void) | null = null
 
