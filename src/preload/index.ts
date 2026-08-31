@@ -286,6 +286,15 @@ const api = {
   getTableColumnNames: (tableName: string): Promise<string[]> =>
     ipcRenderer.invoke('db:table-columns', tableName),
 
+  saveQueryResultToTable: (options: {
+    tableName: string
+    replace: boolean
+    sql?: string
+    columns?: string[]
+    rows?: unknown[][]
+  }): Promise<number> =>
+    ipcRenderer.invoke('db:save-query-to-table', options),
+
   columnHasIndex: (tableName: string, columnName: string): Promise<boolean> =>
     ipcRenderer.invoke('db:column-has-index', tableName, columnName),
 

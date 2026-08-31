@@ -126,6 +126,12 @@
           {{ exportCsvLabel ?? 'Export CSV' }}
         </button>
         <button
+          v-if="onSaveToTable"
+          class="btn btn-ghost btn-sm copy-csv-btn"
+          title="Save the full result into a SQLite table"
+          @click="onSaveToTable"
+        >Save to a table</button>
+        <button
           class="btn btn-ghost btn-sm copy-csv-btn"
           :class="{ 'copy-csv-copied': copyAllFeedback }"
           :disabled="copyAllInProgress"
@@ -173,6 +179,7 @@ const props = defineProps<{
   onExportCsv?: () => void | Promise<void>
   exportingCsv?: boolean
   exportCsvLabel?: string
+  onSaveToTable?: () => void | Promise<void>
   onCopyAllRows?: () => Promise<void>
   totalRowCount?: number
   /** When set, enables external (server-side) pagination mode.

@@ -1404,6 +1404,20 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('db:user-tables', () => db.getUserTableNames())
   ipcMain.handle('db:table-columns', (_e, tableName: string) => db.getTableColumnNames(tableName))
+
+  ipcMain.handle(
+    'db:save-query-to-table',
+    (
+      _e,
+      options: {
+        tableName: string
+        replace: boolean
+        sql?: string
+        columns?: string[]
+        rows?: unknown[][]
+      }
+    ) => db.saveQueryResultToTable(options)
+  )
   ipcMain.handle('db:column-has-index', (_e, tableName: string, columnName: string) =>
     db.columnHasIndex(tableName, columnName)
   )

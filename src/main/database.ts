@@ -1591,6 +1591,62 @@ export function restoreTableIndexes(tableName: string, snapshots: IndexSnapshot[
   }
 }
 
+/**
+ * Save a query result into a new (or replaced) SQLite table.
+ *
+ * When `sql` is provided the table is created directly via
+ * `CREATE TABLE … AS <sql>`, which avoids loading all rows into JS.
+ *
+ * When `columns` + `rows` are provided (e.g. a SOQL result that is already
+ * fully loaded in memory) the table is created with TEXT columns and rows
+ * are inserted in a single transaction.
+ *
+ * In both cases, if `replace` is true and the table already exists its
+ * indexes are snapshotted before the drop and recreated afterwards
+ * (skipping any index whose columns no longer exist in the new schema).
+ *
+ * Returns the number of rows in the resulting table.
+ */
+export function saveQueryResultToTable(options: {
+  tableName: string
+  replace: boolean
+  sql?: string
+  columns?: string[]
+  rows?: unknown[][]
+}): number {
+  const { tableName, replace, sql, columns, rows } = options
+  const d = getDb()
+  const priorIndexes = replace ? snapshotTableIndexes(tableName) : []
+  if (replace) {
+    d.exec(`DROP TABLE IF EXISTS ${escapeId(tableName)}`)
+  }
+  if (sql) {
+    d.exec(`CREATE TABLE ${escapeId(tableName)} AS ${sql}`)
+  } else if (columns && rows) {
+    const sanitize = (name: string): string => name.replace(/[^\w]/g, '_') || 'col'
+    const safeCols = columns.map(sanitize)
+    const colDefs = safeCols.map((c) => `${escapeId(c)} TEXT`).join(', ')
+    d.exec(`CREATE TABLE ${escapeId(tableName)} (${colDefs})`)
+    const placeholders = safeCols.map(() => '?').join(', ')
+    const stmt = d.prepare(
+      `INSERT INTO ${escapeId(tableName)} (${safeCols.map((c) => escapeId(c)).join(', ')}) VALUES (${placeholders})`
+    )
+    const insertAll = d.transaction((dataRows: unknown[][]) => {
+      for (const row of dataRows) {
+        stmt.run(safeCols.map((_, i) => row[i] ?? null))
+      }
+    })
+    insertAll(rows)
+  } else {
+    throw new Error('saveQueryResultToTable: provide either sql or columns+rows')
+  }
+  if (priorIndexes.length > 0) {
+    restoreTableIndexes(tableName, priorIndexes)
+  }
+  const countRow = d.prepare(`SELECT COUNT(*) as cnt FROM ${escapeId(tableName)}`).get() as { cnt: number }
+  return countRow.cnt
+}
+
 export function columnHasIndex(tableName: string, columnName: string): boolean {
   const d = getDb()
   const indexes = d.prepare(`PRAGMA index_list(${escapeId(tableName)})`).all() as { name: string }[]

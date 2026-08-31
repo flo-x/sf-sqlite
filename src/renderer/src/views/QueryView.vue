@@ -126,6 +126,7 @@
           :pageSize="QUERY_PAGE_SIZE"
           :onExportCsv="exportCsv"
           exportCsvLabel="Export the full result as CSV"
+          :onSaveToTable="openSaveToTable"
           :onSortChange="activeTab.result.sql ? handleSortChange : undefined"
           :externalSortCriteria="activeTab.result.sql ? activeTab.sortCriteria : undefined"
           style="height: 100%;"
@@ -223,6 +224,44 @@
           <button class="btn btn-ghost btn-sm" @click="deleteConfirmDialog = null">Cancel</button>
           <button class="btn btn-danger btn-sm" @click="doDeleteSavedQuery">Delete</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Save to Table dialog -->
+    <div v-if="saveToTableDialog" class="modal-backdrop" @click.self="saveToTableDialog = null">
+      <div class="modal-box">
+        <h3>Save to a table</h3>
+        <template v-if="!saveToTableDialog.confirming">
+          <p>Enter a name for the new SQLite table.</p>
+          <input
+            ref="saveToTableInput"
+            v-model="saveToTableDialog.tableName"
+            type="text"
+            placeholder="table_name"
+            style="width:100%; margin-top:8px; box-sizing:border-box;"
+            @keyup.enter="submitSaveToTable"
+          />
+          <div v-if="saveToTableDialog.error" style="color:var(--danger); font-size:12px; margin-top:6px;">{{ saveToTableDialog.error }}</div>
+          <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
+            <button class="btn btn-ghost btn-sm" @click="saveToTableDialog = null">Cancel</button>
+            <button class="btn btn-primary btn-sm" :disabled="saveToTableDialog.saving" @click="submitSaveToTable">
+              <span v-if="saveToTableDialog.saving" class="spinner" style="width:10px;height:10px;border-width:1.5px;margin-right:4px;"></span>
+              Save
+            </button>
+          </div>
+        </template>
+        <template v-else>
+          <p>Table <strong>{{ saveToTableDialog.tableName }}</strong> already exists. Replace it?</p>
+          <p>Its indexes will be recreated where the column names match.</p>
+          <div v-if="saveToTableDialog.error" style="color:var(--danger); font-size:12px; margin-top:6px;">{{ saveToTableDialog.error }}</div>
+          <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:16px;">
+            <button class="btn btn-ghost btn-sm" :disabled="saveToTableDialog.saving" @click="saveToTableDialog.confirming = false">Back</button>
+            <button class="btn btn-danger btn-sm" :disabled="saveToTableDialog.saving" @click="doSaveToTable(true)">
+              <span v-if="saveToTableDialog.saving" class="spinner" style="width:10px;height:10px;border-width:1.5px;margin-right:4px;"></span>
+              Replace
+            </button>
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -326,6 +365,13 @@ const unsavedDialog = ref<{ key: string; name: string } | null>(null)
 const openSavedDialog = ref(false)
 const savedQueriesList = ref<SavedQuery[]>([])
 const deleteConfirmDialog = ref<{ id: number; name: string } | null>(null)
+const saveToTableDialog = ref<{
+  tableName: string
+  confirming: boolean
+  saving: boolean
+  error: string | null
+} | null>(null)
+const saveToTableInput = ref<HTMLInputElement | null>(null)
 
 interface UnsavedPending { key: string }
 const pendingClose = ref<UnsavedPending | null>(null)
@@ -949,6 +995,60 @@ async function exportCsv(): Promise<void> {
   } else {
     // SOQL or error result: all rows are already in the renderer
     await window.api.exportToCsv(buildCsv(tab.result.columns, tab.result.rows))
+  }
+}
+
+function openSaveToTable(): void {
+  saveToTableDialog.value = { tableName: '', confirming: false, saving: false, error: null }
+  nextTick(() => saveToTableInput.value?.focus())
+}
+
+async function submitSaveToTable(): Promise<void> {
+  const dialog = saveToTableDialog.value
+  if (!dialog) return
+  const name = dialog.tableName.trim()
+  if (!name) {
+    dialog.error = 'Please enter a table name.'
+    return
+  }
+  dialog.error = null
+  const existing = await window.api.getUserTableNames()
+  if (existing.includes(name)) {
+    dialog.confirming = true
+    return
+  }
+  await doSaveToTable(false)
+}
+
+async function doSaveToTable(replace: boolean): Promise<void> {
+  const dialog = saveToTableDialog.value
+  if (!dialog) return
+  const tab = activeTab.value
+  if (!tab?.result) return
+  dialog.saving = true
+  try {
+    if (tab.result.sql) {
+      await window.api.saveQueryResultToTable({
+        tableName: dialog.tableName.trim(),
+        replace,
+        sql: tab.result.sql
+      })
+    } else {
+      // tab.result.rows is a Vue reactive Proxy (Pinia state); structured clone
+      // cannot serialize Proxy objects, so we produce a plain deep copy first.
+      await window.api.saveQueryResultToTable({
+        tableName: dialog.tableName.trim(),
+        replace,
+        columns: [...tab.result.columns],
+        rows: JSON.parse(JSON.stringify(tab.result.rows)) as unknown[][]
+      })
+    }
+    saveToTableDialog.value = null
+    await conn.refreshDbInfo()
+  } catch (err) {
+    dialog.error = err instanceof Error ? err.message : String(err)
+    dialog.saving = false
+    dialog.confirming = false
   }
 }
 
