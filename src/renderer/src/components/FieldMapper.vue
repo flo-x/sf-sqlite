@@ -85,7 +85,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, type CSSProperties } from 'vue'
+import { ref, computed, watch, onMounted, type CSSProperties } from 'vue'
 import type { FieldMapping, FieldDescriptor } from '../../../shared/types'
 
 const props = defineProps<{
@@ -96,10 +96,25 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:modelValue': [v: FieldMapping[]] }>()
 
 const mappings = ref<FieldMapping[]>(props.modelValue)
+
+/** Kick off background fetches for any mapping that already carries useExternalId. */
+function prefetchExistingExtIdMappings(map: FieldMapping[]): void {
+  for (const m of map) {
+    if (m.useExternalId && m.sfField) {
+      ensureRelObjectFields(m.sfField)
+    }
+  }
+}
+
 watch(
   () => props.modelValue,
-  (v) => { mappings.value = v }
+  (v) => {
+    mappings.value = v
+    prefetchExistingExtIdMappings(v)
+  }
 )
+
+onMounted(() => { prefetchExistingExtIdMappings(props.modelValue) })
 
 const showMapped = ref(true)
 const showUnmapped = ref(true)

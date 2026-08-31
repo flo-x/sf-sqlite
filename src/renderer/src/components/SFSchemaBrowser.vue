@@ -192,7 +192,7 @@ function fieldBadgeClass(t: string): string {
 </script>
 
 <style scoped>
-.sf-sb-wrap { display: flex; flex-direction: column; height: 100%; }
+.sf-sb-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .sf-sb-header { padding: 8px; border-bottom: 1px solid var(--border); display: flex; gap: 4px; align-items: center; }
 .sf-sb-search { flex: 1; min-width: 0; font-size: 12px; padding: 5px 8px; }
 .sf-sb-refresh { flex-shrink: 0; width: 26px; height: 26px; padding: 0; display: flex; align-items: center; justify-content: center; background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 14px; color: var(--text-muted); }
