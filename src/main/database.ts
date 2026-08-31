@@ -24,7 +24,7 @@ import type {
   ExtractDraftSaveResult,
   WritebackDraftSaveResult
 } from '../shared/types'
-import { validateExtractJobInput, validateWritebackJobInput } from '../shared/jobValidation'
+import { validateExtractJobInput, validateWritebackJobInput, isDuplicateExtractJobName, isDuplicateWritebackJobName } from '../shared/jobValidation'
 
 let db: Database.Database | null = null
 let currentPath: string | null = null
@@ -753,11 +753,24 @@ export function deleteExtractJob(jobId: number): void {
   getDb().prepare('DELETE FROM _sf_bridge_extract_jobs WHERE id=?').run(jobId)
 }
 
+/** Finds the first "<name> (copy)", "<name> (copy2)", "<name> (copy3)", ... that `isDuplicate` accepts as free. */
+function nextCopyName(baseName: string, isDuplicate: (candidate: string) => boolean): string {
+  let candidate = `${baseName} (copy)`
+  for (let n = 2; isDuplicate(candidate); n++) {
+    candidate = `${baseName} (copy${n})`
+  }
+  return candidate
+}
+
 export function duplicateExtractJob(jobId: number): ExtractJob {
   const src = getDb().prepare('SELECT * FROM _sf_bridge_extract_jobs WHERE id=?').get(jobId) as Record<string, unknown> | undefined
   if (!src) throw new Error(`Extract job ${jobId} not found`)
   const { id: _id, created_at: _c, updated_at: _u, name, ...rest } = src
-  return saveExtractJob({ ...rowToExtractJob({ ...rest, name: String(name) + ' (copy)' }), id: undefined } as unknown as ExtractJobInput)
+  const baseJob = rowToExtractJob({ ...rest, name: String(name) })
+  const isSoql = !!baseJob.soqlQuery
+  const siblings = listExtractJobs()
+  const candidateName = nextCopyName(baseJob.name, (n) => isDuplicateExtractJobName(n, baseJob.sfObject, isSoql, null, siblings))
+  return saveExtractJob({ ...baseJob, name: candidateName, id: undefined } as unknown as ExtractJobInput)
 }
 
 export function getRunHistory(jobId: number): RunHistoryEntry[] {
@@ -835,7 +848,10 @@ export function duplicateWritebackJob(jobId: number): WritebackJob {
   const src = getDb().prepare('SELECT * FROM _sf_bridge_writeback_jobs WHERE id=?').get(jobId) as Record<string, unknown> | undefined
   if (!src) throw new Error(`Writeback job ${jobId} not found`)
   const { id: _id, created_at: _c, updated_at: _u, name, ...rest } = src
-  return saveWritebackJob({ ...rowToWritebackJob({ ...rest, name: String(name) + ' (copy)' }), id: undefined } as unknown as WritebackJobInput)
+  const baseJob = rowToWritebackJob({ ...rest, name: String(name) })
+  const siblings = listWritebackJobs()
+  const candidateName = nextCopyName(baseJob.name, (n) => isDuplicateWritebackJobName(n, baseJob.sfObject, null, siblings))
+  return saveWritebackJob({ ...baseJob, name: candidateName, id: undefined } as unknown as WritebackJobInput)
 }
 
 export function getWritebackRunHistory(jobId: number): WritebackRunEntry[] {
@@ -1492,6 +1508,30 @@ export function ensureColumnIndexes(tableName: string, columnNames: string[]): v
       d.exec(`CREATE INDEX IF NOT EXISTS ${escapeId(safeName)} ON ${escapeId(tableName)} (${escapeId(col)})`)
     }
   }
+}
+
+/**
+ * Create an index on a single column, used by the DB Browser's "+" button.
+ * Unlike ensureColumnIndexes (which uses CREATE INDEX IF NOT EXISTS and silently
+ * no-ops on a name collision), this surfaces the real underlying error — e.g. a
+ * name collision with an existing index, or a SQLite error such as trying to
+ * index a view — so the UI can show it to the user.
+ */
+export function createColumnIndex(tableName: string, columnName: string): void {
+  const d = getDb()
+  if (columnHasIndex(tableName, columnName)) return
+
+  const safeName = `idx_${tableName}_${columnName}`.replace(/[^a-zA-Z0-9_]/g, '_')
+  const existing = d
+    .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name = ?`)
+    .get(safeName) as { name: string } | undefined
+  if (existing) {
+    throw new Error(
+      `Cannot create index: an index named "${safeName}" already exists (on a different column). Rename or drop it, then try again.`
+    )
+  }
+
+  d.exec(`CREATE INDEX ${escapeId(safeName)} ON ${escapeId(tableName)} (${escapeId(columnName)})`)
 }
 
 export function dropIndex(indexName: string): void {

@@ -1409,7 +1409,7 @@ export function registerIpcHandlers(): void {
   )
 
   ipcMain.handle('db:create-index', (_e, tableName: string, columnName: string) =>
-    db.ensureColumnIndexes(tableName, [columnName])
+    db.createColumnIndex(tableName, columnName)
   )
 
   ipcMain.handle('db:drop-index', (_e, indexName: string) =>

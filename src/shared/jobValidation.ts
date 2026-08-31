@@ -6,6 +6,38 @@
  */
 import type { ExtractJob, ExtractJobInput, WritebackJob, WritebackJobInput } from './types'
 
+/** True when `siblingJobs` already contains an extract job with the same name for the same object/SOQL scope. */
+export function isDuplicateExtractJobName(
+  name: string,
+  sfObject: string,
+  isSoql: boolean,
+  existingId: number | null,
+  siblingJobs: ExtractJob[]
+): boolean {
+  const candidatePrefix = isSoql ? 'soql' : sfObject.toLowerCase()
+  const candidateName = name.trim().toLowerCase()
+  return siblingJobs.some((j) => {
+    if (j.id === existingId) return false
+    const jPrefix = j.soqlQuery ? 'soql' : j.sfObject.toLowerCase()
+    return jPrefix === candidatePrefix && j.name.toLowerCase() === candidateName
+  })
+}
+
+/** True when `siblingJobs` already contains a writeback job with the same name for the same object. */
+export function isDuplicateWritebackJobName(
+  name: string,
+  sfObject: string,
+  existingId: number | null,
+  siblingJobs: WritebackJob[]
+): boolean {
+  const candidateObj = sfObject.toLowerCase()
+  const candidateName = name.trim().toLowerCase()
+  return siblingJobs.some((j) => {
+    if (j.id === existingId) return false
+    return j.sfObject.toLowerCase() === candidateObj && j.name.toLowerCase() === candidateName
+  })
+}
+
 /** Returns an error message if `input` is invalid, or null if it's fine to save/run. */
 export function validateExtractJobInput(
   input: ExtractJobInput,
@@ -15,12 +47,7 @@ export function validateExtractJobInput(
   const isSoql = !!input.soqlQuery
   const candidateName = input.name.trim()
   const candidatePrefix = isSoql ? 'soql' : input.sfObject.toLowerCase()
-  const duplicate = siblingJobs.find((j) => {
-    if (j.id === existingId) return false
-    const jPrefix = j.soqlQuery ? 'soql' : j.sfObject.toLowerCase()
-    return jPrefix === candidatePrefix && j.name.toLowerCase() === candidateName.toLowerCase()
-  })
-  if (duplicate) {
+  if (isDuplicateExtractJobName(candidateName, input.sfObject, isSoql, existingId, siblingJobs)) {
     return candidateName
       ? `A job named "${candidateName}" already exists for ${candidatePrefix === 'soql' ? 'SOQL' : candidatePrefix}.`
       : `An unnamed job already exists for ${candidatePrefix === 'soql' ? 'SOQL' : candidatePrefix}.`
@@ -44,12 +71,7 @@ export function validateWritebackJobInput(
     }
   }
   const candidateName = input.name.trim()
-  const candidateObj = input.sfObject.toLowerCase()
-  const duplicate = siblingJobs.find((j) => {
-    if (j.id === existingId) return false
-    return j.sfObject.toLowerCase() === candidateObj && j.name.toLowerCase() === candidateName.toLowerCase()
-  })
-  if (duplicate) {
+  if (isDuplicateWritebackJobName(candidateName, input.sfObject, existingId, siblingJobs)) {
     return candidateName
       ? `A job named "${candidateName}" already exists for ${input.sfObject}.`
       : `An unnamed job already exists for ${input.sfObject}.`

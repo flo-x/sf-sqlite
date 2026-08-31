@@ -224,6 +224,11 @@
           <div class="tab-item" :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'; loadPreview()">Preview</div>
         </div>
 
+        <div v-if="indexActionError" style="font-size:12px; color:var(--danger); padding:6px 14px; display:flex; align-items:center; justify-content:space-between; gap:8px; background:var(--surface-alt, rgba(220,53,69,0.08));">
+          <span>{{ indexActionError }}</span>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0;" @click="indexActionError = ''">✕</button>
+        </div>
+
         <!-- Columns tab -->
         <div v-if="activeTab === 'columns'" class="tab-content">
           <table class="data-table">
@@ -754,6 +759,7 @@ watch(selectedTable, () => {
   previewOffset.value = 0
   previewSql.value = ''
   previewSort.value = []
+  indexActionError.value = ''
 })
 
 const EXPLORER_PAGE_SIZE = 10000
@@ -955,13 +961,17 @@ function abortColRename(): void {
 }
 
 const droppingIndex = ref<string | null>(null)
+const indexActionError = ref('')
 
 async function dropIndex(indexName: string): Promise<void> {
   if (!confirm(`Delete index "${indexName}"?`)) return
   droppingIndex.value = indexName
+  indexActionError.value = ''
   try {
     await window.api.dropIndex(indexName)
     await conn.refreshDbInfo()
+  } catch (err) {
+    indexActionError.value = err instanceof Error ? err.message : String(err)
   } finally {
     droppingIndex.value = null
   }
@@ -976,9 +986,12 @@ const addingIndex = ref<string | null>(null)
 async function addIndex(colName: string): Promise<void> {
   if (!selectedTable.value) return
   addingIndex.value = colName
+  indexActionError.value = ''
   try {
     await window.api.createColumnIndex(selectedTable.value.name, colName)
     await conn.refreshDbInfo()
+  } catch (err) {
+    indexActionError.value = err instanceof Error ? err.message : String(err)
   } finally {
     addingIndex.value = null
   }
