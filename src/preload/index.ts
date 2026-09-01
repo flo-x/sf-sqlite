@@ -76,6 +76,9 @@ const api = {
   vacuumDatabase: (): Promise<void> =>
     ipcRenderer.invoke('db:vacuum'),
 
+  analyzeDatabase: (): Promise<void> =>
+    ipcRenderer.invoke('db:analyze'),
+
   csvPickAndPreview: (): Promise<CsvPreview | null> =>
     ipcRenderer.invoke('csv:pick-and-preview'),
 

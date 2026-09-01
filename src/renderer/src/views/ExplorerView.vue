@@ -50,16 +50,29 @@
       <div class="left-bottom">
         <div class="section-title" style="padding: 6px 14px; display:flex; align-items:center; justify-content:space-between;">
           <span>Database</span>
-          <button
-            class="btn btn-ghost btn-sm"
-            :disabled="vacuumChecking || vacuuming"
-            title="Compact the database file by reclaiming freed pages"
-            @click="vacuumDb"
-          >
-            <span v-if="vacuumChecking || vacuuming" class="spinner" style="width:10px;height:10px;border-width:1.5px;margin-right:4px;"></span>
-            {{ vacuuming ? 'Vacuuming…' : vacuumChecking ? 'Checking…' : 'Vacuum DB' }}
-          </button>
+          <div style="display:flex; gap:4px;">
+            <button
+              class="btn btn-ghost btn-sm"
+              :disabled="analyzing"
+              title="Update query-planner statistics (ANALYZE)"
+              @click="analyzeDb"
+            >
+              <span v-if="analyzing" class="spinner" style="width:10px;height:10px;border-width:1.5px;margin-right:4px;"></span>
+              {{ analyzing ? 'Analyzing…' : 'Analyze' }}
+            </button>
+            <button
+              class="btn btn-ghost btn-sm"
+              :disabled="vacuumChecking || vacuuming"
+              title="Compact the database file by reclaiming freed pages"
+              @click="vacuumDb"
+            >
+              <span v-if="vacuumChecking || vacuuming" class="spinner" style="width:10px;height:10px;border-width:1.5px;margin-right:4px;"></span>
+              {{ vacuuming ? 'Vacuuming…' : vacuumChecking ? 'Checking…' : 'Vacuum DB' }}
+            </button>
+          </div>
         </div>
+        <div v-if="analyzeSuccess" style="font-size:12px; color:var(--success,#4caf50); padding:0 14px 6px;">{{ analyzeSuccess }}</div>
+        <div v-if="analyzeError" style="font-size:12px; color:var(--danger); padding:0 14px 6px;">{{ analyzeError }}</div>
         <div v-if="vacuumSuccess" style="font-size:12px; color:var(--success,#4caf50); padding:0 14px 6px;">{{ vacuumSuccess }}</div>
         <div v-if="vacuumError" style="font-size:12px; color:var(--danger); padding:0 14px 6px;">{{ vacuumError }}</div>
         <div class="section-title" style="padding: 8px 14px 4px;">Import CSV</div>
@@ -466,6 +479,27 @@ watch(csvDirectLoad, () => {
   csvError.value = ''
   csvSuccess.value = ''
 })
+
+// ── Analyze ────────────────────────────────────────────────────────────────────
+
+const analyzing = ref(false)
+const analyzeError = ref('')
+const analyzeSuccess = ref('')
+
+async function analyzeDb(): Promise<void> {
+  analyzeError.value = ''
+  analyzeSuccess.value = ''
+  analyzing.value = true
+  try {
+    await window.api.analyzeDatabase()
+    analyzeSuccess.value = 'Analyze complete.'
+    setTimeout(() => { analyzeSuccess.value = '' }, 5000)
+  } catch (err) {
+    analyzeError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    analyzing.value = false
+  }
+}
 
 // ── Vacuum ─────────────────────────────────────────────────────────────────────
 type VacuumConfirmState = { wastedBytes: number; wastedPct: number } | null

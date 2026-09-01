@@ -1101,6 +1101,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('db:waste-info', () => db.getDatabaseWasteInfo())
 
   ipcMain.handle('db:vacuum', () => db.vacuumDatabase())
+  ipcMain.handle('db:analyze', () => db.analyzeDatabase())
 
   /** Files larger than this are refused in preview mode to prevent OOM. */
   const CSV_PREVIEW_SIZE_LIMIT = 200 * 1024 * 1024 // 200 MB

@@ -1436,6 +1436,10 @@ export function vacuumDatabase(): void {
   getDb().exec('VACUUM')
 }
 
+export function analyzeDatabase(): void {
+  getDb().exec('ANALYZE')
+}
+
 // ── Scripts ──────────────────────────────────────────────────────────────────
 
 function rowToScript(r: Record<string, unknown>): SavedScript {
