@@ -1241,6 +1241,7 @@ function _importParsed(all: string[][], tableName: string, ifExists: 'replace' |
     for (const row of rows) insert.run(cols.map((_, i) => row[i] ?? null))
   })
   insertMany(dataRows)
+  d.exec(`ANALYZE ${escapeId(tableName)}`)
   return dataRows.length
 }
 
@@ -1403,6 +1404,9 @@ export function importCsvFileStreaming(
       try {
         parser.flush()
         flushBatch()
+        if (cols) {
+          d.exec(`ANALYZE ${escapeId(tableName)}`)
+        }
         doResolve(totalCount)
       } catch (err) {
         doReject(err)
@@ -1438,6 +1442,16 @@ export function vacuumDatabase(): void {
 
 export function analyzeDatabase(): void {
   getDb().exec('ANALYZE')
+}
+
+/**
+ * Run ANALYZE on a single table, refreshing the query planner's statistics
+ * for it (`sqlite_stat1`). Intended to be called automatically after a table
+ * has been (re)populated, e.g. by an extract job or a CSV import, so that
+ * subsequent queries against it benefit from up-to-date planner stats.
+ */
+export function analyzeTable(tableName: string): void {
+  getDb().exec(`ANALYZE ${escapeId(tableName)}`)
 }
 
 // ── Scripts ──────────────────────────────────────────────────────────────────
@@ -1608,6 +1622,8 @@ export function restoreTableIndexes(tableName: string, snapshots: IndexSnapshot[
  * In both cases, if `replace` is true and the table already exists its
  * indexes are snapshotted before the drop and recreated afterwards
  * (skipping any index whose columns no longer exist in the new schema).
+ * Once the table is populated and its indexes are (re)created, `ANALYZE`
+ * is run on it to refresh the query planner's statistics.
  *
  * Returns the number of rows in the resulting table.
  */
@@ -1647,6 +1663,7 @@ export function saveQueryResultToTable(options: {
   if (priorIndexes.length > 0) {
     restoreTableIndexes(tableName, priorIndexes)
   }
+  d.exec(`ANALYZE ${escapeId(tableName)}`)
   const countRow = d.prepare(`SELECT COUNT(*) as cnt FROM ${escapeId(tableName)}`).get() as { cnt: number }
   return countRow.cnt
 }

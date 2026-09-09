@@ -393,6 +393,10 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
           db.dropTableIfExists(job.destTable)
         }
 
+        if (stagingCreated) {
+          db.analyzeTable(job.destTable)
+        }
+
         db.finishRunHistory(runHistId, 'success', total, Date.now() - startTime)
         const result: JobResult = { runId, type: 'extract', status: 'success', rowsLoaded: total }
         send('job:complete', result)
@@ -458,6 +462,7 @@ async function startExtractRun(jobId: number, runId: string): Promise<JobResult>
           },
           abortCtrl.signal
         )
+        db.analyzeTable(job.destTable)
         db.finishRunHistory(runHistId, 'success', total, Date.now() - startTime)
         const result: JobResult = { runId, type: 'extract', status: 'success', rowsLoaded: total }
         send('job:complete', result)
