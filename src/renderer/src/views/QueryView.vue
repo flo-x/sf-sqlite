@@ -614,7 +614,7 @@ function initEditor(): void {
     quickSuggestions: { other: true, comments: false, strings: false },
     suggestOnTriggerCharacters: true,
     acceptSuggestionOnEnter: "on",
-    wordBasedSuggestions: 'on',
+    wordBasedSuggestions: 'currentDocument',
     acceptSuggestionOnCommitCharacter: false,
     quickSuggestionsDelay: 500,
     dragAndDrop: false,
