@@ -73,6 +73,14 @@
           <line x1="12" y1="8" x2="12" y2="14"/><line x1="12" y1="14" x2="5" y2="19"/><line x1="12" y1="14" x2="19" y2="19"/>
         </svg>
       </NavButton>
+      <NavButton to="/spreadsheets" tooltip="Spreadsheets">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <line x1="3" y1="9" x2="21" y2="9"/>
+          <line x1="9" y1="9" x2="9" y2="21"/>
+          <line x1="15" y1="9" x2="15" y2="21"/>
+        </svg>
+      </NavButton>
       <div style="flex:1" />
       <NavButton to="/settings" tooltip="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
