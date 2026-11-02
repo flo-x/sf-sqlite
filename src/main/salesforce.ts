@@ -765,7 +765,19 @@ export async function listObjects(): Promise<SObjectSummary[]> {
     const conn = getConnection()
     const result = await conn.describeGlobal()
     return result.sobjects
-      .filter((o) => o.queryable)
+      .filter((o) => {
+        if (!o.queryable) {
+          return false
+        }
+
+        const isCustomSharingObject =
+          o.name.endsWith('__Share') ||
+          o.name.endsWith('__OwnerSharingRule') ||
+          o.name.endsWith('__CriteriaBasedSharingRule')
+        const isStandardSharingObject = !o.custom && o.name.endsWith('Share')
+
+        return !isCustomSharingObject && !isStandardSharingObject
+      })
       .map(
         (o): SObjectSummary => ({
           name: o.name,

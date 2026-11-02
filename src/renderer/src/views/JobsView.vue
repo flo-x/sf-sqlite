@@ -40,7 +40,7 @@
           {
             selected: selectedJob?.type === entry.type && selectedJob?.id === entry.id,
             running: isEntryRunning(entry),
-            'job-row-detailed': uiPrefs.showJobDetails
+            'job-row-compact': uiPrefs.compactJobList
           }
         ]"
         @click="selectEntry(entry)"
@@ -56,7 +56,6 @@
             <span class="job-row-name">{{ entry.name }}</span>
             <button v-if="entry.comment" class="job-comment-icon" @click.stop="openCommentPopup(entry, $event)" title="Show comment">ⓘ</button>
           </span>
-          <span v-if="uiPrefs.showJobDetails" class="job-row-subtitle">{{ entry.subtitle }}</span>
         </span>
         <span class="job-row-status">
           <span v-if="isEntryRunning(entry)" class="spinner job-row-spinner"></span>
@@ -892,8 +891,6 @@ interface ListEntry {
   id: number
   type: 'extract' | 'writeback'
   name: string
-  /** One-line detail shown below the name when uiPrefs.showJobDetails is on. */
-  subtitle: string
   /** Raw SF object name (or 'SOQL') used for sorting. */
   sortObject: string
   /** Raw job name as entered by the user, used for sorting. */
@@ -914,9 +911,6 @@ const filteredJobs = computed((): ListEntry[] => {
       name: j.soqlQuery
         ? (j.name ? `SOQL: ${j.name}` : 'SOQL')
         : (j.name ? `${j.sfObject}: ${j.name}` : j.sfObject),
-      subtitle: j.soqlQuery
-        ? `SOQL → ${j.destTable || 'sf_results'}`
-        : `${j.sfObject} → ${j.destTable || j.sfObject}`,
       sortObject: j.soqlQuery ? 'SOQL' : j.sfObject,
       sortName: j.name,
       comment: j.comment
@@ -927,7 +921,6 @@ const filteredJobs = computed((): ListEntry[] => {
       id: j.id,
       type: 'writeback',
       name: j.name ? `${j.sfObject}: ${j.name}` : j.sfObject,
-      subtitle: `${j.sfObject}  ${j.operation}`,
       sortObject: j.sfObject,
       sortName: j.name,
       comment: j.comment,
@@ -2450,10 +2443,10 @@ function onDocKeydown(e: KeyboardEvent): void {
 /* ── Job rows ──────────────────────────────────────────────────────────────── */
 .job-row {
   display: flex; flex-direction: row; align-items: center;
-  padding: 2px 8px 2px 6px; cursor: pointer; gap: 5px;
+  padding: 8px 8px 8px 6px; cursor: pointer; gap: 5px;
   border-bottom: 1px solid var(--border);
 }
-.job-row-detailed { align-items: flex-start; padding-top: 4px; padding-bottom: 4px; }
+.job-row-compact { padding-top: 2px; padding-bottom: 2px; }
 .job-row-extract { border-left: 3px solid #0176d3; border-bottom-color: color-mix(in srgb, #0176d3 25%, var(--border)); }
 .job-row-wb { border-left: 3px solid #166534; border-bottom-color: color-mix(in srgb, #166534 25%, var(--border)); }
 .job-row:hover { background: var(--surface2); }
@@ -2464,7 +2457,6 @@ function onDocKeydown(e: KeyboardEvent): void {
 .job-row-extract.running.selected { background: color-mix(in srgb, #0176d3 15%, transparent); }
 .job-row-wb.running.selected { background: color-mix(in srgb, #166534 15%, transparent); }
 .job-row-icons { display: flex; align-items: center; flex-shrink: 0; width: 28px; }
-.job-row-detailed .job-row-icons { align-self: flex-start; margin-top: 2px; }
 .job-row-icon { font-size: 12px; flex-shrink: 0; width: 12px; text-align: center; box-sizing: border-box; }
 .job-row-op-icon { font-family: Georgia, 'Times New Roman', Times, serif; font-size: 13px; font-weight: 700; line-height: 1; flex-shrink: 0; width: 16px; text-align: left; box-sizing: border-box; letter-spacing: -1px; }
 .job-row-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
@@ -2472,19 +2464,16 @@ function onDocKeydown(e: KeyboardEvent): void {
 .job-row-name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); flex: 1; min-width: 0; }
 .job-comment-icon { flex-shrink: 0; background: none; border: none; padding: 0 1px; font-size: 11px; line-height: 1; color: var(--text-muted); cursor: pointer; opacity: 0.6; }
 .job-comment-icon:hover { opacity: 1; }
-.job-row-subtitle { font-size: 10px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 .form-row-h { display: flex; flex-direction: row; gap: 12px; }
 .form-row-h .form-group { flex: 1; min-width: 0; }
 .comment-textarea { width: 100%; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 13px; line-height: 1.4; }
 .job-row-status { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.job-row-detailed .job-row-status { align-self: flex-start; margin-top: 2px; }
 .badge-icon { padding: 1px 5px; font-size: 12px; line-height: 1; }
 .job-row-spinner { width: 10px; height: 10px; border-width: 1.5px; flex-shrink: 0; }
 .job-row-running-label { font-size: 10px; font-weight: 600; color: var(--primary); text-transform: uppercase; letter-spacing: 0.04em; }
 .job-row-queued-label { color: var(--text-muted); }
 .job-row-rows { font-size: 11px; color: var(--text-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .job-run-btn { width: 22px; height: 22px; padding: 0; display: flex; align-items: center; justify-content: center; background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 11px; flex-shrink: 0; }
-.job-row-detailed .job-run-btn { align-self: flex-start; margin-top: 1px; }
 .job-run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .job-run-btn-extract { border-color: color-mix(in srgb, #005fa3 40%, var(--border)); color: #005fa3; }
 .job-run-btn-extract:hover:not(:disabled) { background: color-mix(in srgb, #005fa3 12%, transparent); }

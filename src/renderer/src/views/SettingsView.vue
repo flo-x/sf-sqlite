@@ -49,12 +49,11 @@
         <h3 class="settings-section-title">Job List</h3>
         <div class="settings-row">
           <label class="settings-checkbox-label">
-            <input type="checkbox" v-model="uiPrefs.showJobDetails" />
-            Show job details in the job list
+            <input type="checkbox" v-model="uiPrefs.compactJobList" />
+            Use compact job list spacing
           </label>
           <div class="settings-hint">
-            When enabled, each job displays a second line showing the Salesforce object,
-            the target table (for extraction jobs), or the operation (for writeback jobs).
+            When enabled, each row in the job list uses less vertical space.
           </div>
         </div>
       </section>

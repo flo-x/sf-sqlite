@@ -7,18 +7,21 @@ import { reactive, watch } from 'vue'
 const STORAGE_KEY = 'sf-sqlite-ui-prefs'
 
 interface UiPrefs {
-  /** When true, show a subtitle line per job in the job list. */
-  showJobDetails: boolean
+  /** When true, job list rows use the tighter vertical padding. */
+  compactJobList: boolean
 }
 
 function load(): UiPrefs {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
-      return { showJobDetails: false, ...JSON.parse(raw) }
+      const parsed = JSON.parse(raw) as Partial<UiPrefs> & { relaxedJobList?: boolean }
+      return {
+        compactJobList: parsed.compactJobList ?? (typeof parsed.relaxedJobList === 'boolean' ? !parsed.relaxedJobList : false)
+      }
     }
   } catch { /* ignore */ }
-  return { showJobDetails: false }
+  return { compactJobList: false }
 }
 
 const prefs = reactive<UiPrefs>(load())
