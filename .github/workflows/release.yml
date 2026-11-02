@@ -38,6 +38,9 @@ jobs:
         run: npm ci
 
       - name: Package (arm64)
+        env:
+          # The renderer build pulls in Univer and exceeds Node's default ~2 GB heap on macOS runners.
+          NODE_OPTIONS: --max-old-space-size=4096
         run: npm run build && npx electron-builder --mac --arm64 --publish never
 
       - name: Upload artifacts
@@ -66,6 +69,8 @@ jobs:
         run: npm ci
 
       - name: Package (x64)
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: npm run build && npx electron-builder --mac --x64 --publish never
 
       - name: Upload artifacts
