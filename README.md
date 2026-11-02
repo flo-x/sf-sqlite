@@ -1,6 +1,38 @@
 # SF SQLite Bridge
 
-A desktop application for macOS, Windows and Linux that connects **Salesforce** and **SQLite**. It lets you download Salesforce data into a local SQLite database, query it with SQL or SOQL, write data back to Salesforce, run JavaScript scripts against your data, and get AI-assisted analysis — all from a single interface.
+A desktop app for processing Salesforce data outside the org: pull it into SQLite, work on it in SQL or JavaScript, generate new data, and send it back in one click.
+
+## Why you would use it
+
+Use it when the data processing is best performed outside of Salesforce. Extract records into a local database, process them in SQL or JavaScript, and move the result back with a saved job you can run again in one click.
+
+That is a practical way to create synthetic test data, including for performance testing, and to run transformations, cleansing, or any other processing locally. The same path is built for volume: the SQLite database can handle tens of millions of records, and parallel processing and Bulk API 2.0 can be used for large write-backs.
+
+### Load and send data in a few clicks
+
+Create an extraction job or a write-back job, then run it.
+
+Extraction pulls a Salesforce object, or a full SOQL query, into a SQLite table. You choose the fields, add relationship fields such as `CreatedBy.Name`, and optionally set a filter, a row limit, and indexes. Each run can replace the table or append to it.
+
+Write-back starts from a SQL query. You map columns to Salesforce fields and choose insert, update, upsert, delete, or undelete. Lookup fields can match on an External ID instead of a Salesforce record ID. Large loads can use Bulk API 2.0, and both directions support parallel processing. Once a job is saved, running it again is one click. Failed write-back rows can be retried without rebuilding the job.
+
+### Shape and generate data in place
+
+After the records are in tables, SQL is how you change them: joins, filters, calculated columns, and `CREATE TABLE AS SELECT` to generate a new dataset from the ones you already have. When a step needs logic SQL cannot express, the JavaScript runner works on the same database, row by row. Scripts can also call your saved extract and write-back jobs, so a full load, transform, and send-back sequence can live in one program.
+
+### Ask an assistant that can see the data
+
+The AI assistant reads the schema and can run SQL, explain the results, and draft JavaScript that writes its output back into tables. Use it to understand a dataset, build a query, or sketch a transformation. Statements that change data, and scripts that run, wait for your confirmation. Bring your own model: OpenAI, Anthropic, Mistral, a local Ollama instance, or a LiteLLM proxy.
+
+### Share the workspace as one SQLite file
+
+The database file holds the records and the work around them: extraction and write-back jobs, saved SQL queries, and JavaScript programs. Copy the file and the next person opens the same tables, jobs, and scripts. There is no project folder to assemble and no server to deploy. The app runs on macOS, Windows, and Linux, and connects with OAuth or an org you have already logged into with the Salesforce CLI.
+
+A few things that make the daily work easier:
+
+- The query editor runs SQLite and SOQL in the same place, with saved tabs and a schema browser you can drag fields from.
+- Each job keeps a run history with record counts and errors. Write-back progress can be filtered by status or by error.
+- CSV import and export are still there when a file is the format you need.
 
 ---
 
